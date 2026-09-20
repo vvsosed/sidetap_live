@@ -1700,8 +1700,21 @@ def test_seconds_of_accepts_every_shape_the_sdk_might_use(value, expected):
 
 def test_config_sets_target_and_echo():
     config = build_config(target_lang="ru", echo=True, handle=None)
-    assert config["translation"]["target_language_code"] == "ru"
-    assert config["translation"]["echo_target_language"] is True
+    assert config.translation_config.target_language_code == "ru"
+    assert config.translation_config.echo_target_language is True
+
+
+def test_translation_config_is_top_level_not_under_generation_config():
+    """Regression guard for a silent failure mode.
+
+    GenerationConfig also has a translation_config field, so the nested form
+    type-checks and connects with only a DeprecationWarning - producing a
+    conversational agent instead of an interpreter, with nothing in the logs
+    saying so. See docs/experiments/01-connect.md.
+    """
+    config = build_config(target_lang="ru", echo=False, handle=None)
+    assert config.translation_config is not None
+    assert config.generation_config is None
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1819,26 +1832,40 @@ def parse_message(message) -> list[SessionEvent]:
     return events
 
 
-def build_config(*, target_lang: str, echo: bool, handle: str | None) -> dict:
-    """The session config, as a plain dict.
+def build_config(*, target_lang: str, echo: bool, handle: str | None):
+    """The session config, as the SDK's own typed objects.
 
-    A dict rather than the SDK's typed objects so it can be asserted on in a
-    test with no SDK import, and so the exact field names live in one place -
-    correct them here against docs/experiments/01-connect.md if the SDK
-    disagrees with the REST documentation.
+    MEASURED, not assumed - see docs/experiments/01-connect.md. The REST
+    documentation nests translationConfig under generationConfig; in
+    google-genai 2.24.0 it is a TOP-LEVEL field of LiveConnectConfig,
+    alongside input_audio_transcription and output_audio_transcription.
+
+    That distinction is load-bearing and silent. `GenerationConfig` ALSO
+    exposes a `translation_config` field, so the nested form type-checks AND
+    connects, emitting only a DeprecationWarning. A session built the wrong
+    way does not fail - it comes up as a conversational agent with its own
+    turn-taking instead of an interpreter, which is the exact behaviour this
+    project exists to avoid, with nothing in the logs to say so. Do not
+    "simplify" this by moving the field under generation_config.
+
+    Imported inside the function so the package imports with no SDK present,
+    as with every other third-party dependency here.
     """
-    config: dict = {
-        "response_modalities": ["AUDIO"],
-        "translation": {
-            "target_language_code": target_lang,
-            "echo_target_language": echo,
-        },
-        "input_audio_transcription": {},
-        "output_audio_transcription": {},
-        "context_window_compression": {"sliding_window": {}},
-        "session_resumption": {"handle": handle},
-    }
-    return config
+    from google.genai import types
+
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        translation_config=types.TranslationConfig(
+            target_language_code=target_lang,
+            echo_target_language=echo,
+        ),
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        context_window_compression=types.ContextWindowCompressionConfig(
+            sliding_window=types.SlidingWindow(),
+        ),
+        session_resumption=types.SessionResumptionConfig(handle=handle),
+    )
 
 
 class GeminiLiveSession:
