@@ -25,7 +25,7 @@
 
   {"id": 70, "type": "PipeWire:Interface:Node",
    "info": {"props": {"media.class": "Audio/Sink", "object.serial": 1300,
-     "node.name": "sidetap_duck", "node.description": "sidetap duck"}}},
+     "node.name": "sidetap_live_duck", "node.description": "sidetap_live duck"}}},
   {"id": 701, "type": "PipeWire:Interface:Port",
    "info": {"props": {"node.id": 70, "port.name": "playback_FL", "port.direction": "in"}}},
   {"id": 702, "type": "PipeWire:Interface:Port",

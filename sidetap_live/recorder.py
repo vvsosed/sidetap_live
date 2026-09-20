@@ -94,14 +94,14 @@ class RecorderSpec:
 class Recorder:
     def __init__(self, spec: RecorderSpec, launcher: ProcessLauncher):
         self.spec = spec
-        self.node_name = f"sidetap.{spec.track}.{uuid.uuid4().hex[:8]}"
+        self.node_name = f"sidetap_live.{spec.track}.{uuid.uuid4().hex[:8]}"
         self._launcher = launcher
         self._process: ManagedProcess | None = None
 
     def argv(self) -> list[str]:
         return build_argv(
             node_name=self.node_name,
-            media_name=f"sidetap {self.spec.track}",
+            media_name=f"sidetap_live {self.spec.track}",
             target=self.spec.target,
             capture_sink=self.spec.capture_sink,
             autoconnect=self.spec.autoconnect,

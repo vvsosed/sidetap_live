@@ -2,7 +2,7 @@ from sidetap_live.recorder import build_argv, format_properties
 
 
 def test_always_requests_the_audio_contract():
-    argv = build_argv(node_name="sidetap.mic.abc", media_name="sidetap mic")
+    argv = build_argv(node_name="sidetap_live.mic.abc", media_name="sidetap_live mic")
 
     # PipeWire does the resampling and downmixing for us. Nothing downstream
     # is allowed to assume any other format.
@@ -119,7 +119,7 @@ def test_recorder_node_names_are_unique():
     b = Recorder(RecorderSpec(track="mic"), None)
 
     assert a.node_name != b.node_name
-    assert a.node_name.startswith("sidetap.mic.")
+    assert a.node_name.startswith("sidetap_live.mic.")
 
 
 def test_recorder_yields_blocks_from_the_process(fake_launcher):

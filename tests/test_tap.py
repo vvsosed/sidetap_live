@@ -7,7 +7,7 @@ from sidetap_live.ports import LinkResult
 from sidetap_live.tap import GRAPH_ERROR_WARN_AFTER, POLL_INTERVAL_S, AppTap
 from tests.conftest import FakeClock, FakeGraphSource, FakeLinker
 
-CAPTURE_NODE = "sidetap.remote.deadbeef"
+CAPTURE_NODE = "sidetap_live.remote.deadbeef"
 
 
 def with_capture_node(graph: PwGraph) -> PwGraph:
