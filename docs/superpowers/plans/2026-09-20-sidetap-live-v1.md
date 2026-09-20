@@ -58,6 +58,33 @@ Never modify `$SIDETAP` except in Task 31, which is explicitly cross-repo.
 
 **Do not run `gcloud auth ...`.** This machine is attached to a live GCP project and re-authenticating has broken it before. This project does not use GCP credentials at all — it uses `GEMINI_API_KEY`.
 
+## Appending tests to a ported file: check the function names first
+
+When a task says "append to `tests/test_x.py`", the file may already contain a
+test of the same name from the port. Python does not error on two top-level
+`def`s with the same name — the second rebinds the first, and **pytest silently
+collects only the last one.** The earlier test vanishes from the suite while
+everything still reports PASS.
+
+This actually happened: Task 13's `test_fakes_satisfy_their_protocols` collided
+with the ported one in `tests/test_ports.py`, and appending it verbatim dropped
+the original Protocol-conformance test — a silent loss of coverage that no
+failure would have surfaced. The new one was renamed to
+`test_session_fakes_satisfy_their_protocols`.
+
+Before appending, run:
+
+```bash
+grep -oE '^def (test_[a-z0-9_]+)' tests/test_x.py | sort | uniq -d
+```
+
+after the append, and confirm it prints nothing. Rename the NEW test if it
+clashes; never delete the existing one to make room.
+
+The remaining tasks that append to ported test files — 22, 24, 25, 26, 27 —
+have been checked against their upstream counterparts and are collision-free
+as written.
+
 ## The package rename is not just imports — read this before any port task
 
 Every port task below runs a `sed` over `from sidetap.` / `import sidetap`. **That sed is necessary but not sufficient.** Two other things carry the string `sidetap` and they must be treated differently from each other:
