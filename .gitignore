@@ -219,3 +219,7 @@ __marimo__/
 
 # superpowers brainstorming scratch
 .superpowers/
+
+# experiment audio - large binaries, regenerate locally
+tests/fixtures/*.raw
+docs/experiments/audio/
