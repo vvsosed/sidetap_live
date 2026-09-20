@@ -123,38 +123,71 @@ talking" cue that hard replacement destroys.
 Booth mode stays one flag away. `--duck-level` defaults to `0.0`; `0.2` is the
 booth.
 
-### Session continuity: rotate at a pause
+### Session continuity: make before break
 
-A Live API WebSocket lives about ten minutes. An hour-long call crosses that
-boundary five or six times, and the conversation does not care. `GoAway` warns
-us with a `timeLeft` before the connection drops.
+**REVISED 2026-09-20 after experiment 2. The original decision was to rotate
+into a conversational pause; it was wrong, and the measurement is unambiguous.**
 
-- **Serial reconnect.** Tear down, reconnect with a resumption handle, buffer
-  captured audio across the dead window and replay it. Simplest, and the only
-  option with an unconditionally audible hole.
-- **Make-before-break.** Open the next session ~30 s early, feed both the same
-  audio, switch at a clean boundary. No hole, ~5% extra input audio. Rejected:
-  its failure mode is worse than the hole it prevents — hearing the same
-  sentence twice in two slightly different renderings is more disorienting than
-  a gap, and it is a bug that can only appear on a live call, because a fake
-  will always switch cleanly. It also doubles the live state at exactly the
-  moment things are going wrong.
-- **Rotate at a pause — chosen.** On `GoAway`, wait for the first silence
-  longer than `ROTATE_PAUSE_S` (0.7 s) and rotate there, so the discontinuity
-  falls where nobody was speaking. If no pause arrives before `timeLeft` is
-  exhausted, degrade to serial reconnect.
+A Live API WebSocket lives about ten minutes. Experiment 3 measured the exact
+terms: `go_away` arrives at t=540 s carrying `time_left='50s'`, and the server
+aborts with code 1008 if the client has not closed by then. An hour-long call
+crosses that boundary five or six times.
 
-This rests on an assumption that is named here so it can be falsified:
-**literal interpretation carries almost no context across a sentence
-boundary**, so a fresh session loses nothing a resumption handle would have
-preserved. If it turns out the model uses cross-sentence context — plausible
-for EN↔RU, where Russian past-tense verbs are gendered and the antecedent
-fixing that gender may be two sentences back — every rotation degrades a
-sentence or two, and the choice moves to serial reconnect with handles.
+**Why rotate-at-a-pause failed.** It rested on the claim that a seam placed in
+a silence is inaudible. Experiment 2 measured the seam it actually produces:
 
-`contextWindowCompression` is enabled regardless of this choice. It addresses
-the *other* cap: without it an audio-only session dies at 15 minutes even if
-the connection survives.
+| | |
+|---|---|
+| silence the rotation produced | **3.12 s** |
+| pause it was deliberately placed in | 0.80 s |
+| longest silence anywhere in the unrotated run | 0.60 s |
+
+The hole is nearly four times larger than the pause meant to hide it, because
+**a freshly opened session needs ~3 s before it emits any audio at all** —
+3.06 s measured in `live.py`'s smoke check, 3.54 s in a raw SDK probe. That is
+not connection latency (~500 ms, experiment 1); it is the model's own lead-in.
+No pause in ordinary speech is long enough to conceal it. A listener confirmed
+the seam is audible in the rotated run and not in the continuous one.
+
+**The chosen strategy is make-before-break.** On `GoAway`:
+
+1. Open the replacement session immediately and feed it the **same** audio as
+   the live one. Both are now hearing the conversation.
+2. Discard the replacement's output while it warms up. Its first ~3 s of
+   output covers audio the live session has already translated and spoken.
+3. Switch playout to the replacement once **both** conditions hold: it has
+   produced energy-bearing output (so it is warm), and the outgoing session's
+   output is currently silent (so the join lands in a gap).
+4. Close the outgoing session. Closing is mandatory, not tidy-up — an
+   unclosed connection takes a 1008 abort at the deadline.
+
+There is no hole, because the replacement was already producing before the
+switch. The overlap costs ~5 s of doubled input audio per rotation, about half
+a cent an hour.
+
+**Finding the join point is easy in a way finding a source pause was not.**
+The original design had to wait for the speaker to stop; experiment 2 counted
+only 11 pauses of ≥0.4 s in 96 s of dense speech, and just 2 reaching the 0.7 s
+the design wanted. But this design waits for a gap in the *output* stream, and
+the same run contained **154 internal output silences**. A join point is
+always a second or two away.
+
+**What this removes.** `ROTATE_PAUSE_S` and the clean/forced rotation
+distinction both go: every rotation is now overlapped, so there is no degraded
+path to fall back to and nothing to count separately. The pre-roll ring
+survives, but for one consumer rather than two — waking a suspended session.
+Crossing a seam no longer replays anything, because nothing was missed.
+
+**What was rejected, and why the rejection reversed.** This document originally
+argued against make-before-break on the grounds that hearing a sentence twice
+is more disorienting than a gap. That reasoning assumed a sub-second gap. At
+3.12 s it does not hold, and the double-speak risk is contained by discarding
+the replacement's output until the switch — by which point it is producing in
+real time, not replaying.
+
+`contextWindowCompression` is enabled regardless. It addresses the other cap:
+without it an audio-only session dies at 15 minutes even if the connection
+survives.
 
 ### No gate on the audio stream
 
@@ -351,31 +384,38 @@ One state machine per direction, in `interpreter.py`:
 ```
   SUSPENDED ──speech onset──> OPENING ──ready──> RUNNING
       ^                          ^                 │
-      │                          │            GoAway(timeLeft)
+      │                          │            GoAway(time_left)
       └──idle > IDLE_SUSPEND_S───┼─────────────────┤
                                  │                 v
-                                 └──────────── DRAINING
-                                  (pause found, or timeLeft
-                                   exhausted → replay pre-roll)
+                                 └────────── OVERLAPPING
+                                   (both sessions fed; switch when the
+                                    replacement is warm AND the outgoing
+                                    output is silent, then close outgoing)
 ```
 
-- **RUNNING** — audio streams continuously to the session; events pump out to
-  playout, transcript and metrics.
-- **DRAINING** — `GoAway` has arrived. Audio still goes to the old session
-  while `activity.py` watches for a silence of `ROTATE_PAUSE_S`. On finding
-  one, open the replacement and switch with nothing to replay. On `timeLeft`
-  expiring first, switch anyway and replay the pre-roll buffer into the new
-  session.
+- **RUNNING** — audio streams continuously to one session; its events pump out
+  to playout, transcript and metrics.
+- **OVERLAPPING** — `GoAway` has arrived. A replacement is opened at once and
+  **every captured block is sent to both sessions.** The replacement's output
+  is discarded. The switch happens when both hold: the replacement has emitted
+  energy-bearing audio (it is warm, ~3 s), and the outgoing session's output is
+  currently silent (the join lands in a gap). The outgoing session is then
+  closed — mandatory, or it takes a 1008 abort at the deadline.
 - **SUSPENDED** — no session at all, after `IDLE_SUSPEND_S` of silence. Capture
   keeps running and keeps filling the pre-roll ring; the first speech onset
   opens a session and replays the ring so the onset is not lost.
 
-A **3-second pre-roll ring buffer** serves both non-ideal paths — waking from
-suspend, and crossing a forced seam. The happy path replays nothing, because
-nothing was being said.
+`OVERLAP_MAX_S` (15 s) bounds the overlap. If no output gap has appeared by
+then, switch anyway — a join mid-word is worse than nothing, but far better
+than overrunning the 50 s deadline and losing the connection outright. That
+case is counted separately (see below), because a run where most rotations hit
+the bound means the join-point rule needs revisiting.
 
-`--no-idle-suspend` disables suspension for a run where the wake latency would
-confound a measurement.
+**The pre-roll ring now has one consumer, not two.** Waking a suspended session
+still replays it, because the speech that triggered the wake happened before
+there was a session to send it to. Rotation replays nothing: the replacement
+has been hearing the conversation for seconds before it takes over. That is the
+whole point of overlapping.
 
 ## Playout and the duck
 
