@@ -384,6 +384,42 @@ with known durations and drops the oldest past a 20 s lag cap; there are no
 utterances here. It becomes a chunk queue with a writer thread, and `pw-cat`'s
 own buffer provides realtime pacing for free.
 
+**AMENDED 2026-09-20 after experiments 2 and 3: the duck triggers on audio
+ENERGY, not on bytes arriving.**
+
+This section originally said the duck closes when translated audio starts
+flowing and opens when it stops. That rests on an assumption the measurements
+falsified: that the model goes quiet when it has nothing to translate. It does
+not. `gemini-3.5-live-translate-preview` emits a **continuous 24 kHz output
+stream regardless of whether it is translating anything** — experiment 3 fed
+154 s of pure digital silence and got ~151 s of audio back, and experiment 2
+fed 96.2 s of speech already in the target language (so `echo_target_language:
+false` correctly suppressed translation) and still got 98.2 s of output.
+
+That output is not silence, either. It is low-level non-zero: peak 1078 of
+32767 across a 98 s run, with 0.4% of samples non-zero.
+
+Keyed on byte presence, the duck would therefore close on the first chunk and
+**never reopen for the rest of the call** — the user would hear nothing from
+the remote party at all. That is exactly the "stuck closed" failure this
+document elsewhere calls silently cruel, reached from a direction the original
+design did not anticipate.
+
+The fix is contained, because the machinery already exists: `playout.py`'s
+`find_silence_boundary` computes peak amplitude over 20 ms frames for the lag
+cap, and the duck simply has to use the same measure. Note the originally
+proposed `SILENCE_PEAK = 600` is **too low** — the measured idle peak of 1078
+would read as speech. Experiment 2's re-run reports the energy distribution
+when idle versus when actively translating, and the threshold is set from that
+gap rather than guessed.
+
+This also revises the cost model. Output billing is not proportional to speech,
+because output never stops: a session held open through a conversational pause
+bills output continuously at $0.0315/min. Idle-suspend covers gaps beyond
+`IDLE_SUSPEND_S`, but not ordinary within-call pauses, so the "ordinary
+conversation" row in *Latency and cost* understates the real figure. It will be
+restated once experiment 4 measures the duty cycle.
+
 **The duck is driven from this queue, with hysteresis.** It closes on the first
 chunk enqueued and opens only after `DUCK_HOLD_S` (0.4 s) with nothing queued
 *and* nothing playing. Without the hold it flaps in the gaps between chunks and
