@@ -1,4 +1,4 @@
-"""Real implementations of every port except Recognizer.
+"""Real implementations of every port.
 
 Every subprocess on the *audio path* is started here, behind a port, which is
 what lets the rest of the package be tested against fakes with no hardware.
