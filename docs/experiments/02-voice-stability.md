@@ -1,6 +1,44 @@
 # Experiment 2: does the output voice survive a session rotation?
 
-**Inconclusive from automated analysis alone — a human must listen to confirm.** No objective signal (seam-window energy, discontinuity/"click" magnitude, a coarse pitch proxy) shows anything abnormal at the seam, and the seam itself lands in genuine silence on both sides with no audible-looking artifact. But none of those signals can detect a timbre or gender change — that requires an ear. Listen with the `pw-cat` commands at the bottom of this doc before relying on this experiment to settle the seam-strategy question.
+**RESOLVED by listening, 2026-09-20: the voice survives the rotation — the
+speaker sounds like the same person on both sides of the seam — but the
+rotated audio carries audible defects.**
+
+The seam-strategy question this experiment was built to answer is therefore
+settled in the design's favour: rotate-at-a-pause does NOT make the voice
+shift, so the spec's *Session continuity* decision stands and does not become
+make-before-break.
+
+The defects are a separate, smaller matter. Measured over the full runs:
+
+| | continuous | rotated |
+|---|---|---|
+| mid-speech dropouts (40 ms silence between loud frames) | 3 | 9 |
+| discontinuities (sample-to-sample jump > 12000) | 15 | 26 |
+| clipping | 0% | 0% |
+
+Seven of the rotated run's 26 discontinuities fall within 1.5 s of the seam at
+t=34.25 s. Spread evenly across 99 s, a 3 s window would hold about one — so
+that cluster is roughly 9x baseline and genuinely seam-local.
+
+Two conclusions, and they are different in kind:
+
+1. **The model drops audio mid-speech on its own.** The continuous run — no
+   rotation anywhere — dropped at 2.5 s, 48.9 s and 57.7 s. This is a baseline
+   synthesis-quality property, not a rotation artifact, and it belongs in the
+   head-to-head against the cascade rather than in the seam design.
+2. **Rotation roughly triples the defect rate and adds a local burst.** At one
+   rotation per ~9 minutes that is a brief sub-second glitch six times an
+   hour. Accepted for v1 and recorded here rather than engineered away; if it
+   proves intrusive in a real call, make-before-break (spec option B) is the
+   remedy, and it is now a quality trade rather than a correctness one.
+
+Caveat on strength of evidence: one run each, and a generative model has
+run-to-run variance, so the 3-vs-9 ratio should not be read as precise. The
+seam-local clustering is the more robust signal.
+
+(Superseded first line, kept for provenance: inconclusive from automated
+analysis alone — a human must listen to confirm.) No objective signal (seam-window energy, discontinuity/"click" magnitude, a coarse pitch proxy) shows anything abnormal at the seam, and the seam itself lands in genuine silence on both sides with no audible-looking artifact. But none of those signals can detect a timbre or gender change — that requires an ear. Listen with the `pw-cat` commands at the bottom of this doc before relying on this experiment to settle the seam-strategy question.
 
 A second, unplanned finding turned out to matter more for the playout design: **the model emits a continuous 24 kHz output byte stream almost the entire time a session is open, whether or not it has anything to say.** See [Continuous output stream](#continuous-output-stream) below — this affects the ducking design regardless of how the voice-stability question resolves.
 
