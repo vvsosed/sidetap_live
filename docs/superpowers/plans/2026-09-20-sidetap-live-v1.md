@@ -12,6 +12,34 @@
 
 ---
 
+## Execution status — as of 2026-09-20, branch `sidetap-live-v1`
+
+**156 tests pass** with no audio hardware, no network and no credentials.
+
+| Task | State |
+|---|---|
+| 1 (Steps 1–3, skeleton) | done — `google-genai` resolved to **2.24.0** |
+| 1 (Steps 4–7), 2, 3, 4, 5, 6 | **blocked**: need `GEMINI_API_KEY` and `tests/fixtures/speech_en_16k.raw` |
+| 7, 8, 9, 10, 11 — Phase 1 port | done |
+| 12 `activity.py`, 15 `cost.py`, 16 `preroll.py`, 23 `OverlapWatch` | done |
+| 13, 14, 17–22, 24–30 | **held behind the Task 6 checkpoint** |
+
+Phase 1 was run **before** Phase 0, deviating from the ordering above. That gate exists to stop Phases 2+ being built on an unmeasured seam design; Phase 1 is a mechanical copy of the PipeWire layer that no experiment outcome can invalidate. Tasks 12, 15, 16 and 23 were run for the same reason — a ring buffer, a rate table, a VAD wrapper and a time integral depend on none of the six measurements.
+
+**What each held task is actually waiting on**, so the gate is not mistaken for caution:
+
+- **13, 14** — the SDK's real config shape. The `build_config` and `parse_message` code in this plan was written from the REST documentation (`translationConfig`, `targetLanguageCode`, `inputAudioTranscription`). `google-genai` 2.24.0 may name or nest these differently, and `parse_message` additionally depends on where transcription fields sit on a message object. Task 1 Step 5 and Task 5 Step 3 settle both.
+- **17, 18** — experiment 4's output pacing. Whether the input/output ratio exceeds 1.0 decides if `--lag-cap` is load-bearing or a safety valve that never fires.
+- **19–21** — experiment 2's seam verdict. The model card warns voices may shift after long pauses and this design rotates *at* pauses. If the voice changes at the seam, the state machine these tasks build is the wrong one and the spec's *Session continuity* decision reopens.
+
+**Two amendments already made to this plan during execution**, both committed: the package-rename preamble (the `sed` misses `monkeypatch` dotted-path string literals, and must not touch PipeWire node names), and Task 8's "three Protocols" typo for four.
+
+**One decision taken that this plan did not anticipate**, applied in Task 10: anything this process creates in the PipeWire graph gets this program's name — `sidetap_live_duck`, `sidetap_live.<track>.<uuid>` capture nodes, `~/.local/state/sidetap_live/` journal — while the permanent shared virtual mic keeps sidetap's (`sidetap_virtmic`, `sidetap_tts_sink`, `90-sidetap-mic.conf`, all byte-identical). Without this the head-to-head produces two programs whose graph nodes cannot be told apart, and either program's `doctor --repair` could tear down the other's live duck. `recorder.py` is consequently no longer byte-identical to sidetap's.
+
+**One external change to watch:** `sidetap` gained 17 commits on a branch `streaming-playout` during this session. Task 18's premise — "sidetap queues whole utterances" — describes sidetap's `main`, not that branch. If it lands, re-read sidetap's `playout.py` and update both Task 18 and the spec's *Playout and the duck* comparison before implementing.
+
+---
+
 ## Read this before Task 1
 
 **The source repository is `/home/vvsosed/Documents/repo2/sidetap`.** It is referred to below as `$SIDETAP`. Set it once per shell:
