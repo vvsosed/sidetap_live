@@ -30,6 +30,22 @@ Never modify `$SIDETAP` except in Task 31, which is explicitly cross-repo.
 
 **Do not run `gcloud auth ...`.** This machine is attached to a live GCP project and re-authenticating has broken it before. This project does not use GCP credentials at all — it uses `GEMINI_API_KEY`.
 
+## The package rename is not just imports — read this before any port task
+
+Every port task below runs a `sed` over `from sidetap.` / `import sidetap`. **That sed is necessary but not sufficient.** Two other things carry the string `sidetap` and they must be treated differently from each other:
+
+1. **Dotted-path string literals**, chiefly `monkeypatch.setattr("sidetap.adapters.something", ...)`. These are import paths written as strings, so the sed's `\bfrom sidetap\.` anchor never sees them. Left alone they raise `ModuleNotFoundError` at test time. **These must be renamed to `sidetap_live.`.** Found in `test_adapters.py`, and still to come in `test_doctor.py`, `test_routing.py` and `test_cli.py`.
+
+2. **PipeWire node names**, e.g. `f"sidetap.{spec.track}.{uuid}"` in `recorder.py` and the `"sidetap.remote.deadbeef"` fixtures in `test_tap.py`/`test_recorder.py`. These are *runtime identifiers in the audio graph*, not import paths. Task 10 decides what this program calls itself in the graph; until then, do not touch them.
+
+So after running the prescribed sed, always run:
+
+```bash
+grep -rnE '["'"'"']sidetap\.' sidetap_live/ tests/
+```
+
+and **classify every hit by hand**. A blind second sed would rename the node names too and break the recorder and tap tests for the wrong reason.
+
 ---
 
 ## File Structure
@@ -852,7 +868,7 @@ sed -i 's/\bfrom sidetap\./from sidetap_live./g' tests/conftest.py
 
 - [ ] **Step 4: Remove the dangling type imports**
 
-`ports.py` imports `AsrResult` and `Unit` from `types.py`, which Task 7 deleted. Delete these three Protocols from `sidetap_live/ports.py` entirely — `Recognizer`, `Segmenter`, `Translator`, `Synthesizer` — and drop the now-unused import line `from .types import AsrResult, Unit`.
+`ports.py` imports `AsrResult` and `Unit` from `types.py`, which Task 7 deleted. Delete these four Protocols from `sidetap_live/ports.py` entirely — `Recognizer`, `Segmenter`, `Translator`, `Synthesizer` — and drop the now-unused import line `from .types import AsrResult, Unit`.
 
 In `tests/conftest.py`, delete `FakeTranslator`, `FakeSynthesizer`, `FakeRecognizer` and the `from sidetap_live.types import AsrResult` import.
 
