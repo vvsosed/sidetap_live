@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import queue
 import threading
 from pathlib import Path
 from typing import Sequence
@@ -11,6 +12,7 @@ import pytest
 
 from sidetap_live.graph import PwGraph, parse_graph
 from sidetap_live.ports import LinkResult, LoopbackSpec
+from sidetap_live.types import TARGET_RATE
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -260,3 +262,59 @@ def zoom_graph() -> PwGraph:
 @pytest.fixture
 def routing_graph() -> PwGraph:
     return load_graph("pw_dump_routing.json")
+
+
+class FakeSession:
+    """Scriptable InterpreterSession.
+
+    Events queued before or during the test are yielded by events(); close()
+    makes the iterator return, which is what lets a rotation test assert the
+    old receive thread actually exits.
+    """
+
+    def __init__(self, *events):
+        self.sent = bytearray()
+        self.closed = False
+        self._events: queue.Queue = queue.Queue()
+        for event in events:
+            self._events.put(event)
+
+    def send(self, pcm: bytes) -> None:
+        assert not self.closed, "sent to a closed session"
+        self.sent.extend(pcm)
+
+    def emit(self, event) -> None:
+        """Push an event from the test, mid-run."""
+        self._events.put(event)
+
+    def events(self):
+        while True:
+            try:
+                yield self._events.get(timeout=0.02)
+            except queue.Empty:
+                if self.closed:
+                    return
+
+    def close(self) -> None:
+        self.closed = True
+
+    @property
+    def sent_s(self) -> float:
+        return len(self.sent) / (TARGET_RATE * 2)
+
+
+class FakeSessionFactory:
+    def __init__(self):
+        self.sessions: list[FakeSession] = []
+        self.opens: list[tuple[str, bool, str | None]] = []
+
+    def open(self, target_lang: str, *, echo: bool, handle: str | None = None):
+        self.opens.append((target_lang, echo, handle))
+        session = FakeSession()
+        self.sessions.append(session)
+        return session
+
+
+@pytest.fixture
+def fake_sessions() -> FakeSessionFactory:
+    return FakeSessionFactory()

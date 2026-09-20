@@ -46,3 +46,18 @@ def test_fake_processes_satisfy_their_protocols():
 
     assert isinstance(FakeProcess(io.BytesIO(b"")), ManagedProcess)
     assert isinstance(FakeWritableProcess(), WritableProcess)
+
+
+from sidetap_live.ports import InterpreterSession, SessionFactory
+from tests.conftest import FakeSession, FakeSessionFactory
+
+
+def test_session_fakes_satisfy_their_protocols():
+    assert isinstance(FakeSession(), InterpreterSession)
+    assert isinstance(FakeSessionFactory(), SessionFactory)
+
+
+def test_close_ends_the_event_iterator():
+    session = FakeSession()
+    session.close()
+    assert list(session.events()) == []

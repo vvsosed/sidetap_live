@@ -13,6 +13,7 @@ from enum import Enum
 from typing import BinaryIO, Iterator, Protocol, Sequence, runtime_checkable
 
 from .graph import PwGraph
+from .types import SessionEvent
 
 
 class LinkResult(Enum):
@@ -131,4 +132,36 @@ class Clock(Protocol):
         promptness is the whole point of using this instead of `sleep` in a
         poll loop that a shutdown needs to interrupt.
         """
+        ...
+
+
+@runtime_checkable
+class InterpreterSession(Protocol):
+    """One live speech-to-speech translation session.
+
+    Synchronous on purpose. The SDK underneath is asyncio-native, but the
+    whole ported audio layer is subprocess-and-thread shaped, so the asyncio
+    island is confined inside the real implementation (live.py) rather than
+    leaking into every consumer.
+    """
+
+    def send(self, pcm: bytes) -> None:
+        """Queue 100 ms of 16 kHz s16 mono. Never blocks the caller."""
+        ...
+
+    def events(self) -> Iterator[SessionEvent]:
+        """Yield until the session ends. Returns when it has."""
+        ...
+
+    def close(self) -> None:
+        """Tear down. Makes `events()` return."""
+        ...
+
+
+@runtime_checkable
+class SessionFactory(Protocol):
+    def open(
+        self, target_lang: str, *, echo: bool, handle: str | None = None
+    ) -> InterpreterSession:
+        """`handle` resumes a previous session; None starts a fresh one."""
         ...

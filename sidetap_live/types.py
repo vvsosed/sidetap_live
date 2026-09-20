@@ -114,3 +114,54 @@ class TranscriptEvent:
     direction: Direction
     kind: str
     text: str
+
+
+@dataclass(frozen=True)
+class AudioOut:
+    """Translated audio, 24 kHz s16 mono, straight from the model."""
+
+    pcm: bytes
+
+
+@dataclass(frozen=True)
+class SourceText:
+    """A fragment of inputAudioTranscription - what the speaker said."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class TargetText:
+    """A fragment of outputAudioTranscription - what was spoken back."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class GoAway:
+    """The connection will end in `time_left_s`. The window to rotate in."""
+
+    time_left_s: float
+
+
+@dataclass(frozen=True)
+class ResumptionHandle:
+    """A handle the forced-seam fallback can reconnect with.
+
+    Kept even though rotate-at-a-pause does not normally use it: a handle
+    cannot be requested once GoAway has already arrived.
+    """
+
+    handle: str
+
+
+@dataclass(frozen=True)
+class Closed:
+    """The session ended. `reason` is for the log and the health flag."""
+
+    reason: str
+
+
+SessionEvent = (
+    AudioOut | SourceText | TargetText | GoAway | ResumptionHandle | Closed
+)
