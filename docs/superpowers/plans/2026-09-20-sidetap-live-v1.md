@@ -3161,7 +3161,18 @@ git add sidetap_live/interpreter.py tests/test_interpreter.py
 git commit -m "Add DirectionInterpreter: open, send, idle-suspend"
 ```
 
-### Task 20: Rotation — clean at a pause, forced at the deadline
+### Task 20: Rotation — make before break
+
+**This task was rewritten after experiment 2.** It originally built
+rotate-at-a-pause: wait for a silence in the INPUT, then swap sessions. The
+measurement killed it — that produces a 3.12 s hole against a 0.80 s pause,
+because a fresh session needs ~3 s before it emits anything. See the spec's
+*Session continuity*.
+
+The replacement is opened on `GoAway` and fed the **same audio** as the live
+one while its output is discarded. Playout switches once the replacement is
+warm and the outgoing output is silent. There is no hole, because the
+replacement was already producing.
 
 **Files:**
 - Modify: `sidetap_live/interpreter.py`
@@ -3172,78 +3183,136 @@ git commit -m "Add DirectionInterpreter: open, send, idle-suspend"
 Append to `tests/test_interpreter.py`:
 
 ```python
-from sidetap_live.types import ROTATE_PAUSE_S, GoAway
+from sidetap_live.types import OVERLAP_MAX_S, AudioOut, GoAway
+
+LOUD = b"\x00\x40" * 600       # 24 kHz s16, peak 0x4000 - reads as speech
+QUIET = b"\x00\x00" * 600      # reads as silence
 
 
-def goaway(interpreter, seconds):
-    """Record a GoAway the way the receive thread would."""
-    interpreter.note_goaway(GoAway(time_left_s=seconds))
+def goaway(interpreter, seconds=50.0):
+    interpreter.note_event(GoAway(time_left_s=seconds))
 
 
-def test_goaway_moves_to_draining_without_rotating_yet():
+def test_goaway_opens_a_replacement_at_once():
+    """No waiting for a pause: the replacement needs ~3s to warm up, so it
+    must start warming the moment the window opens."""
     interpreter, sessions, _, _ = build()
     interpreter.feed(block(SPEECH))
-    goaway(interpreter, 30.0)
+    goaway(interpreter)
     interpreter.feed(block(SPEECH))
-    assert interpreter.state is SessionState.DRAINING
-    assert len(sessions.sessions) == 1
+
+    assert interpreter.state is SessionState.OVERLAPPING
+    assert len(sessions.sessions) == 2
+    assert sessions.opens[1] == ("en", False, None)
 
 
-def test_a_pause_rotates_cleanly_and_replays_nothing():
+def test_both_sessions_are_fed_while_overlapping():
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    before = len(sessions.sessions[0].sent)
+    interpreter.feed(block(SPEECH))
+    interpreter.feed(block(SPEECH))
+
+    assert len(sessions.sessions[0].sent) == before + 2 * BLOCK_BYTES
+    assert len(sessions.sessions[1].sent) == 2 * BLOCK_BYTES
+
+
+def test_the_replacements_output_is_discarded_until_it_takes_over():
+    """Its first seconds translate audio the live session already spoke."""
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+
+    interpreter.note_event_from(sessions.sessions[1], AudioOut(pcm=LOUD))
+    assert interpreter._playout.backlog_s() == 0.0
+
+
+def test_switch_needs_the_replacement_warm_and_the_outgoing_silent():
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+
+    # Outgoing still speaking: no switch even though the replacement is warm.
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    interpreter.note_event_from(old, AudioOut(pcm=LOUD))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.OVERLAPPING
+    assert old.closed is False
+
+    # Outgoing falls silent: switch.
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+    assert old.closed is True
+
+
+def test_a_cold_replacement_does_not_take_over_however_quiet_it_is():
+    """Switching to a session that is not yet producing reintroduces the
+    3-second hole this design exists to remove."""
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, _ = sessions.sessions
+
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.OVERLAPPING
+    assert old.closed is False
+
+
+def test_the_overlap_is_bounded_and_a_bounded_switch_counts_as_forced():
     interpreter, sessions, metrics, clock = build()
     interpreter.feed(block(SPEECH))
-    goaway(interpreter, 30.0)
-    clock.advance(ROTATE_PAUSE_S + 0.1)
-    interpreter.feed(block(SILENCE))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    # Outgoing never falls silent.
+    interpreter.note_event_from(old, AudioOut(pcm=LOUD))
+    clock.advance(OVERLAP_MAX_S + 1)
+    interpreter.feed(block(SPEECH))
 
     assert interpreter.state is SessionState.RUNNING
-    assert len(sessions.sessions) == 2
-    assert sessions.sessions[0].closed is True
-    # A fresh session, not a resumed one: the pause is the whole point.
-    assert sessions.opens[1] == ("en", False, None)
+    assert old.closed is True
+    state = metrics.snapshot().directions[Direction.IN]
+    assert (state.rotations, state.forced_rotations) == (1, 1)
+
+
+def test_a_clean_switch_is_not_counted_as_forced():
+    interpreter, sessions, metrics, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
+    interpreter.feed(block(SPEECH))
 
     state = metrics.snapshot().directions[Direction.IN]
     assert (state.rotations, state.forced_rotations) == (1, 0)
     assert state.replayed_s == 0.0
 
 
-def test_the_deadline_forces_a_rotation_that_replays_the_preroll():
-    interpreter, sessions, metrics, clock = build()
+def test_rotation_replays_no_preroll():
+    """The replacement has been listening for seconds; there is nothing it
+    missed. Only an idle-suspend wake replays."""
+    interpreter, sessions, _, _ = build()
     interpreter.feed(block(SPEECH))
-    interpreter.note_handle("h-1")
-    goaway(interpreter, 1.0)
-    clock.advance(2.0)
-    # Still speaking, so no pause has arrived.
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+    sent_before_switch = len(new.sent)
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
     interpreter.feed(block(SPEECH))
 
-    assert len(sessions.sessions) == 2
-    # Forced seams resume, because there is context mid-sentence to keep.
-    assert sessions.opens[1] == ("en", False, "h-1")
-    state = metrics.snapshot().directions[Direction.IN]
-    assert (state.rotations, state.forced_rotations) == (1, 1)
-    assert state.replayed_s > 0.0
-
-
-def test_a_forced_rotation_loses_no_audio():
-    interpreter, sessions, _, clock = build()
-    for _ in range(5):
-        interpreter.feed(block(SPEECH))
-    interpreter.note_handle("h-1")
-    goaway(interpreter, 1.0)
-    clock.advance(2.0)
-    interpreter.feed(block(SPEECH))
-    # The pre-roll (1 s = 10 blocks, but only 6 were ever captured) is pushed
-    # into the new session ahead of the block that triggered the rotation.
-    assert len(sessions.sessions[1].sent) >= 6 * BLOCK_BYTES
-
-
-def test_without_a_detector_every_rotation_is_forced():
-    interpreter, sessions, metrics, clock = build(speaking=False)
-    interpreter.feed(block(SILENCE))
-    goaway(interpreter, 1.0)
-    clock.advance(2.0)
-    interpreter.feed(block(SILENCE))
-    assert metrics.snapshot().directions[Direction.IN].forced_rotations == 1
+    # Exactly one more block - the one that drove the switch. No replay burst.
+    assert len(new.sent) == sent_before_switch + BLOCK_BYTES
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -3252,71 +3321,137 @@ def test_without_a_detector_every_rotation_is_forced():
 uv run pytest tests/test_interpreter.py -q
 ```
 
-Expected: FAIL with `AttributeError: 'DirectionInterpreter' object has no attribute 'note_goaway'`.
+Expected: FAIL with `AttributeError: ... has no attribute 'note_event_from'`.
 
-- [ ] **Step 3: Replace the `_rotate_if_due` stub and add the two recorders**
+- [ ] **Step 3: Implement**
+
+The receive thread must now say **which** session an event came from, because
+during an overlap two sessions are producing and only one may reach playout.
+`_receive` already takes the session it is draining, so pass it through:
 
 ```python
-    # ---------- recorded by the receive thread, acted on by the pump ----------
+    def _receive(self, session) -> None:
+        for event in session.events():
+            try:
+                self.note_event_from(session, event)
+            except Exception:
+                log.exception("interpreter event error (%s)", self.direction.value)
 
-    def note_goaway(self, event: GoAway) -> None:
-        """The connection will end. Start looking for somewhere to rotate.
+    def note_event(self, event) -> None:
+        """Events from the session currently on air. Public for tests."""
+        self.note_event_from(self._session, event)
 
-        Public because Task 21's receive loop calls it, and because a test
-        needs to inject one without threads.
+    def note_event_from(self, session, event) -> None:
+        """Handle one event, attributed to its session.
+
+        While OVERLAPPING, two sessions produce at once. The replacement's
+        audio is DISCARDED - its first seconds translate audio the outgoing
+        session has already spoken, so playing it would repeat a sentence.
+        What it is used for is readiness: any energy-bearing chunk from it
+        means it is warm and the switch may proceed.
         """
-        with self._lock:
-            self._goaway_at = self._clock.monotonic() + event.time_left_s
-        if self._state is SessionState.RUNNING:
-            self._set_state(SessionState.DRAINING)
-
-    def note_handle(self, handle: str) -> None:
-        self._handle = handle
-
-    # ---------- rotation, on the pump thread ----------
-
-    def _rotate_if_due(self) -> None:
-        """Rotate inside a pause if one arrives; at the deadline if none does.
-
-        The clean path deliberately opens a FRESH session rather than resuming:
-        the spec's assumption is that literal interpretation carries almost no
-        context across a sentence boundary, so a handle would buy nothing. The
-        forced path resumes, because it lands mid-sentence where there IS
-        context to keep. If docs/experiments/02-voice-stability.md showed the
-        voice changing at a seam, this whole strategy is wrong and the spec's
-        Session continuity decision must be reopened - see Task 6.
-        """
-        with self._lock:
-            deadline = self._goaway_at
-        paused = (
-            self._activity.available
-            and self._activity.silence_s() >= ROTATE_PAUSE_S
-        )
-        expired = deadline is not None and self._clock.monotonic() >= deadline
-        if paused:
-            self._rotate(forced=False)
-        elif expired:
-            self._rotate(forced=True)
-
-    def _rotate(self, *, forced: bool) -> None:
-        old = self._session
-        # Drain BEFORE opening: _open(replay=True) drains it itself, and a
-        # clean rotation must replay nothing at all.
-        replayed_s = self._open(replay=forced, handle=self._handle if forced else None)
-        if old is not None:
-            old.close()
-        self._metrics.add_rotation(
-            self.direction, forced=forced, replayed_s=replayed_s
-        )
-        log.info(
-            "%s rotated session (%s), replayed %.1fs",
-            self.direction.value,
-            "forced" if forced else "clean",
-            replayed_s,
-        )
+        if self._pending is not None and session is self._pending:
+            if isinstance(event, AudioOut) and self._has_speech(event.pcm):
+                self._pending_warm = True
+            elif isinstance(event, ResumptionHandle):
+                self.note_handle(event.handle)
+            return
+        if isinstance(event, AudioOut):
+            self._outgoing_silent = not self._has_speech(event.pcm)
+        self._dispatch(event)
 ```
 
-Delete the `_rotate_if_due` stub added in Task 19.
+where `_dispatch` is Task 21's body of `note_event`, and:
+
+```python
+    @staticmethod
+    def _has_speech(pcm: bytes) -> bool:
+        """Energy, not byte presence.
+
+        The model streams output continuously whether or not it is
+        translating - measured at 0.04% of frames above threshold when idle
+        against 75.5% when translating. Byte presence would mean the outgoing
+        session never reads as silent and every rotation hits the bound.
+        """
+        from .playout import find_silence_boundary
+
+        return find_silence_boundary(bytearray(pcm)) is None
+```
+
+Replace the `_rotate_if_due` stub with the overlap machinery:
+
+```python
+    def note_goaway(self, event: GoAway) -> None:
+        """The connection will end. Open the replacement NOW.
+
+        Not after a pause, not on a timer: a fresh session needs ~3s before
+        it emits anything, so it has to start listening immediately or the
+        switch reintroduces the hole. Closing the outgoing session inside
+        time_left is mandatory - the server aborts with 1008 otherwise.
+        """
+        if self._state is not SessionState.RUNNING:
+            return
+        with self._lock:
+            self._goaway_at = self._clock.monotonic() + event.time_left_s
+        self._open_pending()
+
+    def _open_pending(self) -> None:
+        self._pending = self._sessions.open(
+            self._config.target_lang, echo=self._config.echo, handle=None
+        )
+        self._pending_warm = False
+        self._pending_since = self._clock.monotonic()
+        self._outgoing_silent = False
+        threading.Thread(
+            target=self._receive, args=(self._pending,), daemon=True,
+            name=f"recv-pending-{self.direction.value}",
+        ).start()
+        self._set_state(SessionState.OVERLAPPING)
+
+    def _switch_if_ready(self) -> None:
+        if self._pending is None:
+            return
+        expired = self._clock.monotonic() - self._pending_since >= OVERLAP_MAX_S
+        if not self._pending_warm and not expired:
+            return
+        if not self._outgoing_silent and not expired:
+            return
+        self._switch(forced=expired and not self._outgoing_silent)
+
+    def _switch(self, *, forced: bool) -> None:
+        old, self._session = self._session, self._pending
+        self._pending = None
+        self._pending_warm = False
+        with self._lock:
+            self._goaway_at = None
+        self._set_state(SessionState.RUNNING)
+        if old is not None:
+            old.close()
+        self._metrics.add_rotation(self.direction, forced=forced, replayed_s=0.0)
+        log.info("%s rotated (%s)", self.direction.value,
+                 "forced, no output gap" if forced else "clean")
+```
+
+In `feed()`, replace the `DRAINING` branch:
+
+```python
+        elif self._state is SessionState.OVERLAPPING:
+            self._switch_if_ready()
+```
+
+and, still in `feed()`, send to the replacement too while overlapping —
+immediately after `self._send(chunk.pcm)`:
+
+```python
+        if self._pending is not None:
+            self._pending.send(chunk.pcm)
+```
+
+Initialise in `__init__`: `self._pending = None`, `self._pending_warm = False`,
+`self._pending_since = 0.0`, `self._outgoing_silent = False`.
+
+Add `OVERLAP_MAX_S` and `ResumptionHandle` to the `from .types import (...)`
+block.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -3324,16 +3459,12 @@ Delete the `_rotate_if_due` stub added in Task 19.
 uv run pytest tests/test_interpreter.py -q
 ```
 
-Expected: PASS, 13 tests.
-
 - [ ] **Step 5: Commit**
 
 ```bash
 git add sidetap_live/interpreter.py tests/test_interpreter.py
-git commit -m "Rotate sessions at a pause, forced at GoAway's deadline"
+git commit -m "Rotate by make-before-break, switching on a gap in the output"
 ```
-
----
 
 ### Task 21: The receive side — audio out, transcript, offset, dead session
 
