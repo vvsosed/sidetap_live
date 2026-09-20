@@ -137,11 +137,12 @@ class Metrics:
     def set_capture_dropped(self, direction: Direction, count: int) -> None:
         """Blocks the CAPTURE queue discarded, as an absolute count.
 
-        Distinct from `dropped`, which counts utterances the lag cap threw
-        away on the playout side. These two queues overflow for unrelated
-        reasons - this one fills when a network outage stops the recogniser
-        draining it - and meetscribe's documented bug was exactly this one
-        going unreported, so a lost stretch read as nobody talking.
+        Distinct from `dropped_s`, which counts seconds of translated audio
+        the lag cap discarded on the playout side. These two queues overflow
+        for unrelated reasons - this one fills when a network outage stops
+        the recogniser draining it - and meetscribe's documented bug was
+        exactly this one going unreported, so a lost stretch read as nobody
+        talking.
         """
         with self._lock:
             self._states[direction].capture_dropped = count
