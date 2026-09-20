@@ -12,12 +12,12 @@ def test_snapshot_is_a_deep_copy():
 
 def test_session_state_and_rotations_are_recorded():
     metrics = Metrics()
-    metrics.set_session_state(Direction.OUT, SessionState.DRAINING)
+    metrics.set_session_state(Direction.OUT, SessionState.OVERLAPPING)
     metrics.add_rotation(Direction.OUT, forced=True, replayed_s=1.2)
     metrics.add_rotation(Direction.OUT, forced=False, replayed_s=0.0)
 
     state = metrics.snapshot().directions[Direction.OUT]
-    assert state.session_state is SessionState.DRAINING
+    assert state.session_state is SessionState.OVERLAPPING
     assert state.rotations == 2
     assert state.forced_rotations == 1
     assert state.replayed_s == 1.2

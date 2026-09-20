@@ -32,10 +32,17 @@ def webrtc_detector(aggressiveness: int = 2) -> SpeechDetector | None:
     `aggressiveness` runs 0-3, higher filtering more non-speech. It is
     inherited from sidetap, which inherited it from meetscribe, and it is NOT
     a settled value here - it was tuned to decide what to drop from a
-    transcriber's stream, and the only question asked of it now is "has
-    speech stopped for ROTATE_PAUSE_S". Being wrong costs something different:
-    a false pause rotates the session mid-sentence. Tune it against
-    docs/experiments/02-voice-stability.md rather than assuming it.
+    transcriber's stream, and the questions asked of it now are different:
+    "has speech stopped for IDLE_SUSPEND_S" (close the session and stop
+    billing) and "has someone started speaking" (reopen it).
+
+    Being wrong is cheap in both directions, which is why this is no longer
+    the load-bearing constant it was in sidetap. A false positive keeps a
+    session open that could have been suspended, costing a little money; a
+    false negative delays a wake by one block. It does NOT affect session
+    rotation - that used to wait for a pause in the INPUT, but since the
+    switch to make-before-break the join point is a gap in the OUTPUT stream,
+    which playout detects by energy and this module never sees.
 
     The returned closure is stateful - webrtcvad adapts to the noise floor
     across calls - so give each track its own detector rather than sharing one.

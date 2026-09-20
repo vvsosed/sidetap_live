@@ -497,8 +497,13 @@ Four numbers, sampled into the lock-guarded `Metrics` snapshot the TUI polls at
   forbids overlap, so it sits near zero by construction. If you and the remote
   party naturally begin talking over each other and it keeps working, this
   rises. It is the chosen axis in its most direct form.
-- **`rotations`** — count, split clean versus forced, with seconds of pre-roll
-  replayed.
+- **`rotations`** — count, split clean versus forced. Under make-before-break
+  "forced" means the overlap reached `OVERLAP_MAX_S` without the outgoing
+  session's output ever falling silent, so the join landed mid-speech. A run
+  where most rotations are forced means the join-point rule needs revisiting,
+  which is why the split is recorded rather than just the total. `replayed_s`
+  now counts only idle-suspend wakes: a rotation replays nothing, because the
+  replacement has been listening for seconds before it takes over.
 
 ## Interface
 

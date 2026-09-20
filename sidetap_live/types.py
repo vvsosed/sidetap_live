@@ -37,10 +37,16 @@ DEAD_AIR_S = 6.0
 # downstream. This watchdog is the only thing that sees it.
 NO_AUDIO_S = 15.0
 
-# Silence long enough to rotate a session inside. Short enough to occur in
-# ordinary conversation within a GoAway window, long enough that a breath
-# between clauses does not trigger it. A false pause rotates mid-sentence.
-ROTATE_PAUSE_S = 0.7
+# How long the outgoing and incoming sessions may overlap before the switch is
+# forced through without a clean join.
+#
+# On GoAway the replacement is opened immediately and fed the same audio; the
+# switch waits for it to warm up (~3s, measured) AND for the outgoing output
+# to fall silent. Output silences are plentiful - 154 in a 99s run - so the
+# wait is normally short. This bounds the pathological case, well inside the
+# 50s GoAway deadline, because joining mid-word is far better than overrunning
+# the deadline and losing the connection outright.
+OVERLAP_MAX_S = 15.0
 
 # Silence after which a session is closed entirely. Reopening costs the
 # cold-start latency measured in docs/experiments/01-connect.md, paid only
@@ -89,15 +95,18 @@ class AudioChunk:
 class SessionState(StrEnum):
     """Where one direction's Live session is in its lifecycle.
 
-    SUSPENDED and RUNNING are steady states; OPENING and DRAINING are
-    transitions that must terminate. DRAINING is bounded by GoAway's
-    time_left, OPENING by the connect call itself.
+    SUSPENDED and RUNNING are steady states; OPENING and OVERLAPPING are
+    transitions that must terminate. OVERLAPPING is bounded by OVERLAP_MAX_S
+    and, behind that, by GoAway's time_left; OPENING by the connect call.
+
+    OVERLAPPING means two sessions are live and being fed the same audio,
+    with the replacement's output discarded until it takes over.
     """
 
     SUSPENDED = "suspended"
     OPENING = "opening"
     RUNNING = "running"
-    DRAINING = "draining"
+    OVERLAPPING = "overlapping"
 
 
 @dataclass(frozen=True)
