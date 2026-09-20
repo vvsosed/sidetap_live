@@ -55,3 +55,50 @@ def test_it_is_not_a_gate():
     rename did not do its job."""
     activity = SpeechActivity(always(True), FakeClock())
     assert not hasattr(activity, "allows")
+
+
+from sidetap_live.activity import OverlapWatch
+from sidetap_live.types import Direction
+
+
+def two_tracks(clock, in_speaking: bool, out_speaking: bool):
+    tracks = {
+        Direction.IN: SpeechActivity(always(in_speaking), clock),
+        Direction.OUT: SpeechActivity(always(out_speaking), clock),
+    }
+    for activity in tracks.values():
+        activity.observe(SPEECH if activity._detect(SPEECH) else SILENCE)
+    return tracks
+
+
+def test_no_overlap_when_they_take_turns():
+    clock = FakeClock()
+    tracks = two_tracks(clock, True, False)
+    watch = OverlapWatch(tracks, clock)
+    clock.advance(10.0)
+    assert watch.sample() == pytest.approx(0.0)
+
+
+def test_full_overlap_when_both_talk():
+    clock = FakeClock()
+    tracks = two_tracks(clock, True, True)
+    watch = OverlapWatch(tracks, clock)
+    clock.advance(10.0)
+    assert watch.sample() == pytest.approx(100.0)
+
+
+def test_overlap_is_a_running_fraction_of_wall_clock():
+    clock = FakeClock()
+    tracks = two_tracks(clock, True, True)
+    watch = OverlapWatch(tracks, clock)
+    clock.advance(5.0)
+    watch.sample()
+    tracks[Direction.OUT]._detect = always(False)
+    tracks[Direction.OUT].observe(SILENCE)
+    clock.advance(15.0)
+    assert watch.sample() == pytest.approx(25.0)
+
+
+def test_it_reports_zero_before_any_time_has_passed():
+    clock = FakeClock()
+    assert OverlapWatch(two_tracks(clock, True, True), clock).sample() == 0.0

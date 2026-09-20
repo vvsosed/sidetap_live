@@ -15,7 +15,7 @@ import logging
 from typing import Callable
 
 from .ports import Clock
-from .types import TARGET_RATE
+from .types import Direction, TARGET_RATE
 
 log = logging.getLogger(__name__)
 
@@ -95,3 +95,46 @@ class SpeechActivity:
         if self._detect is None:
             return 0.0
         return self._clock.monotonic() - self._last_speech
+
+
+class OverlapWatch:
+    """Fraction of wall clock where BOTH tracks carry speech at once.
+
+    The only metric in this package that measures the people rather than the
+    program. sidetap's full-replacement routing plus finals-only commit
+    forbids overlap by construction, so under it this sits near zero; if the
+    two parties naturally begin talking over each other here and it keeps
+    working, this rises. That is the project's chosen axis in its most direct
+    form.
+
+    Sampled by the session health poller rather than computed per block,
+    because it is a property of the two tracks together and neither
+    direction's pump can see the other.
+    """
+
+    def __init__(self, tracks: dict[Direction, SpeechActivity], clock: Clock):
+        self._tracks = tracks
+        self._clock = clock
+        self._last = clock.monotonic()
+        self._overlap_s = 0.0
+        self._total_s = 0.0
+
+    def sample(self) -> float:
+        now = self._clock.monotonic()
+        elapsed = now - self._last
+        self._last = now
+        if elapsed > 0:
+            self._total_s += elapsed
+            # Attributed to the interval that just ENDED, using the speaking
+            # flags as they stood through it. Sampling the flags and the clock
+            # at the same instant is what keeps this a time integral rather
+            # than a count of coincidences.
+            if self._tracks and all(a.speaking for a in self._tracks.values()):
+                self._overlap_s += elapsed
+        return self.pct
+
+    @property
+    def pct(self) -> float:
+        if self._total_s <= 0:
+            return 0.0
+        return 100.0 * self._overlap_s / self._total_s
