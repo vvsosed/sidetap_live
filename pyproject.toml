@@ -1,0 +1,28 @@
+[project]
+name = "sidetap-live"
+version = "0.1.0"
+description = "Single-box real-time voice interpretation for any call, captured from PipeWire"
+requires-python = ">=3.13"
+
+dependencies = [
+    "google-genai>=1.0.0",
+    "webrtcvad-wheels>=2.0.14",
+    "textual>=0.80",
+]
+
+[project.scripts]
+sidetap-live = "sidetap_live.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sidetap_live"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
