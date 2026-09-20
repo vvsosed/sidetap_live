@@ -3372,10 +3372,16 @@ where `_dispatch` is Task 21's body of `note_event`, and:
         translating - measured at 0.04% of frames above threshold when idle
         against 75.5% when translating. Byte presence would mean the outgoing
         session never reads as silent and every rotation hits the bound.
-        """
-        from .playout import find_silence_boundary
 
-        return find_silence_boundary(bytearray(pcm)) is None
+        Uses playout.has_speech, NOT `find_silence_boundary(...) is None`.
+        The latter reports where the first quiet frame is, and a 250 ms chunk
+        of clear speech routinely contains one inside a word - so inverting it
+        would call ordinary speech silent and switch sessions mid-word on
+        every rotation.
+        """
+        from .playout import has_speech
+
+        return has_speech(pcm)
 ```
 
 Replace the `_rotate_if_due` stub with the overlap machinery:

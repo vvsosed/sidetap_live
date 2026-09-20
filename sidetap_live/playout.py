@@ -78,6 +78,35 @@ def find_silence_boundary(
     return None
 
 
+def has_speech(pcm: bytes, frame_bytes: int = CHUNK_BYTES,
+               threshold: int = SPEECH_PEAK) -> bool:
+    """Does this buffer carry speech anywhere in it?
+
+    Deliberately NOT `find_silence_boundary(...) is None`. That asks where the
+    FIRST quiet frame is, which is the right question for the lag cap and the
+    wrong one here: a 250 ms chunk of clear speech routinely contains a quiet
+    20 ms frame inside a word, and would read as silence. The interpreter uses
+    this to decide when the outgoing session has stopped talking, so getting it
+    backwards means every rotation switches mid-word - exactly the audible seam
+    make-before-break exists to remove.
+
+    A short buffer is judged whole rather than ignored: unlike the lag cap,
+    which can afford to wait for a full frame, a caller asking "is this
+    speech?" needs an answer about the bytes it actually has.
+    """
+    if not pcm:
+        return False
+    for start in range(0, max(len(pcm) - frame_bytes + 1, 1), frame_bytes):
+        frame = pcm[start : start + frame_bytes]
+        if len(frame) < 2:
+            continue
+        samples = array("h")
+        samples.frombytes(bytes(frame[: len(frame) // 2 * 2]))
+        if samples and max(abs(s) for s in samples) >= threshold:
+            return True
+    return False
+
+
 class DuckControl:
     """Silences (or lowers) the remote party's original while we speak."""
 

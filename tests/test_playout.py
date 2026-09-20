@@ -78,3 +78,40 @@ def test_the_models_idle_stream_does_not_read_as_speech():
     for _ in range(CHUNK_BYTES // 2):
         idle += (1078).to_bytes(2, "little", signed=True)
     assert find_silence_boundary(idle) == 0
+
+
+def test_has_speech_is_not_find_silence_boundary_inverted():
+    """A real 250ms chunk of speech contains quiet frames inside words.
+
+    find_silence_boundary reports the FIRST quiet frame, so inverting it would
+    call this chunk silent. The interpreter uses has_speech to decide the
+    outgoing session has stopped talking; getting it backwards switches
+    sessions mid-word on every rotation.
+    """
+    from sidetap_live.playout import has_speech
+
+    chunk = bytearray()
+    for frame in range(12):
+        amp = 200 if frame == 7 else 12000
+        for _ in range(CHUNK_BYTES // 2):
+            chunk += amp.to_bytes(2, "little", signed=True)
+
+    assert find_silence_boundary(chunk) is not None   # it does find the dip
+    assert has_speech(chunk) is True                  # but it is still speech
+
+
+def test_has_speech_says_no_to_the_models_idle_stream():
+    from sidetap_live.playout import has_speech
+
+    idle = bytearray()
+    for _ in range(CHUNK_BYTES * 6):
+        idle += (1078).to_bytes(2, "little", signed=True)
+    assert has_speech(idle) is False
+
+
+def test_has_speech_judges_a_short_buffer_rather_than_ignoring_it():
+    from sidetap_live.playout import has_speech
+
+    assert has_speech(b"") is False
+    assert has_speech(b"\x00\x40" * 10) is True      # 20 samples, loud
+    assert has_speech(b"\x00\x00" * 10) is False
