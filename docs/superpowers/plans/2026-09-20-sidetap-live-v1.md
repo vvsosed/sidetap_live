@@ -12,6 +12,62 @@
 
 ---
 
+## Task 6 checkpoint — RESOLVED 2026-09-23
+
+All six experiments have run. The five questions this checkpoint posed, answered:
+
+**1. Did the voice survive rotation?** Yes — a listener confirmed the speaker
+sounds like the same person either side of the seam. But the experiment found
+a different fault that invalidated the strategy anyway: the rotation produced a
+**3.12 s hole** against the **0.80 s pause** it was placed in, because a fresh
+session needs ~3 s before it emits anything. **The spec's *Session continuity*
+decision was reversed to make-before-break**, and Task 20 rewritten. Note the
+checkpoint asked the wrong question — it assumed the only way rotate-at-a-pause
+could fail was a voice shift. It failed on hole size instead.
+
+**2. Does `go_away` carry `time_left`?** Yes — at t=540.5 s, as the **string**
+`'50s'`. `seconds_of()` already coerced strings, so that guess held. The
+unanticipated part: the server aborts with code 1008 if the client has not
+closed inside the window, so closing is mandatory rather than tidy-up.
+
+**3. Were `session_resumption` and `context_window_compression` accepted?** Yes,
+both. Handles arrive about every 2 s, all `resumable=True`, and reconnecting
+with one works. `PREROLL_S` needs no raising: cold start measured ~500 ms
+against a 3 s ring.
+
+**4. Is the output/input ratio above 1.0?** No — **0.894**, and the translation
+lag stayed flat at 0.24 s → 0.25 s across 96 s of 88.5%-density speech.
+`LAG_CAP_S = 30` is confirmed as a safety valve that should never fire. This is
+the project's headline result: positive evidence that turn-free translation
+dissolves the cascade's progressive-backlog problem.
+
+**5. Did the SDK field names match the REST documentation?** No.
+`translation_config` is a **top-level** field of `LiveConnectConfig`, not nested
+under `generation_config`. The nested form type-checks, connects, and emits only
+a `DeprecationWarning` while producing a conversational agent instead of an
+interpreter. Task 14 corrected, with a regression test.
+
+**Plus one finding no checkpoint question anticipated**, and the most
+consequential of all: the model emits a **continuous output stream whether or
+not it is translating** — ~151 s of audio for 154 s of pure silence. The duck,
+keyed on bytes arriving, would have closed on the first chunk and never
+reopened, muting the remote party for entire calls. The spec now triggers it on
+**energy**, using measured distributions (0.04% of frames above threshold when
+idle, 75.5% when translating) to set `SPEECH_PEAK = 2000`.
+
+**And one question the experiments could not settle:** experiment 5 used a
+YouTube speaker with a comparable accent rather than the user's own voice,
+because no microphone was available at the time. Accented English was detected
+cleanly and eight technical terms survived intact, so the *mechanism* is sound —
+but the *specific case* is untested. A USB microphone is now available; the
+rerun is a five-minute swap.
+
+**Phase 1 and Phase 2 are unblocked.** Four of six experiments contradicted
+either Google's documentation or this design, and two of those would have
+produced code that passed every offline test and failed only on a live call.
+
+---
+
 ## Execution status — as of 2026-09-20, branch `sidetap-live-v1`
 
 **156 tests pass** with no audio hardware, no network and no credentials.
