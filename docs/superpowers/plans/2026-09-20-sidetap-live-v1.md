@@ -3136,7 +3136,12 @@ class DirectionInterpreter:
         if self._state is SessionState.SUSPENDED:
             if not self._should_wake(speaking):
                 return
+            # _open(replay=True) drains the pre-roll, and this chunk is
+            # already IN it - feed() adds to the ring before dispatching on
+            # state. Falling through to _send() below would transmit the
+            # waking block a second time and bill it twice.
             self._open(replay=True)
+            return
         elif self._state is SessionState.OVERLAPPING:
             self._switch_if_ready()
         elif self._should_suspend():
