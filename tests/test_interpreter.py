@@ -116,3 +116,135 @@ def test_input_audio_is_billed():
     interpreter.feed(block(SPEECH))
     # 100 ms x 25 tokens/s x $3.50/M
     assert metrics.snapshot().cost_usd == pytest.approx(0.1 * 25 * 3.50 / 1e6, rel=1e-6)
+
+
+from sidetap_live.types import OVERLAP_MAX_S, AudioOut, GoAway
+
+LOUD = b"\x00\x40" * 600       # 24 kHz s16, peak 0x4000 - reads as speech
+QUIET = b"\x00\x00" * 600      # reads as silence
+
+
+def goaway(interpreter, seconds=50.0):
+    interpreter.note_event(GoAway(time_left_s=seconds))
+
+
+def test_goaway_opens_a_replacement_at_once():
+    """No waiting for a pause: the replacement needs ~3s to warm up, so it
+    must start warming the moment the window opens."""
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.OVERLAPPING
+    assert len(sessions.sessions) == 2
+    assert sessions.opens[1] == ("en", False, None)
+
+
+def test_both_sessions_are_fed_while_overlapping():
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    before = len(sessions.sessions[0].sent)
+    interpreter.feed(block(SPEECH))
+    interpreter.feed(block(SPEECH))
+
+    assert len(sessions.sessions[0].sent) == before + 2 * BLOCK_BYTES
+    assert len(sessions.sessions[1].sent) == 2 * BLOCK_BYTES
+
+
+def test_the_replacements_output_is_discarded_until_it_takes_over():
+    """Its first seconds translate audio the live session already spoke."""
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+
+    interpreter.note_event_from(sessions.sessions[1], AudioOut(pcm=LOUD))
+    assert interpreter._playout.backlog_s() == 0.0
+
+
+def test_switch_needs_the_replacement_warm_and_the_outgoing_silent():
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+
+    # Outgoing still speaking: no switch even though the replacement is warm.
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    interpreter.note_event_from(old, AudioOut(pcm=LOUD))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.OVERLAPPING
+    assert old.closed is False
+
+    # Outgoing falls silent: switch.
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+    assert old.closed is True
+
+
+def test_a_cold_replacement_does_not_take_over_however_quiet_it_is():
+    """Switching to a session that is not yet producing reintroduces the
+    3-second hole this design exists to remove."""
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, _ = sessions.sessions
+
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.OVERLAPPING
+    assert old.closed is False
+
+
+def test_the_overlap_is_bounded_and_a_bounded_switch_counts_as_forced():
+    interpreter, sessions, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    # Outgoing never falls silent.
+    interpreter.note_event_from(old, AudioOut(pcm=LOUD))
+    clock.advance(OVERLAP_MAX_S + 1)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.RUNNING
+    assert old.closed is True
+    state = metrics.snapshot().directions[Direction.IN]
+    assert (state.rotations, state.forced_rotations) == (1, 1)
+
+
+def test_a_clean_switch_is_not_counted_as_forced():
+    interpreter, sessions, metrics, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
+    interpreter.feed(block(SPEECH))
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert (state.rotations, state.forced_rotations) == (1, 0)
+    assert state.replayed_s == 0.0
+
+
+def test_rotation_replays_no_preroll():
+    """The replacement has been listening for seconds; there is nothing it
+    missed. Only an idle-suspend wake replays."""
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+    sent_before_switch = len(new.sent)
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))
+    interpreter.feed(block(SPEECH))
+
+    # Exactly one more block - the one that drove the switch. No replay burst.
+    assert len(new.sent) == sent_before_switch + BLOCK_BYTES

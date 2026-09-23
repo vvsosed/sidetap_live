@@ -87,6 +87,13 @@ class DirectionInterpreter:
         self._session = None
         self._handle: str | None = None
 
+        # The replacement session while OVERLAPPING. Fed the same audio as
+        # `_session`; its output is discarded until `_switch` promotes it.
+        self._pending = None
+        self._pending_warm = False
+        self._pending_since = 0.0
+        self._outgoing_silent = False
+
         # Written by the receive thread, read by the pump thread.
         self._lock = threading.Lock()
         self._goaway_at: float | None = None
@@ -130,6 +137,8 @@ class DirectionInterpreter:
             return
 
         self._send(chunk.pcm)
+        if self._pending is not None:
+            self._pending.send(chunk.pcm)
 
     def pump(self, chunks, stop: threading.Event) -> None:
         """Drain a capture queue into the session until told to stop."""
@@ -208,14 +217,128 @@ class DirectionInterpreter:
             reason, self._dead = self._dead, None
             return reason
 
-    # ---------- stubs replaced by Tasks 20 and 21 ----------
+    # ---------- rotation: make before break ----------
+
+    def note_goaway(self, event: GoAway) -> None:
+        """The connection will end. Open the replacement NOW.
+
+        Not after a pause, not on a timer: a fresh session needs ~3s before
+        it emits anything, so it has to start listening immediately or the
+        switch reintroduces the hole. Closing the outgoing session inside
+        time_left is mandatory - the server aborts with 1008 otherwise.
+        """
+        if self._state is not SessionState.RUNNING:
+            return
+        with self._lock:
+            self._goaway_at = self._clock.monotonic() + event.time_left_s
+        self._open_pending()
+
+    def _open_pending(self) -> None:
+        self._pending = self._sessions.open(
+            self._config.target_lang, echo=self._config.echo, handle=None
+        )
+        self._pending_warm = False
+        self._pending_since = self._clock.monotonic()
+        self._outgoing_silent = False
+        threading.Thread(
+            target=self._receive, args=(self._pending,), daemon=True,
+            name=f"recv-pending-{self.direction.value}",
+        ).start()
+        self._set_state(SessionState.OVERLAPPING)
 
     def _switch_if_ready(self) -> None:
-        raise NotImplementedError("Task 20")
+        if self._pending is None:
+            return
+        expired = self._clock.monotonic() - self._pending_since >= OVERLAP_MAX_S
+        if not self._pending_warm and not expired:
+            return
+        if not self._outgoing_silent and not expired:
+            return
+        self._switch(forced=expired and not self._outgoing_silent)
+
+    def _switch(self, *, forced: bool) -> None:
+        old, self._session = self._session, self._pending
+        self._pending = None
+        self._pending_warm = False
+        with self._lock:
+            self._goaway_at = None
+        self._set_state(SessionState.RUNNING)
+        if old is not None:
+            old.close()
+        self._metrics.add_rotation(self.direction, forced=forced, replayed_s=0.0)
+        log.info("%s rotated (%s)", self.direction.value,
+                 "forced, no output gap" if forced else "clean")
+
+    # ---------- the receive thread ----------
+
+    def _receive(self, session) -> None:
+        """Drain one session's events. Records only - never transitions,
+        except `note_goaway` which must open the replacement at once (see
+        its docstring)."""
+        for event in session.events():
+            try:
+                self.note_event_from(session, event)
+            except Exception:
+                log.exception("interpreter event error (%s)", self.direction.value)
+
+    def note_event(self, event) -> None:
+        """Events from the session currently on air. Public for tests."""
+        self.note_event_from(self._session, event)
+
+    def note_event_from(self, session, event) -> None:
+        """Handle one event, attributed to its session.
+
+        While OVERLAPPING, two sessions produce at once. The replacement's
+        audio is DISCARDED - its first seconds translate audio the outgoing
+        session has already spoken, so playing it would repeat a sentence.
+        What it is used for is readiness: any energy-bearing chunk from it
+        means it is warm and the switch may proceed.
+        """
+        if self._pending is not None and session is self._pending:
+            if isinstance(event, AudioOut) and self._has_speech(event.pcm):
+                self._pending_warm = True
+            elif isinstance(event, ResumptionHandle):
+                self.note_handle(event.handle)
+            return
+        if isinstance(event, AudioOut):
+            self._outgoing_silent = not self._has_speech(event.pcm)
+        self._dispatch(event)
+
+    def note_handle(self, handle: str) -> None:
+        """Remember the latest resumption handle for `_reopen` (Task 21)."""
+        self._handle = handle
+
+    @staticmethod
+    def _has_speech(pcm: bytes) -> bool:
+        """Energy, not byte presence.
+
+        The model streams output continuously whether or not it is
+        translating - measured at 0.04% of frames above threshold when idle
+        against 75.5% when translating. Byte presence would mean the outgoing
+        session never reads as silent and every rotation hits the bound.
+
+        Uses playout.has_speech, NOT `find_silence_boundary(...) is None`.
+        The latter reports where the first quiet frame is, and a 250 ms chunk
+        of clear speech routinely contains one inside a word - so inverting it
+        would call ordinary speech silent and switch sessions mid-word on
+        every rotation.
+        """
+        from .playout import has_speech
+
+        return has_speech(pcm)
+
+    # ---------- stubs replaced by Task 21 ----------
+
+    def _dispatch(self, event) -> None:
+        """The session currently on air's non-overlap event handling.
+
+        Only GoAway is wired here: it is what starts the overlap this task
+        builds, so it cannot wait for Task 21. Audio out, transcript text,
+        dead-session recovery and the rest of the alphabet are Task 21's
+        body of this method.
+        """
+        if isinstance(event, GoAway):
+            self.note_goaway(event)
 
     def _reopen(self) -> None:
         raise NotImplementedError("Task 21")
-
-    def _receive(self, session) -> None:
-        for _ in session.events():  # replaced in Task 21
-            pass
