@@ -367,3 +367,35 @@ def test_goaway_arriving_as_an_event_enters_overlapping():
     interpreter.feed(block(SPEECH))
     interpreter.note_event(GoAway(time_left_s=30.0))
     assert interpreter.state is SessionState.OVERLAPPING
+
+
+def test_a_death_mid_overlap_promotes_the_replacement_instead_of_orphaning_it():
+    """Regression: the replacement was left fed, billed and never closed.
+
+    feed() sends to _pending for as long as it is set, so a replacement that
+    is neither promoted nor closed keeps consuming audio and money for the
+    rest of the call, with its receive thread still alive. The window this
+    happens in is 50s every ~9 minutes.
+    """
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(GoAway(time_left_s=50.0))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.OVERLAPPING
+    replacement = interpreter._pending
+
+    interpreter.note_event(Closed(reason="outgoing died"))
+    interpreter.feed(block(SPEECH))
+
+    # Promoted, not orphaned: no third session, nothing left dangling.
+    assert len(sessions.sessions) == 2
+    assert interpreter.state is SessionState.RUNNING
+    assert interpreter._pending is None
+    assert replacement.closed is False          # it is the live one now
+
+    sent = len(replacement.sent)
+    for _ in range(3):
+        interpreter.feed(block(SPEECH))
+    # Fed exactly once per block, as the on-air session - not twice, and not
+    # as a leaked second consumer.
+    assert len(replacement.sent) == sent + 3 * BLOCK_BYTES

@@ -411,7 +411,24 @@ class DirectionInterpreter:
         )
 
     def _reopen(self) -> None:
-        """The session died with no GoAway. Come back on the last handle."""
+        """The session died. Prefer a warming replacement over a cold start.
+
+        If an overlap was in progress there is already a session listening,
+        and promoting it beats opening a third one twice over: it skips the
+        ~3 s warm-up a fresh session needs before it emits anything, and it
+        stops the replacement being orphaned. Orphaning is the real hazard -
+        feed() keeps sending to `_pending` for as long as it is set, so a
+        replacement left behind is fed, billed and never closed for the rest
+        of the call, with its receive thread still running.
+
+        The dead session is closed either way; close() on an already-dead
+        session is harmless. The handover is counted as forced, because it
+        did not wait for a gap in the outgoing output - there was none to
+        wait for.
+        """
         self._metrics.set_health(self.direction, session=Health.FAILED)
+        if self._pending is not None:
+            self._switch(forced=True)
+            return
         self._close("died")
         self._open(replay=True, handle=self._handle)
