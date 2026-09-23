@@ -149,3 +149,39 @@ either lost audio or added latency unless something is done to hide it
    anything translation-specific — the spread across 10 rounds was small
    enough that no separate "first connection ever" warm-up cost was
    visible in this run.
+
+---
+
+## Addendum, 2026-09-23: region-qualified language codes are rejected
+
+Found by a real call failing, not by this experiment — and this experiment is
+why it was missed.
+
+`target_language_code` accepts only a bare or script-qualified BCP-47 code.
+A region subtag is rejected, **but not at connect time**:
+
+| target | 20 blocks | 1 block |
+|---|---|---|
+| `ru` | OK | — |
+| `ru-RU` | **FAIL 1007** | OK |
+| `en` | OK | — |
+| `en-US` | **FAIL 1007** | OK |
+
+Setup succeeds, the first block or two succeed, and then the server closes the
+socket with `1007 Request contains an invalid argument` once it actually uses
+the code. A probe that connects and sends a single chunk passes; a real call
+dies about a second in.
+
+**Why every experiment missed it.** All five used `"ru"` and `"en"`, copied
+from Google's own examples. The CLI takes full BCP-47 (`--their-lang ru-RU`),
+because that is what sidetap took and what a user naturally types. So the
+experiments validated a config the program never actually sends.
+
+That gap — between what was measured and what ships — is where this class of
+bug lives. An experiment that exercises the real code path, rather than a
+hand-written config that resembles it, would have caught this before the first
+call.
+
+The fix is `live.normalise_language`, which strips a region subtag while
+keeping a script one (`zh-Hans` must survive; cutting at the first hyphen would
+silently pick the wrong script).

@@ -162,3 +162,34 @@ def test_a_failing_session_does_not_leak_its_sender_thread():
             break
         threading.Event().wait(0.05)
     assert threading.active_count() <= before + 1, "sender thread leaked"
+
+
+@pytest.mark.parametrize(
+    "given,expected",
+    [
+        ("ru-RU", "ru"),          # region stripped - the bug that killed a real call
+        ("en-US", "en"),
+        ("uk-UA", "uk"),
+        ("pt-BR", "pt"),
+        ("ru", "ru"),             # already bare
+        ("zh-Hans", "zh-Hans"),   # SCRIPT kept - cutting at the hyphen picks wrong script
+        ("zh-Hans-CN", "zh-Hans"),
+        ("sr-Cyrl-RS", "sr-Cyrl"),
+    ],
+)
+def test_region_subtags_are_stripped_but_scripts_are_kept(given, expected):
+    """target_language_code rejects a region, and does it late.
+
+    "ru-RU" connects fine and survives a block or two, then the server closes
+    with 1007 once it tries to use the code - so a probe that sends one chunk
+    passes while a real call dies a second in.
+    """
+    from sidetap_live.live import normalise_language
+
+    assert normalise_language(given) == expected
+
+
+def test_build_config_normalises_what_the_cli_passes():
+    """The CLI takes full BCP-47 because that is what a user types."""
+    assert build_config(target_lang="ru-RU", echo=False,
+                        handle=None).translation_config.target_language_code == "ru"

@@ -102,6 +102,39 @@ def parse_message(message) -> list[SessionEvent]:
     return events
 
 
+def normalise_language(code: str) -> str:
+    """Strip a region subtag, which this model rejects.
+
+    MEASURED, and the failure mode is nasty: `target_language_code="ru-RU"`
+    is accepted at connect time and survives the first block or two, then the
+    server closes the socket with 1007 "Request contains an invalid argument"
+    once it actually tries to use the code. A probe that connects and sends a
+    single chunk passes; a real call dies a second in.
+
+        ru     20 blocks  OK        ru-RU  20 blocks  FAIL
+        en     20 blocks  OK        en-US  20 blocks  FAIL
+        ru-RU   1 block   OK        en-US   1 block   OK
+
+    Google's own examples only ever show bare or script-qualified codes -
+    "pl", "en", "es", "zh-Hans" - never a region.
+
+    A SCRIPT subtag is kept: BCP-47 is language[-script][-region], script is
+    four letters ("Hans", "Cyrl") and region is two letters or three digits.
+    Blindly cutting at the first hyphen would turn "zh-Hans" into "zh" and
+    quietly pick the wrong script.
+
+    The CLI still takes full BCP-47 (`--their-lang ru-RU`), because that is
+    what sidetap took and what a user naturally types. Normalising here keeps
+    the accommodation in the one module that talks to Gemini.
+    """
+    parts = code.split("-")
+    kept = [parts[0]]
+    for part in parts[1:]:
+        if len(part) == 4 and part.isalpha():
+            kept.append(part.title())
+    return "-".join(kept)
+
+
 def build_config(*, target_lang: str, echo: bool, handle: str | None):
     """The session config, as the SDK's own typed objects.
 
@@ -130,7 +163,7 @@ def build_config(*, target_lang: str, echo: bool, handle: str | None):
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         translation_config=types.TranslationConfig(
-            target_language_code=target_lang,
+            target_language_code=normalise_language(target_lang),
             echo_target_language=echo,
         ),
         input_audio_transcription=types.AudioTranscriptionConfig(),
