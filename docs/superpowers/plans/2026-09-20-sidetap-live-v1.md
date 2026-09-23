@@ -4477,15 +4477,18 @@ def test_a_working_detector_neither_fails_nor_warns():
 def test_a_live_session_that_opens_passes():
     opened = []
 
-    def factory(target_lang, *, echo, handle=None):
-        opened.append(target_lang)
+    class _Factory:
+        def open(self, target_lang, *, echo, handle=None):
+            opened.append(target_lang)
 
-        class _Session:
-            def send(self, pcm): ...
-            def events(self): return iter(())
-            def close(self): ...
+            class _Session:
+                def send(self, pcm): ...
+                def events(self): return iter(())
+                def close(self): ...
 
-        return _Session()
+            return _Session()
+
+    factory = _Factory()
 
     check = check_live_session(factory)
     assert check.ok is True
@@ -4493,8 +4496,11 @@ def test_a_live_session_that_opens_passes():
 
 
 def test_a_live_session_that_raises_fails_with_the_reason():
-    def factory(target_lang, *, echo, handle=None):
-        raise RuntimeError("PERMISSION_DENIED: model not available")
+    class _Factory:
+        def open(self, target_lang, *, echo, handle=None):
+            raise RuntimeError("PERMISSION_DENIED: model not available")
+
+    factory = _Factory()
 
     check = check_live_session(factory)
     assert check.ok is False
@@ -4584,7 +4590,9 @@ def check_live_session(factory) -> Check:
     a live conversation with the graph already rewired.
     """
     try:
-        session = factory("en", echo=False)
+        # factory.open(), not factory(): build_factory returns an object
+        # implementing the SessionFactory protocol, which is not callable.
+        session = factory.open("en", echo=False)
     except Exception as exc:
         return Check("live session", False, f"{type(exc).__name__}: {exc}")
     try:
