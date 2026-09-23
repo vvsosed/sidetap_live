@@ -2542,7 +2542,7 @@ from sidetap_live.playout import (
     Playout,
     has_speech,
 )
-from sidetap_live.types import Direction
+from sidetap_live.types import TTS_BYTES_PER_S, Direction
 from tests.conftest import FakeAudioSink
 
 SPEECH = b"\x00\x40" * (CHUNK_BYTES // 2)
