@@ -322,9 +322,7 @@ def main(
     launcher: ProcessLauncher | None = None,
     linker: Linker | None = None,
     clock: Clock | None = None,
-    recognizer_factory=None,
-    translator=None,
-    synthesizer=None,
+    sessions=None,
 ) -> int:
     args = build_parser().parse_args(argv)
 
@@ -353,9 +351,7 @@ def main(
             linker=linker,
             clock=clock,
             session=session,
-            recognizer_factory=recognizer_factory,
-            translator=translator,
-            synthesizer=synthesizer,
+            sessions=sessions,
         )
     except KeyboardInterrupt:
         # Ctrl-C before the handler is installed, e.g. during auth.
