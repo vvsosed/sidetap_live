@@ -70,7 +70,7 @@ def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
             flush()
             lines.append("")
             label, kind = heading
-            marker = "" if kind == "source" else " → "
+            marker = "" if kind == "source" else " →"
             lines.append(f"**{label}{marker}** _{hhmmss(event.t)}_")
             last = heading
         # Joined with no separator: fragments arrive carrying their own

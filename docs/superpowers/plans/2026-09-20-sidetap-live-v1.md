@@ -4028,7 +4028,7 @@ def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
             flush()
             lines.append("")
             label, kind = heading
-            marker = "" if kind == "source" else " → "
+            marker = "" if kind == "source" else " →"
             lines.append(f"**{label}{marker}** _{hhmmss(event.t)}_")
             last = heading
         # Joined with no separator: fragments arrive carrying their own
@@ -4096,7 +4096,7 @@ class EventTranscript:
 uv run pytest tests/test_transcript.py -q
 ```
 
-Expected: PASS, 4 tests.
+Expected: PASS, 5 tests.
 
 - [ ] **Step 5: Commit**
 
