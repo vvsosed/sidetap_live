@@ -24,21 +24,30 @@ Python, managed with `uv`. Linux and PipeWire only.
 
 ## The question this exists to answer
 
-sidetap works, and its own README names its worst limitation:
+**REVISED 2026-09-23: this is no longer a head-to-head against sidetap. It is
+an evaluation of sidetap_live on its own terms.**
 
-> **Half-duplex cadence is required, not optional.** Full-replacement routing
-> means there is no overlay to fall back on, and v1 only translates complete,
-> finalised utterances (no incremental commit yet) — so both parties talking
-> continuously without pausing pushes the translation further and further
-> behind rather than keeping pace.
+The question is whether a single speech-to-speech model makes a genuinely
+usable interpreter for a real call — not whether it beats a cascade.
 
-`gemini-3.5-live-translate-preview` *"translates as the speaker talks without
-waiting for turns."* If that is true in practice, it dissolves the cadence
-problem rather than mitigating it.
+Concretely, three things have to hold at once:
 
-**That is the only axis this project is evaluated on.** Latency, cost and
-robustness are instrumented because they explain the result, not because they
-decide it. Section *Measuring the result* defines what settles the question.
+1. **You can talk without pausing for the machine.** The model claims to
+   translate "as the speaker talks without waiting for turns." If that holds,
+   the conversation has a normal cadence rather than a walkie-talkie one.
+2. **Interruption still works.** Two people talking over each other is normal
+   conversation, not an error case. If overlap makes the interpreter fall
+   behind or garble, the cadence is still being dictated by the machine.
+3. **It survives a real call.** An hour, crossing the connection cap five or
+   six times, without a dropout anyone has to work around.
+
+These are absolute statements, answerable without a baseline: `backlog_s` near
+zero, `offset_s` near a quarter-second, `overlap_pct` rising when people
+actually interrupt each other, and no forced rotations. *Measuring the result*
+defines them precisely.
+
+Latency, cost and robustness are instrumented because they explain whether
+those three hold, not because they decide a contest.
 
 ## Relationship to sidetap
 
@@ -50,12 +59,15 @@ sidetap's PipeWire layer — graph parsing, the additive per-application tap,
 **ported**: copied with its tests, the same way sidetap itself was ported from
 meetscribe. The two repositories share no runtime dependency.
 
-A shared package was considered and rejected. For a head-to-head, each side
-needs to be free to diverge; a common dependency would make every change a
-negotiation between two consumers. The cost is real and is accepted knowingly:
-**a bug fixed in one repository's `routing.py` is not fixed in the other's.**
-That is tolerable because the audio layer is the mature, stable part and all
-the uncertain work sits above it.
+A shared package was considered and rejected. A common dependency would make
+every change a negotiation between two consumers, and sidetap is an actively
+developed project with its own direction. The cost is real and accepted
+knowingly: **a bug fixed in one repository's `routing.py` is not fixed in the
+other's.** That is tolerable because the audio layer is the mature, stable part
+and all the uncertain work sits above it.
+
+**Nothing in this project writes to sidetap, and nothing depends on it at
+runtime.** The port is provenance, not coupling.
 
 The structural conventions are carried over for the same reason sidetap carried
 them from meetscribe: every subprocess, socket and clock sits behind a
@@ -493,10 +505,10 @@ Four numbers, sampled into the lock-guarded `Metrics` snapshot the TUI polls at
   that stretch. Backlog says the queue is healthy; offset says whether you are
   conversing or narrating.
 - **`overlap_pct`** — fraction of wall clock where both source tracks carry
-  speech at once. This measures the humans, not the system: sidetap's cadence
-  forbids overlap, so it sits near zero by construction. If you and the remote
-  party naturally begin talking over each other and it keeps working, this
-  rises. It is the chosen axis in its most direct form.
+  speech at once. This measures the humans, not the system. Interrupting each
+  other is ordinary conversation; an interpreter that forbids it has dictated
+  the cadence. A call where this stays near zero means people are still taking
+  turns for the machine's benefit, whether or not they noticed.
 - **`rotations`** — count, split clean versus forced. Under make-before-break
   "forced" means the overlap reached `OVERLAP_MAX_S` without the outgoing
   session's output ever falling silent, so the join landed mid-speech. A run
@@ -687,12 +699,13 @@ These figures are a spend estimate to catch a runaway session, not an invoice.
   order — and would cross channels. Stereo and mono only, as in sidetap.
 - **Any offline or local path.**
 - **Vertex AI support.** Not available for this model.
-- **A replay harness running both systems over identical recorded audio.** It
-  is the rigorous way to compare two pipelines, and it is deliberately out of
-  scope: the chosen axis is whether the *humans* stop taking turns, and
-  `overlap_pct` cannot be measured from a recording of a conversation that was
-  held under the other system's constraints. Live calls are the only instrument
-  for this question.
+- **Any comparison against sidetap.** Dropped 2026-09-23. This project is
+  evaluated on whether it is usable, not on whether it wins a contest, and a
+  comparison would have meant carrying a matching transcript schema and a
+  converter for no benefit to either side.
+- **A replay harness over recorded audio.** `overlap_pct` is about whether two
+  people interrupt each other, which cannot be measured from a recording. Live
+  calls are the only instrument for that question.
 
 ## Done looks like
 
