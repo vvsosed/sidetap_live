@@ -2536,7 +2536,12 @@ sidetap queues whole utterances with known durations. There are no utterances he
 Append to `tests/test_playout.py`:
 
 ```python
-from sidetap_live.playout import DUCK_HOLD_TICKS, STARVE_LIMIT_TICKS, Playout
+from sidetap_live.playout import (
+    DUCK_HOLD_TICKS,
+    STARVE_LIMIT_TICKS,
+    Playout,
+    has_speech,
+)
 from sidetap_live.types import Direction
 from tests.conftest import FakeAudioSink
 
@@ -2611,6 +2616,29 @@ def test_the_cap_refuses_to_cut_a_word_in_half():
     playout.submit(SPEECH * 50)
     assert playout.dropped_s == 0.0
     assert playout.backlog_s() > 0.1
+
+
+def test_the_models_idle_stream_does_not_hold_the_duck_closed():
+    """The failure this whole design turns on.
+
+    The model streams output continuously whether or not it is translating.
+    Keyed on bytes arriving, the duck closes on the first chunk and never
+    reopens - the remote party is inaudible for the entire call. Keyed on
+    energy, idle output passes through without touching it.
+    """
+    playout, sink, volume = build()
+    idle = bytes(bytearray().join(
+        (1078).to_bytes(2, "little", signed=True) for _ in range(CHUNK_BYTES // 2)
+    ))
+    playout.submit(SPEECH)
+    playout.tick()
+    assert volume.calls == [(7, 0.0)]          # real speech closed it
+
+    for _ in range(DUCK_HOLD_TICKS * 3):       # then a long idle stream
+        playout.submit(idle)
+        assert playout.tick() is False         # written, but not speech
+    assert volume.calls[-1] == (7, 1.0)        # duck reopened despite bytes
+    assert len(sink.chunks) > DUCK_HOLD_TICKS  # and every chunk still reached pw-cat
 
 
 def test_suppressed_throws_the_queue_away_and_opens_the_duck():
@@ -2739,7 +2767,17 @@ class Playout:
         return None
 
     def tick(self) -> bool:
-        """Write exactly one chunk. True if it carried speech."""
+        """Write exactly one chunk. True if it carried speech.
+
+        The duck follows SPEECH in the output, not the presence of bytes.
+        That distinction is the whole ballgame: the model emits a continuous
+        24 kHz stream whether or not it is translating (measured - 151 s of
+        audio for 154 s of pure silence in), so a byte-presence trigger would
+        close the duck on the first chunk and never reopen it, muting the
+        remote party for the entire call. Silent chunks are still WRITTEN, to
+        keep pw-cat's buffer primed and the loop paced; they just do not
+        count as speech.
+        """
         if self.suppressed:
             if self._duck is not None:
                 self._duck.open()
@@ -2750,18 +2788,23 @@ class Playout:
             chunk = self._take_locked()
 
         if chunk is None:
+            chunk = SILENCE_CHUNK
+            speech = False
+        else:
+            speech = has_speech(chunk)
+
+        if speech:
+            self._idle_ticks = 0
+            self.spoken_s += CHUNK_MS / 1000
+            if self._duck is not None:
+                self._duck.close()
+        else:
             self._idle_ticks += 1
             if self._duck is not None and self._idle_ticks >= DUCK_HOLD_TICKS:
                 self._duck.open()
-            self._sink.write(SILENCE_CHUNK)
-            return False
 
-        self._idle_ticks = 0
-        self.spoken_s += CHUNK_MS / 1000
-        if self._duck is not None:
-            self._duck.close()
         self._sink.write(chunk)
-        return True
+        return speech
 
     def run(self, stop: threading.Event) -> None:
         """Pace comes from the sink.
