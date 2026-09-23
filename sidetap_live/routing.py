@@ -179,7 +179,7 @@ class Journal:
             log.error(
                 "routing journal at %s is unreadable (%s) - proceeding as if "
                 "there is nothing to restore, but the audio graph may still "
-                "be modified from a previous session. Run `sidetap doctor "
+                "be modified from a previous session. Run `sidetap-live doctor "
                 "--repair` and check manually if call audio sounds wrong.",
                 path,
                 exc,
@@ -520,7 +520,7 @@ class Router:
             log.error(
                 "could not fully restore the audio graph - at least one link "
                 "failed to apply. Keeping the routing journal so the next "
-                "repair can retry; run `sidetap doctor --repair`."
+                "repair can retry; run `sidetap-live doctor --repair`."
             )
         else:
             Journal().save(self._journal_path)

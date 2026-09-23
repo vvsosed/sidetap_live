@@ -53,7 +53,7 @@ def test_unknown_mic_is_an_error_with_a_hint(idle_graph):
     with pytest.raises(CaptureError) as excinfo:
         plan_recorders(idle_graph, CaptureConfig(mic="nonexistent-device"))
 
-    assert "sidetap devices" in str(excinfo.value)
+    assert "sidetap-live devices" in str(excinfo.value)
 
 
 def test_no_mic_yields_one_track(idle_graph):

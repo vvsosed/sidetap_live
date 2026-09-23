@@ -99,7 +99,7 @@ def check_virtmic(graph: PwGraph, config_path: Path = VIRTMIC_CONFIG_PATH) -> Ch
     return Check(
         "virtual mic",
         False,
-        f"missing {', '.join(missing)} - run `sidetap doctor --install` then "
+        f"missing {', '.join(missing)} - run `sidetap-live doctor --install` then "
         "`systemctl --user restart pipewire pipewire-pulse`",
     )
 

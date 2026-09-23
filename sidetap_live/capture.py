@@ -49,7 +49,7 @@ def plan_recorders(graph: PwGraph, config: CaptureConfig) -> list[RecorderSpec]:
         )
         if node is None:
             raise CaptureError(
-                f"No microphone matching {config.mic!r}. Try: sidetap devices"
+                f"No microphone matching {config.mic!r}. Try: sidetap-live devices"
             )
         specs.append(
             RecorderSpec(track=MIC, target=node.serial, latency=config.latency)
@@ -79,7 +79,7 @@ def plan_recorders(graph: PwGraph, config: CaptureConfig) -> list[RecorderSpec]:
             if node is None:
                 raise CaptureError(
                     f"No output device matching {config.remote!r}. "
-                    "Try: sidetap devices"
+                    "Try: sidetap-live devices"
                 )
             specs.append(
                 RecorderSpec(
