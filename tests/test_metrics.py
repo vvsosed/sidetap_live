@@ -50,3 +50,37 @@ def test_mute_is_recorded_separately_from_bypass():
 
     metrics.set_bypassed(False)
     assert metrics.snapshot().muted_out is True
+
+
+def test_live_text_accumulates_rather_than_replacing():
+    """The model sends no turn boundary, so each event is a few words.
+
+    Replacing on every fragment left the dashboard showing two words of a
+    sentence - which is what a real call actually looked like.
+    """
+    metrics = Metrics()
+    for fragment in ("the coastal", " regions were", " cosmopolitan"):
+        metrics.append_text(Direction.IN, source=fragment)
+    assert metrics.snapshot().directions[Direction.IN].source == (
+        "the coastal regions were cosmopolitan"
+    )
+
+
+def test_live_text_is_bounded_because_the_pane_is_not_a_log():
+    from sidetap_live.metrics import LIVE_TEXT_CHARS
+
+    metrics = Metrics()
+    for _ in range(200):
+        metrics.append_text(Direction.OUT, target="a long stretch of speech ")
+    text = metrics.snapshot().directions[Direction.OUT].target
+    assert len(text) == LIVE_TEXT_CHARS
+    assert text.endswith("speech ")          # keeps the RECENT end, not the old
+
+
+def test_the_two_streams_accumulate_independently():
+    metrics = Metrics()
+    metrics.append_text(Direction.IN, source="privet")
+    metrics.append_text(Direction.IN, target="hello")
+    metrics.append_text(Direction.IN, source=" kak dela")
+    state = metrics.snapshot().directions[Direction.IN]
+    assert (state.source, state.target) == ("privet kak dela", "hello")

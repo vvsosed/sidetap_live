@@ -385,10 +385,10 @@ class DirectionInterpreter:
                 self._metrics.add_cost(self._rates.output_usd(output_seconds(len(pcm))))
                 self._note_spoke()
             case SourceText(text=text):
-                self._metrics.set_text(self.direction, source=text)
+                self._metrics.append_text(self.direction, source=text)
                 self._emit("source", text)
             case TargetText(text=text):
-                self._metrics.set_text(self.direction, target=text)
+                self._metrics.append_text(self.direction, target=text)
                 self._emit("target", text)
             case GoAway():
                 # Must stay. note_goaway is reachable only from here.
