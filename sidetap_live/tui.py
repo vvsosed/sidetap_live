@@ -203,24 +203,18 @@ class SidetapLiveApp(App):
     def action_mute(self) -> None:
         """Stop sending your translated voice, without leaving the call.
 
-        Through playout.set_suppressed, never by assigning `suppressed`
-        directly: the setter also throws the backlog away, and a queue built
-        up while muted is a translation of a conversation that has already
-        moved on. On unmute it would arrive as a voice recapping the last
-        minute.
+        Routed through Session and read back from Metrics, NOT from
+        playout.suppressed. Bypass suppresses the same OUT playout, so
+        `not playout.suppressed` asks the wrong question while bypassed and
+        would un-suppress OUT mid-bypass - putting translated speech over the
+        unmediated conversation bypass exists to step out of.
 
-        Reads and writes the OUT playout directly rather than round-tripping
-        through Metrics, which has no mute field of its own - unlike bypass,
-        which the session already mirrors into Metrics for other reasons.
-        NOTE for whoever wires bypass into Session: if bypass ends up
-        suppressing this same OUT playout, toggling mute off `playout.
-        suppressed` will read the wrong question while bypassed, exactly as
-        sidetap's docstring for this method used to warn. That needs a flag
-        independent of the playout the day the two interact.
+        Keeping the read on Metrics also preserves the one-way dependency
+        that makes --no-tui and the headless suite the same code path: this
+        module polls a snapshot and never reaches into the pipeline's state.
         """
         if self._session is not None:
-            playout = self._session.playouts[Direction.OUT]
-            playout.set_suppressed(not playout.suppressed)
+            self._session.set_mute_out(not self._metrics.snapshot().muted_out)
 
     def action_flush(self) -> None:
         if self._session is not None:

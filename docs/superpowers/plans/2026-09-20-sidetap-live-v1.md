@@ -1213,6 +1213,11 @@ class Snapshot:
     directions: dict[Direction, DirectionState]
     cost_usd: float = 0.0
     bypassed: bool = False
+    # Mute is a separate control from bypass even though both suppress the
+    # OUT playout. The TUI needs to know which the user asked for: pressed
+    # while bypassed, mute changes what you come back to, not what bypass is
+    # doing now. Reading playout.suppressed instead conflates the two.
+    muted_out: bool = False
     # Session-wide, not per-direction: it is a property of the two tracks
     # together. Fraction of wall clock where BOTH carry speech at once -
     # the most direct measure of whether the humans stopped taking turns.
@@ -4981,7 +4986,32 @@ Per direction, two threads instead of four:
 
 - [ ] **Step 6: Carry the rest of `Session` over unchanged, fixing only the rename**
 
-`set_bypass`, `_set_bypass_locked`, `_link_real_mic`, `alarm_dead_air`, `_join_workers`, `shutdown`, `run_session` and `_run_headless` are ported **as they are**. Three of their properties are load-bearing and must survive intact:
+`set_bypass`, `_set_bypass_locked`, `set_mute_out`, `_apply_suppression_locked`, `_link_real_mic`, `alarm_dead_air`, `_join_workers`, `shutdown`, `run_session` and `_run_headless` are ported **as they are**.
+
+**`set_mute_out` and `_apply_suppression_locked` are not optional.** Mute and
+bypass both suppress the OUT playout, and the only correct way to combine them
+is a separate `_muted_out` flag ORed with bypass:
+
+```python
+    def _apply_suppression_locked(self, bypassed: bool) -> None:
+        """OUT is suppressed if EITHER control says so; IN only by bypass.
+
+        Takes `bypassed` as an argument rather than reading self._bypassed,
+        because _set_bypass_locked deliberately writes that field AFTER this
+        runs - reading it here would apply the previous value on the way in.
+
+        Guarded on an actual change, because set_suppressed() flushes and
+        flush() cuts the utterance in progress short. Re-asserting a state
+        that already holds - pressing `m` twice while bypassed - would chop a
+        sentence for no reason.
+        """
+```
+
+Without it, toggling mute while bypassed un-suppresses OUT and puts translated
+speech over the unmediated conversation bypass exists to step out of. `Session`
+writes `metrics.set_muted_out(value)` alongside the flag, under the lifecycle
+lock, so the lit key and the next keypress cannot disagree about what the user
+asked for. Three of their properties are load-bearing and must survive intact:
 
 - **Bypass has three effects and all three matter** — the duck opens and stays open, your real mic is linked straight into the virtual mic, and playout is suppressed on both directions. Describing or implementing only one is how a user ends up with translated speech talking over the unmediated conversation it was meant to replace.
 - **The real-mic link is not journalled and is unlinked by replay, not by recomputation.** The default source can change mid-call (a headset gets plugged in) and recomputing from a fresh snapshot would unlink the wrong pair while leaving the real link live. `shutdown()` tears it down itself, first, because `doctor --repair` cannot find it.

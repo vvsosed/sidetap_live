@@ -34,3 +34,19 @@ def test_overlap_is_session_wide_not_per_direction():
     metrics = Metrics()
     metrics.set_overlap_pct(12.5)
     assert metrics.snapshot().overlap_pct == 12.5
+
+
+def test_mute_is_recorded_separately_from_bypass():
+    """Both suppress the OUT playout, but the TUI must know which the user
+    asked for: pressed while bypassed, mute changes what you come back to."""
+    metrics = Metrics()
+    snapshot = metrics.snapshot()
+    assert (snapshot.bypassed, snapshot.muted_out) == (False, False)
+
+    metrics.set_muted_out(True)
+    metrics.set_bypassed(True)
+    snapshot = metrics.snapshot()
+    assert (snapshot.bypassed, snapshot.muted_out) == (True, True)
+
+    metrics.set_bypassed(False)
+    assert metrics.snapshot().muted_out is True

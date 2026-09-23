@@ -55,6 +55,11 @@ class Snapshot:
     directions: dict[Direction, DirectionState]
     cost_usd: float = 0.0
     bypassed: bool = False
+    # Mute is a separate control from bypass even though both suppress the
+    # OUT playout. The TUI needs to know which the user asked for: pressed
+    # while bypassed, mute changes what you come back to, not what bypass is
+    # doing now. Reading playout.suppressed instead would conflate them.
+    muted_out: bool = False
     # Session-wide, not per-direction: it is a property of the two tracks
     # together. Fraction of wall clock where BOTH carry speech at once -
     # the most direct measure of whether the humans stopped taking turns.
@@ -67,6 +72,7 @@ class Metrics:
         self._states = {d: DirectionState() for d in Direction}
         self._cost_usd = 0.0
         self._bypassed = False
+        self._muted_out = False
         self._overlap_pct = 0.0
 
     def set_text(self, direction: Direction, *, source: str | None = None,
@@ -162,6 +168,10 @@ class Metrics:
         with self._lock:
             self._cost_usd += usd
 
+    def set_muted_out(self, value: bool) -> None:
+        with self._lock:
+            self._muted_out = value
+
     def set_bypassed(self, value: bool) -> None:
         with self._lock:
             self._bypassed = value
@@ -177,5 +187,6 @@ class Metrics:
                 directions=deepcopy(self._states),
                 cost_usd=self._cost_usd,
                 bypassed=self._bypassed,
+                muted_out=self._muted_out,
                 overlap_pct=self._overlap_pct,
             )
