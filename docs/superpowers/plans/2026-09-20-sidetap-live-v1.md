@@ -3738,23 +3738,39 @@ Immediately before `self._send(chunk.pcm)` at the end of `feed()`:
 ```python
     # ---------- the receive thread ----------
 
-    def _receive(self, session) -> None:
-        """Drain one session's events. Records only - never transitions.
+**`_receive` and `note_event` already exist** — Task 20 wrote them, routing
+through `note_event_from(session, event)` so that an overlap can tell the two
+live sessions apart. **Do not redefine either of them here**, or the session
+attribution disappears and the replacement's discarded audio starts reaching
+playout, repeating a sentence on every rotation.
 
-        Ends when session.events() returns, which close() makes happen. One
-        thread per session, so a rotation retires the old one naturally
-        instead of needing a flag read under a lock on every event.
+What you extend instead is **`_dispatch`**, which Task 20 left as a
+GoAway-only partial:
+
+```python
+    def _dispatch(self, event) -> None:
+        """The session currently on air's non-overlap event handling.
+
+        Only GoAway is wired here: it is what starts the overlap this task
+        builds, so it cannot wait for Task 21. ...
         """
-        for event in session.events():
-            try:
-                self.note_event(event)
-            except Exception:
-                # A malformed event must not end the direction's receive loop
-                # for the rest of the session.
-                log.exception("interpreter event error (%s)", self.direction.value)
+        if isinstance(event, GoAway):
+            self.note_goaway(event)
+```
 
-    def note_event(self, event) -> None:
-        """Handle one SessionEvent. Public so tests drive it without threads."""
+**Keep the `GoAway` case.** `note_goaway` is reachable only through
+`_dispatch`, so dropping it stops rotation entirely — eight of Task 20's tests
+fail if you do, which is the intended guard, but it is cheaper to not break it.
+Widen the method into a match over the full alphabet:
+
+```python
+    def _dispatch(self, event) -> None:
+        """Handle one event from the session currently on air.
+
+        Events from a warming replacement never reach here - note_event_from
+        filters them out, because its first seconds translate audio this
+        session has already spoken and playing them would repeat a sentence.
+        """
         match event:
             case AudioOut(pcm=pcm):
                 self._playout.submit(pcm)
@@ -3772,6 +3788,7 @@ Immediately before `self._send(chunk.pcm)` at the end of `feed()`:
                 self._metrics.set_text(self.direction, target=text)
                 self._emit("target", text)
             case GoAway():
+                # Must stay. note_goaway is reachable only from here.
                 self.note_goaway(event)
             case ResumptionHandle(handle=handle):
                 self.note_handle(handle)
