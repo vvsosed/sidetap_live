@@ -3912,6 +3912,21 @@ def test_events_are_appended_and_flushed_per_event(tmp_path):
     }
 
 
+def test_markdown_joins_fragments_into_readable_paragraphs(tmp_path):
+    """The model emits no turn boundary, so text arrives a few words at a
+    time. One line per fragment makes an hour-long call unreadable."""
+    transcript = EventTranscript(tmp_path, session="s1")
+    for t, text in ((1.0, "the coastal"), (1.4, " regions were"), (1.9, " cosmopolitan")):
+        transcript.write(event(t, Direction.IN, "source", text))
+    transcript.write(event(2.4, Direction.IN, "target", "прибрежные районы"))
+    text = transcript.close().read_text()
+
+    assert "the coastal regions were cosmopolitan" in text
+    # The JSONL keeps them separate; only the rendering joins them.
+    rows = [line for line in transcript.jsonl_path.read_text().splitlines()[1:]]
+    assert len(rows) == 4
+
+
 def test_markdown_interleaves_both_directions_chronologically(tmp_path):
     transcript = EventTranscript(tmp_path, session="s1")
     transcript.write(event(2.0, Direction.OUT, "source", "how are you"))
@@ -3985,18 +4000,41 @@ def event_to_dict(event: TranscriptEvent) -> dict:
 
 
 def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
-    """Chronological, both directions and both streams interleaved."""
+    """Chronological, both directions and both streams interleaved.
+
+    Consecutive fragments of the same direction and kind are joined into one
+    paragraph rather than one line each. That is not cosmetic: the model
+    emits no turn boundary at all - experiment 4 observed `finished=True`
+    never firing across a whole run - so transcription arrives as fragments
+    of a few words, roughly twice a second per stream. Rendered one per line,
+    an hour of conversation is some 14,000 two-word lines and unreadable.
+
+    The JSONL keeps every fragment exactly as it arrived; this is a
+    presentation choice and belongs here rather than on the write path,
+    where it would lose data.
+    """
     lines = [f"# Interpretation transcript {session}", "", f"_engine: {ENGINE} ({MODEL})_", ""]
     last: tuple[str, str] | None = None
+    buffer: list[str] = []
+
+    def flush() -> None:
+        if buffer:
+            lines.append("".join(buffer).strip())
+            buffer.clear()
+
     for event in sorted(events, key=lambda e: e.t):
         heading = (LABELS[event.direction], event.kind)
         if heading != last:
+            flush()
             lines.append("")
             label, kind = heading
             marker = "" if kind == "source" else " → "
             lines.append(f"**{label}{marker}** _{hhmmss(event.t)}_")
             last = heading
-        lines.append(event.text)
+        # Joined with no separator: fragments arrive carrying their own
+        # leading space (" жили", " всегда там").
+        buffer.append(event.text)
+    flush()
     return "\n".join(lines) + "\n"
 
 
