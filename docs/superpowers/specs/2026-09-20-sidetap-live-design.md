@@ -4,9 +4,12 @@ Status: design, approved 2026-09-20.
 
 ## What this is
 
-A second implementation of sidetap's interpreter, built on a single
-speech-to-speech model instead of a cascade, so the two can be run against real
-calls and compared.
+A real-time two-way voice interpreter for calls on Linux, built on a single
+speech-to-speech model.
+
+It shares its audio layer with `sidetap` — the same author's cascaded
+interpreter, which this was ported from — but it is a separate program,
+evaluated on its own terms.
 
 The audio surface is identical to sidetap's: the remote party's voice is tapped
 from the messenger's own playback stream, and translated speech is injected
@@ -93,7 +96,7 @@ Consequences, all accepted:
 - **No region pinning.** sidetap pins Speech-to-Text to `europe-west3` for a
   ~30 ms RTT from central Europe. That control does not exist for this model,
   so the network term in the latency budget is whatever Google's edge gives us.
-  This is a measured finding of the comparison, not a blocker for it.
+  Whatever that costs is simply part of the latency this program delivers.
 - Billing runs outside the GCP project sidetap uses.
 - It is a preview model and may change or be withdrawn.
 
@@ -101,8 +104,8 @@ The alternative was `gemini-3.8-live` on Vertex — native audio, ADC,
 region-pinnable — *prompted* to act as an interpreter. Rejected because it has
 no `translationConfig` and its agentic turn-taking, barge-in and
 answer-the-question instincts are precisely what the initial research spike
-identified as disqualifying. Building the comparison against a model fighting
-its own design would measure the prompt, not the approach.
+identified as disqualifying. Building on a model fighting its own design would
+measure the prompt rather than the approach.
 
 ### What you hear: the duck follows the output, not the input
 
@@ -280,8 +283,8 @@ the rest of the process through `queue.Queue` exactly as sidetap's workers do.
 
 The alternative — converting the ported capture, tap, routing and playout code
 to asyncio — was rejected. It is subprocess-and-thread shaped, it is the tested
-part, and rewriting it would put the comparison's foundation at risk to serve
-the part being measured.
+part, and rewriting it would risk the tested foundation to serve the part
+being measured.
 
 Per direction: a capture thread (`capture.py`, ported), an interpreter thread
 owning the asyncio loop and the Live session, and a playout thread. Two more
@@ -540,8 +543,9 @@ New: `--duck-level`, `--echo-out` / `--no-echo-out`, `--no-idle-suspend`.
 
 `--phrase` deserves a note: sidetap boosts recognition of names and jargon
 through Speech-to-Text's phrase hints. This model exposes no equivalent, so
-names are at the mercy of the model. That is a quality difference the
-comparison will surface rather than a gap to work around.
+names are at the mercy of the model. Experiment 5 found eight technical terms
+survived intact and consistently, but personal names are untested and remain a
+known risk.
 
 ### TUI
 
@@ -575,10 +579,9 @@ exit leaves everything up to that moment on disk. The `.md` interleaves them
 chronologically at close. A `meta` line at the head of the file records
 `engine: "live"` with the model id.
 
-**This requires a matching change in `sidetap`**: emitting each paired unit as
-two events with `engine: "cascade"`. Without it the two systems' transcripts
-are not comparable and the head-to-head has no textual evidence. It is small,
-it is work in the other repository, and it is part of this project's scope.
+The schema is this project's own. Nothing has to be read back by another
+program, so the fields are chosen for what is actually observable here rather
+than for anything else's shape.
 
 ## Failure handling
 

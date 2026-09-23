@@ -5298,146 +5298,15 @@ git add tests/test_smoke.py
 git commit -m "Add an end-to-end test through the fakes"
 ```
 
-### Task 29: A transcript comparison tool, in this repository
+### Task 29: REMOVED 2026-09-23
 
-**This task was rewritten. It originally changed `$SIDETAP` to emit this
-project's event schema.** That solved the problem in the wrong place: sidetap
-is a separate, actively-developed project, and making it carry a schema change
-to serve an experiment living here pushes this project's cost onto it.
+This task changed `$SIDETAP` to emit a matching transcript schema, then was
+rewritten as a converter reading both formats. Both existed to serve a
+head-to-head comparison against sidetap, which has since been dropped:
+sidetap_live is evaluated on its own terms.
 
-A converter reads both formats and loses nothing, because **sidetap's paired
-rows are strictly more information than events, not less.** Nothing needs to
-change on its side, and nothing in this task writes to `$SIDETAP`.
-
-**Files:**
-- Create: `sidetap_live/compare.py`
-- Test: `tests/test_compare.py`
-
-**sidetap's row shape** (read from its `transcript.py`, current as of
-2026-09-23):
-
-```json
-{"t": 0.0, "t_end": 10.79, "direction": "in",
- "source": "which is basically a rehash of what",
- "target": "что, по сути, является пересказом того, что",
- "dropped": false, "truncated": false,
- "latency": {"asr_ms": 5716.2, "mt_ms": 715.4, "tts_ms": 240.7,
-             "tts_total_ms": 869.1, "total_ms": 6672.3},
- "wall_clock": "..."}
-```
-
-**This project's row shape:**
-
-```json
-{"t": 1.0, "direction": "in", "kind": "source", "text": "privet"}
-```
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-# tests/test_compare.py
-import json
-
-from sidetap_live.compare import Engine, load_events, summarise
-
-
-def write(tmp_path, name, rows):
-    path = tmp_path / name
-    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
-    return path
-
-
-CASCADE = [
-    {"t": 0.0, "t_end": 10.8, "direction": "in", "source": "hello there",
-     "target": "privet", "dropped": False, "truncated": False,
-     "latency": {"asr_ms": 5716.2, "mt_ms": 715.4, "tts_ms": 240.7,
-                 "tts_total_ms": 869.1, "total_ms": 6672.3}},
-]
-
-LIVE = [
-    {"meta": {"engine": "live", "model": "gemini-3.5-live-translate-preview"}},
-    {"t": 1.0, "direction": "in", "kind": "source", "text": "hello"},
-    {"t": 1.2, "direction": "in", "kind": "source", "text": " there"},
-    {"t": 1.4, "direction": "in", "kind": "target", "text": "privet"},
-]
-
-
-def test_a_cascade_row_becomes_two_events(tmp_path):
-    """Pairing is MORE information than events, so this direction is lossless."""
-    events = load_events(write(tmp_path, "c.jsonl", CASCADE))
-    assert [(e.kind, e.text) for e in events] == [
-        ("source", "hello there"),
-        ("target", "privet"),
-    ]
-
-
-def test_the_cascades_stage_latency_survives_the_conversion(tmp_path):
-    """The single-box engine has no stage breakdown, but discarding
-    sidetap's would destroy data for nothing."""
-    events = load_events(write(tmp_path, "c.jsonl", CASCADE))
-    assert events[1].latency_ms == 6672.3
-
-
-def test_the_engine_is_detected_not_declared(tmp_path):
-    """A transcript should be readable without being told what wrote it."""
-    assert load_events(write(tmp_path, "c.jsonl", CASCADE))[0].engine is Engine.CASCADE
-    assert load_events(write(tmp_path, "l.jsonl", LIVE))[0].engine is Engine.LIVE
-
-
-def test_live_meta_rows_are_not_events(tmp_path):
-    events = load_events(write(tmp_path, "l.jsonl", LIVE))
-    assert len(events) == 3
-
-
-def test_summarise_reports_what_the_head_to_head_asks(tmp_path):
-    cascade = summarise(load_events(write(tmp_path, "c.jsonl", CASCADE)))
-    live = summarise(load_events(write(tmp_path, "l.jsonl", LIVE)))
-
-    assert cascade.engine is Engine.CASCADE
-    assert cascade.median_latency_ms == 6672.3
-    # The single-box engine reports no stage latency at all - absence, not zero.
-    assert live.median_latency_ms is None
-    assert live.source_words == 2 and live.target_words == 1
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-```bash
-uv run pytest tests/test_compare.py -q
-```
-
-Expected: FAIL, no module named `sidetap_live.compare`.
-
-- [ ] **Step 3: Write `sidetap_live/compare.py`**
-
-Requirements, not code to copy — this one is small enough to design:
-
-- `Engine` is an enum of `CASCADE` and `LIVE`, **detected from the row shape**,
-  not from a declared field. A cascade row has `source` and `target` keys; a
-  live row has `kind`. A transcript should be readable without being told what
-  produced it, because the point is comparing files that may have been written
-  months apart.
-- `load_events(path)` returns a flat, time-sorted list of events with
-  `t`, `direction`, `kind`, `text`, `engine`, and an optional `latency_ms`.
-  A cascade row yields two events: source at `t`, target at `t_end`.
-  **Do not infer a duration from `t_end - t`** — sidetap's own docstring
-  explains why it is not one, and for a whole utterance the two are equal.
-  A live `meta` row is not an event.
-- `summarise(events)` returns the figures the head-to-head asks for:
-  engine, event count, source and target word counts, and
-  `median_latency_ms` — **`None` for the live engine, not `0.0`.** It has no
-  stage breakdown to report, and zero would read as "instant" in a comparison
-  table. Absence is the honest value.
-- A `__main__` entry so it can be run over two files directly.
-
-- [ ] **Step 4: Run to verify it passes**
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add sidetap_live/compare.py tests/test_compare.py
-git commit -m "Compare transcripts from both engines, without changing either"
-```
+Nothing replaces it. `transcript.py` already writes what this project needs,
+and no second format has to be read.
 
 
 ### Task 30: `README.md`, `CLAUDE.md` and the manual smoke checklist
