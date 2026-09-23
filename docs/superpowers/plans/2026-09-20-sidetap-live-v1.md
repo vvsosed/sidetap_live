@@ -3023,8 +3023,9 @@ headphones; OUT reads the mic and speaks into the virtual mic's sink. Nothing
 here knows which is which beyond its config.
 
 THE INVARIANT: every state transition happens on the pump thread. The receive
-thread only records - GoAway sets a deadline, Closed sets a flag, a resumption
-handle is stored - and the pump acts on them when the next block arrives.
+thread only records - GoAway opens the replacement, Closed sets a flag, a
+resumption handle is stored - and the pump acts on them when the next block
+arrives.
 Transitioning from the receive thread would close a session out from under the
 loop iterating it, and would need a second lock around the whole machine.
 """
@@ -3045,7 +3046,7 @@ from .ports import Clock, SessionFactory
 from .preroll import PreRoll
 from .types import (
     IDLE_SUSPEND_S,
-    ROTATE_PAUSE_S,
+    OVERLAP_MAX_S,
     TARGET_RATE,
     AudioChunk,
     AudioOut,
@@ -3136,8 +3137,8 @@ class DirectionInterpreter:
             if not self._should_wake(speaking):
                 return
             self._open(replay=True)
-        elif self._state is SessionState.DRAINING:
-            self._rotate_if_due()
+        elif self._state is SessionState.OVERLAPPING:
+            self._switch_if_ready()
         elif self._should_suspend():
             self._suspend()
             return
@@ -3222,10 +3223,10 @@ class DirectionInterpreter:
             return reason
 ```
 
-The three methods `_rotate_if_due`, `_reopen` and `_receive` are written in Tasks 20 and 21. Add these stubs now so the module imports, and **delete them in the tasks that replace them**:
+The three methods `_switch_if_ready`, `_reopen` and `_receive` are written in Tasks 20 and 21. Add these stubs now so the module imports, and **delete them in the tasks that replace them**:
 
 ```python
-    def _rotate_if_due(self) -> None:
+    def _switch_if_ready(self) -> None:
         raise NotImplementedError("Task 20")
 
     def _reopen(self) -> None:
