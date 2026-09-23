@@ -248,3 +248,122 @@ def test_rotation_replays_no_preroll():
 
     # Exactly one more block - the one that drove the switch. No replay burst.
     assert len(new.sent) == sent_before_switch + BLOCK_BYTES
+
+
+from sidetap_live.metrics import Health
+from sidetap_live.types import (
+    DEAD_AIR_S,
+    TTS_BYTES_PER_S,
+    AudioOut,
+    Closed,
+    ResumptionHandle,
+    SourceText,
+    TargetText,
+)
+
+
+def build_with_events(**kwargs):
+    events = []
+    interpreter, sessions, metrics, clock = build(**kwargs)
+    interpreter._on_event = events.append
+    return interpreter, sessions, metrics, clock, events
+
+
+def test_audio_out_reaches_playout_and_is_billed():
+    interpreter, _, metrics, _ = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=b"\x00" * TTS_BYTES_PER_S))
+
+    assert interpreter._playout.backlog_s() == pytest.approx(1.0)
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.backlog_s == pytest.approx(1.0)
+    # 1 s of output at 25 tokens/s x $21/M, on top of the input already billed.
+    assert metrics.snapshot().cost_usd > 25 * 21.0 / 1e6 * 0.9
+
+
+def test_both_transcriptions_become_separate_events():
+    interpreter, _, metrics, _, events = build_with_events()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(SourceText(text="privet"))
+    interpreter.note_event(TargetText(text="hello"))
+
+    assert [(e.kind, e.text) for e in events] == [
+        ("source", "privet"),
+        ("target", "hello"),
+    ]
+    state = metrics.snapshot().directions[Direction.IN]
+    assert (state.source, state.target) == ("privet", "hello")
+
+
+def test_offset_is_speech_onset_to_first_audio_out():
+    interpreter, _, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    clock.advance(1.4)
+    interpreter.note_event(AudioOut(pcm=b"\x00" * 100))
+    assert metrics.snapshot().directions[Direction.IN].offset_s == pytest.approx(1.4)
+
+
+def test_offset_measures_the_stretch_not_every_chunk():
+    interpreter, _, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    clock.advance(1.4)
+    interpreter.note_event(AudioOut(pcm=b"\x00" * 100))
+    clock.advance(5.0)
+    interpreter.note_event(AudioOut(pcm=b"\x00" * 100))
+    assert metrics.snapshot().directions[Direction.IN].offset_s == pytest.approx(1.4)
+
+
+def test_dead_air_fires_when_speech_produces_nothing():
+    interpreter, _, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    clock.advance(DEAD_AIR_S + 1)
+    interpreter.feed(block(SPEECH))
+    assert metrics.snapshot().directions[Direction.IN].dead_air is True
+
+
+def test_audio_out_clears_the_dead_air_alarm():
+    interpreter, _, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    clock.advance(DEAD_AIR_S + 1)
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=b"\x00" * 100))
+    assert metrics.snapshot().directions[Direction.IN].dead_air is False
+
+
+def test_a_dead_session_is_reopened_on_the_last_handle():
+    interpreter, sessions, metrics, _ = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(ResumptionHandle(handle="h-9"))
+    interpreter.note_event(Closed(reason="boom"))
+    assert metrics.snapshot().directions[Direction.IN].session is Health.OK
+
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.sessions) == 2
+    assert sessions.opens[1] == ("en", False, "h-9")
+
+
+def test_a_dead_session_while_suspended_is_not_reopened():
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+    clock.advance(IDLE_SUSPEND_S + 1)
+    interpreter.feed(block(SILENCE))
+    assert interpreter.state is SessionState.SUSPENDED
+
+    interpreter.note_event(Closed(reason="closed by us"))
+    interpreter.feed(block(SILENCE))
+    assert len(sessions.sessions) == 1
+
+
+def test_goaway_arriving_as_an_event_enters_overlapping():
+    # NOTE: the plan's Task 21 text names this test "...enters_draining" and
+    # asserts SessionState.DRAINING, a state that does not exist - it is the
+    # pre-reconciliation name for what Task 20's make-before-break rewrite
+    # renamed to OVERLAPPING (see the plan's own Task 20 section, "In feed(),
+    # replace the DRAINING branch", and SessionState's docstring). Every other
+    # rotation test in this file already asserts OVERLAPPING for this same
+    # transition. Corrected here rather than left permanently red; see the
+    # Task 21 report for the full disagreement.
+    interpreter, _, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(GoAway(time_left_s=30.0))
+    assert interpreter.state is SessionState.OVERLAPPING

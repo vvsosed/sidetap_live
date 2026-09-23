@@ -27,6 +27,7 @@ from .playout import Playout
 from .ports import Clock, SessionFactory
 from .preroll import PreRoll
 from .types import (
+    DEAD_AIR_S,
     IDLE_SUSPEND_S,
     OVERLAP_MAX_S,
     TARGET_RATE,
@@ -119,8 +120,13 @@ class DirectionInterpreter:
                 if self._speech_at is None:
                     self._speech_at = self._clock.monotonic()
 
-        if self._take_dead() is not None:
+        if self._state is not SessionState.SUSPENDED and self._take_dead() is not None:
+            # Same reasoning as the SUSPENDED wake below: _reopen's pre-roll
+            # replay already drains this chunk - it was added to the ring
+            # above, before the dead check ran. Falling through to the send
+            # at the end of feed() would put it on the wire twice.
             self._reopen()
+            return
 
         if self._state is SessionState.SUSPENDED:
             if not self._should_wake(speaking):
@@ -136,6 +142,7 @@ class DirectionInterpreter:
             self._suspend()
             return
 
+        self._check_dead_air()
         self._send(chunk.pcm)
         if self._pending is not None:
             self._pending.send(chunk.pcm)
@@ -327,18 +334,84 @@ class DirectionInterpreter:
 
         return has_speech(pcm)
 
-    # ---------- stubs replaced by Task 21 ----------
+    # ---------- Task 21: audio out, transcript, offset, dead session ----------
 
     def _dispatch(self, event) -> None:
-        """The session currently on air's non-overlap event handling.
+        """Handle one event from the session currently on air.
 
-        Only GoAway is wired here: it is what starts the overlap this task
-        builds, so it cannot wait for Task 21. Audio out, transcript text,
-        dead-session recovery and the rest of the alphabet are Task 21's
-        body of this method.
+        Events from a warming replacement never reach here - note_event_from
+        filters them out, because its first seconds translate audio this
+        session has already spoken and playing them would repeat a sentence.
         """
-        if isinstance(event, GoAway):
-            self.note_goaway(event)
+        match event:
+            case AudioOut(pcm=pcm):
+                self._playout.submit(pcm)
+                self._metrics.set_backlog_s(self.direction, self._playout.backlog_s())
+                # submit() may have trimmed at a silence boundary, so read the
+                # drop total back here rather than letting Playout reach into
+                # Metrics - the dependency runs one way only.
+                self._metrics.set_dropped_s(self.direction, self._playout.dropped_s)
+                self._metrics.add_cost(self._rates.output_usd(output_seconds(len(pcm))))
+                self._note_spoke()
+            case SourceText(text=text):
+                self._metrics.set_text(self.direction, source=text)
+                self._emit("source", text)
+            case TargetText(text=text):
+                self._metrics.set_text(self.direction, target=text)
+                self._emit("target", text)
+            case GoAway():
+                # Must stay. note_goaway is reachable only from here.
+                self.note_goaway(event)
+            case ResumptionHandle(handle=handle):
+                self.note_handle(handle)
+            case Closed(reason=reason):
+                with self._lock:
+                    self._dead = reason
+            case _:
+                log.debug("ignoring %r", event)
+
+    def _note_spoke(self) -> None:
+        """First audio since speech started fixes this stretch's offset.
+
+        Clearing _speech_at is what makes the metric measure the STRETCH
+        rather than every chunk: the second and later chunks of the same
+        utterance find it already None and leave the figure alone.
+        """
+        with self._lock:
+            started, self._speech_at = self._speech_at, None
+        if started is not None:
+            self._metrics.set_offset_s(
+                self.direction, self._clock.monotonic() - started
+            )
+        self._metrics.set_dead_air(self.direction, False)
+
+    def _check_dead_air(self) -> None:
+        """Speech went in and nothing has come out.
+
+        Matters most on OUT: IN degrades gracefully now, because no audio out
+        opens the duck and the user hears the unmediated call. On OUT there is
+        no raw path to fall through to - the remote party hears nothing and
+        has no way to know.
+        """
+        with self._lock:
+            started = self._speech_at
+        if started is not None and self._clock.monotonic() - started > DEAD_AIR_S:
+            self._metrics.set_dead_air(self.direction, True)
+
+    def _emit(self, kind: str, text: str) -> None:
+        if self._on_event is None:
+            return
+        self._on_event(
+            TranscriptEvent(
+                t=self._clock.monotonic() - self._session_t0,
+                direction=self.direction,
+                kind=kind,
+                text=text,
+            )
+        )
 
     def _reopen(self) -> None:
-        raise NotImplementedError("Task 21")
+        """The session died with no GoAway. Come back on the last handle."""
+        self._metrics.set_health(self.direction, session=Health.FAILED)
+        self._close("died")
+        self._open(replay=True, handle=self._handle)
