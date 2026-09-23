@@ -48,6 +48,15 @@ NO_AUDIO_S = 15.0
 # the deadline and losing the connection outright.
 OVERLAP_MAX_S = 15.0
 
+# Minimum gap between attempts to open a session after one failed.
+#
+# A failed open leaves the direction with nothing to send to, and the next
+# speech block would otherwise retry immediately - ten attempts a second
+# against an API that just refused us. Long enough to be polite to a rate
+# limiter or a revoked key, short enough that a transient network blip costs
+# one missed phrase rather than the rest of the call.
+REOPEN_BACKOFF_S = 2.0
+
 # Silence after which a session is closed entirely. Reopening costs the
 # cold-start latency measured in docs/experiments/01-connect.md, paid only
 # when someone starts talking again after most of a minute of nothing.

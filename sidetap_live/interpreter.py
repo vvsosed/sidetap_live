@@ -30,6 +30,7 @@ from .types import (
     DEAD_AIR_S,
     IDLE_SUSPEND_S,
     OVERLAP_MAX_S,
+    REOPEN_BACKOFF_S,
     TARGET_RATE,
     AudioChunk,
     AudioOut,
@@ -86,6 +87,8 @@ class DirectionInterpreter:
 
         self._state = SessionState.SUSPENDED
         self._session = None
+        # Monotonic time of the last failed open, or None. Gates retries.
+        self._open_failed_at: float | None = None
         self._handle: str | None = None
 
         # The replacement session while OVERLAPPING. Fed the same audio as
@@ -162,7 +165,20 @@ class DirectionInterpreter:
                 log.exception("interpreter pump error (%s)", self.direction.value)
         self._close("shutdown")
 
+    def _backing_off(self) -> bool:
+        """True while a recent failed open should not be retried yet.
+
+        Without this, every speech block retries - ten attempts a second at
+        an API that just refused us, which is how a revoked key becomes a
+        rate-limit ban.
+        """
+        if self._open_failed_at is None:
+            return False
+        return self._clock.monotonic() - self._open_failed_at < REOPEN_BACKOFF_S
+
     def _should_wake(self, speaking: bool) -> bool:
+        if self._backing_off():
+            return False
         # With no detector there is no onset to wait for, so open at once and
         # hold the session for the whole call - the documented degraded mode.
         return speaking or not self._activity.available
@@ -175,9 +191,24 @@ class DirectionInterpreter:
     def _open(self, *, replay: bool, handle: str | None = None) -> float:
         """Open a session. Returns seconds of pre-roll replayed into it."""
         self._set_state(SessionState.OPENING)
-        self._session = self._sessions.open(
-            self._config.target_lang, echo=self._config.echo, handle=handle
-        )
+        try:
+            self._session = self._sessions.open(
+                self._config.target_lang, echo=self._config.echo, handle=handle
+            )
+        except Exception as exc:
+            # Leaving the state at OPENING would be a lie and a trap: nothing
+            # re-wakes an OPENING direction and nothing sends from one, so the
+            # direction goes silently dead for the rest of the call and only
+            # the dead-air alarm ever notices. Fall back to SUSPENDED, which
+            # is both true and recoverable - the next speech onset retries,
+            # subject to the backoff below.
+            log.error("%s could not open a session: %s", self.direction.value, exc)
+            self._session = None
+            self._open_failed_at = self._clock.monotonic()
+            self._metrics.set_health(self.direction, session=Health.FAILED)
+            self._set_state(SessionState.SUSPENDED)
+            return 0.0
+        self._open_failed_at = None
         with self._lock:
             self._goaway_at = None
             self._dead = None

@@ -399,3 +399,77 @@ def test_a_death_mid_overlap_promotes_the_replacement_instead_of_orphaning_it():
     # Fed exactly once per block, as the on-air session - not twice, and not
     # as a leaked second consumer.
     assert len(replacement.sent) == sent + 3 * BLOCK_BYTES
+
+
+class _DeadFactory:
+    """A factory whose sessions never open."""
+
+    def __init__(self):
+        self.attempts = 0
+
+    def open(self, target_lang, *, echo, handle=None):
+        self.attempts += 1
+        raise RuntimeError("PERMISSION_DENIED: API key revoked")
+
+
+def build_dead():
+    from sidetap_live.cost import Rates
+    from sidetap_live.preroll import PreRoll
+
+    clock = FakeClock()
+    sessions = _DeadFactory()
+    metrics = Metrics()
+    interpreter = DirectionInterpreter(
+        InterpreterConfig(direction=Direction.IN, target_lang="en", echo=False),
+        sessions=sessions,
+        playout=Playout(Direction.IN, FakeAudioSink()),
+        activity=SpeechActivity(lambda pcm: True, clock),
+        metrics=metrics,
+        clock=clock,
+        rates=Rates(),
+        preroll=PreRoll(seconds=1.0),
+    )
+    return interpreter, sessions, metrics, clock
+
+
+def test_a_failed_open_falls_back_to_suspended_not_stuck_in_opening():
+    """OPENING is a lie after a failure, and a trap.
+
+    Nothing re-wakes an OPENING direction and nothing sends from one, so the
+    direction goes silently dead for the rest of the call with only the
+    dead-air alarm ever noticing.
+    """
+    interpreter, _, metrics, _ = build_dead()
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.SUSPENDED
+    assert metrics.snapshot().directions[Direction.IN].session is Health.FAILED
+
+
+def test_a_failed_open_backs_off_instead_of_retrying_every_block():
+    """Ten attempts a second at an API that just refused us is how a revoked
+    key becomes a rate-limit ban."""
+    from sidetap_live.types import REOPEN_BACKOFF_S
+
+    interpreter, sessions, _, clock = build_dead()
+    for _ in range(20):
+        interpreter.feed(block(SPEECH))
+    assert sessions.attempts == 1
+
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+    assert sessions.attempts == 2
+
+
+def test_recovery_clears_the_backoff_and_the_health_flag():
+    interpreter, sessions, metrics, clock = build_dead()
+    interpreter.feed(block(SPEECH))
+    assert metrics.snapshot().directions[Direction.IN].session is Health.FAILED
+
+    working = FakeSessionFactory()
+    interpreter._sessions = working
+    clock.advance(__import__("sidetap_live.types",fromlist=["x"]).REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.RUNNING
+    assert metrics.snapshot().directions[Direction.IN].session is Health.OK
