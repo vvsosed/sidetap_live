@@ -5298,167 +5298,147 @@ git add tests/test_smoke.py
 git commit -m "Add an end-to-end test through the fakes"
 ```
 
-### Task 29: Make sidetap's transcripts comparable
+### Task 29: A transcript comparison tool, in this repository
 
-**This task modifies `$SIDETAP`, the other repository.** It is the only one that does. Without it the two systems produce transcripts in different schemas and the head-to-head has no textual evidence.
+**This task was rewritten. It originally changed `$SIDETAP` to emit this
+project's event schema.** That solved the problem in the wrong place: sidetap
+is a separate, actively-developed project, and making it carry a schema change
+to serve an experiment living here pushes this project's cost onto it.
 
-The schemas must share four required keys — `t`, `direction`, `kind`, `text`. `latency_ms` is optional and only sidetap emits it; an optional field one side omits does not harm comparability, and discarding sidetap's stage timings to force a match would destroy data for no gain.
+A converter reads both formats and loses nothing, because **sidetap's paired
+rows are strictly more information than events, not less.** Nothing needs to
+change on its side, and nothing in this task writes to `$SIDETAP`.
 
 **Files:**
-- Modify: `$SIDETAP/sidetap/transcript.py`
-- Test: `$SIDETAP/tests/test_transcript.py`
+- Create: `sidetap_live/compare.py`
+- Test: `tests/test_compare.py`
 
-- [ ] **Step 1: Write the failing test in the other repository**
+**sidetap's row shape** (read from its `transcript.py`, current as of
+2026-09-23):
 
-```bash
-cd "$SIDETAP"
+```json
+{"t": 0.0, "t_end": 10.79, "direction": "in",
+ "source": "which is basically a rehash of what",
+ "target": "что, по сути, является пересказом того, что",
+ "dropped": false, "truncated": false,
+ "latency": {"asr_ms": 5716.2, "mt_ms": 715.4, "tts_ms": 240.7,
+             "tts_total_ms": 869.1, "total_ms": 6672.3},
+ "wall_clock": "..."}
 ```
 
-Append to `tests/test_transcript.py`:
+**This project's row shape:**
+
+```json
+{"t": 1.0, "direction": "in", "kind": "source", "text": "privet"}
+```
+
+- [ ] **Step 1: Write the failing test**
 
 ```python
+# tests/test_compare.py
 import json
 
-from sidetap.transcript import ENGINE, events_of
-from sidetap.types import Direction, Latency, Record, Unit
+from sidetap_live.compare import Engine, load_events, summarise
 
 
-def a_record():
-    return Record(
-        unit=Unit(direction=Direction.IN, text="privet", t_start=1.0, t_end=1.0),
-        target_text="hello",
-        latency=Latency(asr_ms=100.0, mt_ms=50.0, tts_ms=200.0),
-    )
+def write(tmp_path, name, rows):
+    path = tmp_path / name
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return path
 
 
-def test_a_paired_record_becomes_two_events():
-    """sidetap_live cannot pair its two transcription streams, so the shared
-    schema is events. A pair is expressible as events; events are not
-    expressible as a pair."""
-    assert events_of(a_record()) == [
-        {"t": 1.0, "direction": "in", "kind": "source", "text": "privet"},
-        {"t": 1.0, "direction": "in", "kind": "target", "text": "hello",
-         "latency_ms": 350.0},
+CASCADE = [
+    {"t": 0.0, "t_end": 10.8, "direction": "in", "source": "hello there",
+     "target": "privet", "dropped": False, "truncated": False,
+     "latency": {"asr_ms": 5716.2, "mt_ms": 715.4, "tts_ms": 240.7,
+                 "tts_total_ms": 869.1, "total_ms": 6672.3}},
+]
+
+LIVE = [
+    {"meta": {"engine": "live", "model": "gemini-3.5-live-translate-preview"}},
+    {"t": 1.0, "direction": "in", "kind": "source", "text": "hello"},
+    {"t": 1.2, "direction": "in", "kind": "source", "text": " there"},
+    {"t": 1.4, "direction": "in", "kind": "target", "text": "privet"},
+]
+
+
+def test_a_cascade_row_becomes_two_events(tmp_path):
+    """Pairing is MORE information than events, so this direction is lossless."""
+    events = load_events(write(tmp_path, "c.jsonl", CASCADE))
+    assert [(e.kind, e.text) for e in events] == [
+        ("source", "hello there"),
+        ("target", "privet"),
     ]
 
 
-def test_the_header_names_the_engine(tmp_path):
-    transcript = BilingualTranscript(tmp_path, session="s1")
-    transcript.close()
-    first = json.loads(transcript.jsonl_path.read_text().splitlines()[0])
-    assert first["meta"]["engine"] == ENGINE == "cascade"
+def test_the_cascades_stage_latency_survives_the_conversion(tmp_path):
+    """The single-box engine has no stage breakdown, but discarding
+    sidetap's would destroy data for nothing."""
+    events = load_events(write(tmp_path, "c.jsonl", CASCADE))
+    assert events[1].latency_ms == 6672.3
 
 
-def test_a_dropped_utterance_still_emits_both_events(tmp_path):
-    """Dropped audio was still recognised and translated; leaving it out
-    would make the two transcripts disagree about what was said."""
-    record = a_record()
-    record = type(record)(unit=record.unit, target_text=record.target_text,
-                          latency=record.latency, dropped=True)
-    assert len(events_of(record)) == 2
+def test_the_engine_is_detected_not_declared(tmp_path):
+    """A transcript should be readable without being told what wrote it."""
+    assert load_events(write(tmp_path, "c.jsonl", CASCADE))[0].engine is Engine.CASCADE
+    assert load_events(write(tmp_path, "l.jsonl", LIVE))[0].engine is Engine.LIVE
+
+
+def test_live_meta_rows_are_not_events(tmp_path):
+    events = load_events(write(tmp_path, "l.jsonl", LIVE))
+    assert len(events) == 3
+
+
+def test_summarise_reports_what_the_head_to_head_asks(tmp_path):
+    cascade = summarise(load_events(write(tmp_path, "c.jsonl", CASCADE)))
+    live = summarise(load_events(write(tmp_path, "l.jsonl", LIVE)))
+
+    assert cascade.engine is Engine.CASCADE
+    assert cascade.median_latency_ms == 6672.3
+    # The single-box engine reports no stage latency at all - absence, not zero.
+    assert live.median_latency_ms is None
+    assert live.source_words == 2 and live.target_words == 1
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-uv run pytest tests/test_transcript.py -q
+uv run pytest tests/test_compare.py -q
 ```
 
-Expected: FAIL with `ImportError: cannot import name 'ENGINE'`.
+Expected: FAIL, no module named `sidetap_live.compare`.
 
-- [ ] **Step 3: Edit `$SIDETAP/sidetap/transcript.py`**
+- [ ] **Step 3: Write `sidetap_live/compare.py`**
 
-Add near the top:
+Requirements, not code to copy — this one is small enough to design:
 
-```python
-ENGINE = "cascade"
-```
+- `Engine` is an enum of `CASCADE` and `LIVE`, **detected from the row shape**,
+  not from a declared field. A cascade row has `source` and `target` keys; a
+  live row has `kind`. A transcript should be readable without being told what
+  produced it, because the point is comparing files that may have been written
+  months apart.
+- `load_events(path)` returns a flat, time-sorted list of events with
+  `t`, `direction`, `kind`, `text`, `engine`, and an optional `latency_ms`.
+  A cascade row yields two events: source at `t`, target at `t_end`.
+  **Do not infer a duration from `t_end - t`** — sidetap's own docstring
+  explains why it is not one, and for a whole utterance the two are equal.
+  A live `meta` row is not an event.
+- `summarise(events)` returns the figures the head-to-head asks for:
+  engine, event count, source and target word counts, and
+  `median_latency_ms` — **`None` for the live engine, not `0.0`.** It has no
+  stage breakdown to report, and zero would read as "instant" in a comparison
+  table. Absence is the honest value.
+- A `__main__` entry so it can be run over two files directly.
 
-Add beside `record_to_dict`:
+- [ ] **Step 4: Run to verify it passes**
 
-```python
-def events_of(record: Record) -> list[dict]:
-    """One paired record as two transcript events.
-
-    sidetap_live writes this same schema (see that repository's
-    transcript.py) because its two transcription streams drift independently
-    and cannot honestly be paired. Events are the common denominator: a pair
-    is expressible as two events, but two drifting streams are not
-    expressible as a pair. `latency_ms` is sidetap-only and optional - the
-    single-box engine has no stage breakdown to report, and discarding these
-    timings to force a match would destroy data for nothing.
-    """
-    return [
-        {
-            "t": record.unit.t_start,
-            "direction": record.direction.value,
-            "kind": "source",
-            "text": record.unit.text,
-        },
-        {
-            "t": record.unit.t_end,
-            "direction": record.direction.value,
-            "kind": "target",
-            "text": record.target_text,
-            "latency_ms": record.latency.total_ms,
-        },
-    ]
-```
-
-In `BilingualTranscript.__init__`, after opening the handle, write a meta line:
-
-```python
-        self._write_line(
-            {
-                "meta": {
-                    "engine": ENGINE,
-                    "session": self.session,
-                    "started": datetime.now(timezone.utc).isoformat(),
-                }
-            }
-        )
-```
-
-Add the `_write_line` helper used by both, and change `write()` to emit `events_of(record)` instead of `record_to_dict(record)`:
-
-```python
-    def _write_line(self, payload: dict) -> None:
-        self._jsonl.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        self._jsonl.flush()
-```
-
-```python
-            self._records.append(record)
-            for event in events_of(record):
-                self._write_line(event)
-```
-
-Keep `record_to_dict` if other tests use it; otherwise delete it. The Markdown rendering is unchanged.
-
-- [ ] **Step 4: Run the other repository's whole suite**
+- [ ] **Step 5: Commit**
 
 ```bash
-uv run pytest -q
+git add sidetap_live/compare.py tests/test_compare.py
+git commit -m "Compare transcripts from both engines, without changing either"
 ```
 
-Expected: PASS, all tests. Fix any test that asserted the old JSONL shape.
-
-- [ ] **Step 5: Commit in the other repository**
-
-```bash
-git add sidetap/transcript.py tests/test_transcript.py
-git commit -m "Write the transcript as events, so sidetap_live's is comparable
-
-sidetap_live runs a single speech-to-speech model whose two transcription
-streams drift independently and cannot honestly be paired into one record.
-Events are the common denominator: a pair is expressible as two events, but
-two drifting streams are not expressible as a pair.
-
-latency_ms stays as an optional field on the target event. The single-box
-engine has no stage breakdown to report, and discarding these timings to
-force an identical schema would destroy data for no gain."
-cd /home/vvsosed/Documents/repo2/sidetap_live
-```
 
 ### Task 30: `README.md`, `CLAUDE.md` and the manual smoke checklist
 
