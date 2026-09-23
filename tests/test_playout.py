@@ -115,3 +115,118 @@ def test_has_speech_judges_a_short_buffer_rather_than_ignoring_it():
     assert has_speech(b"") is False
     assert has_speech(b"\x00\x40" * 10) is True      # 20 samples, loud
     assert has_speech(b"\x00\x00" * 10) is False
+
+
+from sidetap_live.playout import (
+    DUCK_HOLD_TICKS,
+    STARVE_LIMIT_TICKS,
+    Playout,
+    has_speech,
+)
+from sidetap_live.types import TTS_BYTES_PER_S, Direction
+from tests.conftest import FakeAudioSink
+
+SPEECH = b"\x00\x40" * (CHUNK_BYTES // 2)
+
+
+def build(**kwargs):
+    sink = FakeAudioSink()
+    volume = FakeVolumeControl()
+    duck = DuckControl(volume, object_id=7)
+    return Playout(Direction.IN, sink, duck=duck, **kwargs), sink, volume
+
+
+def test_a_full_chunk_is_written_and_closes_the_duck():
+    playout, sink, volume = build()
+    playout.submit(SPEECH)
+    assert playout.tick() is True
+    assert sink.chunks == [SPEECH]
+    assert volume.calls == [(7, 0.0)]
+
+
+def test_an_empty_queue_writes_silence_and_keeps_the_duck_shut_until_the_hold():
+    playout, sink, volume = build()
+    playout.submit(SPEECH)
+    playout.tick()
+    for _ in range(DUCK_HOLD_TICKS - 1):
+        assert playout.tick() is False
+    assert volume.calls == [(7, 0.0)]          # still closed, within the hold
+    playout.tick()
+    assert volume.calls == [(7, 0.0), (7, 1.0)]
+
+
+def test_a_gap_shorter_than_the_hold_does_not_reopen_the_duck():
+    """Chunks arriving unevenly must not chop the original into fragments."""
+    playout, sink, volume = build()
+    playout.submit(SPEECH)
+    playout.tick()
+    for _ in range(DUCK_HOLD_TICKS - 2):
+        playout.tick()
+    playout.submit(SPEECH)
+    assert playout.tick() is True
+    assert volume.calls == [(7, 0.0)]
+
+
+def test_a_partial_tail_waits_then_is_flushed_padded():
+    playout, sink, _ = build()
+    playout.submit(SPEECH[: CHUNK_BYTES // 2])
+    for _ in range(STARVE_LIMIT_TICKS):
+        assert playout.tick() is False
+    assert playout.tick() is True
+    assert len(sink.chunks[-1]) == CHUNK_BYTES
+    assert sink.chunks[-1].endswith(b"\x00" * (CHUNK_BYTES // 2))
+
+
+def test_backlog_reports_seconds_pending():
+    playout, _, _ = build()
+    playout.submit(b"\x00" * TTS_BYTES_PER_S)
+    assert playout.backlog_s() == pytest.approx(1.0)
+
+
+def test_the_cap_drops_at_a_silence_boundary_only():
+    playout, _, _ = build(lag_cap_s=0.5)
+    loud = SPEECH * 25                                   # 0.5 s, all loud
+    playout.submit(loud + QUIET + loud)
+    assert playout.backlog_s() > 0.5
+    # It dropped everything up to the quiet frame, and no further.
+    assert playout.dropped_s == pytest.approx(len(loud) / TTS_BYTES_PER_S)
+
+
+def test_the_cap_refuses_to_cut_a_word_in_half():
+    playout, _, _ = build(lag_cap_s=0.1)
+    playout.submit(SPEECH * 50)
+    assert playout.dropped_s == 0.0
+    assert playout.backlog_s() > 0.1
+
+
+def test_the_models_idle_stream_does_not_hold_the_duck_closed():
+    """The failure this whole design turns on.
+
+    The model streams output continuously whether or not it is translating.
+    Keyed on bytes arriving, the duck closes on the first chunk and never
+    reopens - the remote party is inaudible for the entire call. Keyed on
+    energy, idle output passes through without touching it.
+    """
+    playout, sink, volume = build()
+    idle = bytes(bytearray().join(
+        (1078).to_bytes(2, "little", signed=True) for _ in range(CHUNK_BYTES // 2)
+    ))
+    playout.submit(SPEECH)
+    playout.tick()
+    assert volume.calls == [(7, 0.0)]          # real speech closed it
+
+    for _ in range(DUCK_HOLD_TICKS * 3):       # then a long idle stream
+        playout.submit(idle)
+        assert playout.tick() is False         # written, but not speech
+    assert volume.calls[-1] == (7, 1.0)        # duck reopened despite bytes
+    assert len(sink.chunks) > DUCK_HOLD_TICKS  # and every chunk still reached pw-cat
+
+
+def test_suppressed_throws_the_queue_away_and_opens_the_duck():
+    playout, sink, volume = build()
+    playout.submit(SPEECH)
+    playout.tick()
+    playout.set_suppressed(True)
+    assert playout.backlog_s() == 0.0
+    assert playout.tick() is False
+    assert volume.calls[-1] == (7, 1.0)

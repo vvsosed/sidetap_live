@@ -162,3 +162,191 @@ class DuckControl:
     @property
     def is_open(self) -> bool:
         return not self._closed
+
+
+class Playout:
+    """One direction's output: a pending buffer drained one chunk per tick."""
+
+    def __init__(
+        self,
+        direction: Direction,
+        sink: AudioSink,
+        *,
+        duck: DuckControl | None = None,
+        lag_cap_s: float = LAG_CAP_S,
+    ):
+        self.direction = direction
+        self.dropped_s = 0.0
+        self.spoken_s = 0.0
+        self.suppressed = False
+        self._sink = sink
+        self._duck = duck
+        self._lag_cap_s = lag_cap_s
+        self._lock = threading.Lock()
+        self._pending = bytearray()
+        self._starved = 0
+        self._idle_ticks = DUCK_HOLD_TICKS
+
+    @property
+    def duck(self) -> DuckControl | None:
+        return self._duck
+
+    def submit(self, pcm: bytes) -> None:
+        with self._lock:
+            self._pending.extend(pcm)
+            self._trim_locked()
+
+    def backlog_s(self) -> float:
+        with self._lock:
+            return len(self._pending) / TTS_BYTES_PER_S
+
+    def flush(self) -> float:
+        """Drop everything not yet handed to the sink. Returns seconds dropped.
+
+        The chunk already passed to sink.write() cannot be recalled - pw-cat
+        has it. sidetap measured 441 ms still sitting in pw-cat's own buffer
+        at the moment the hotkey fires (docs/experiments/02-pwcat-playback.md
+        in that repository); that audio is past this process's control and
+        plays regardless.
+        """
+        with self._lock:
+            seconds = len(self._pending) / TTS_BYTES_PER_S
+            self._pending.clear()
+            self._starved = 0
+            return seconds
+
+    def set_suppressed(self, value: bool) -> None:
+        """Entering bypass throws the queue away.
+
+        The conversation during bypass happens unmediated, so a translation of
+        it is worth nothing by the time it plays - it would arrive as a voice
+        recapping a minute the user has already had. And the cap lives below
+        the suppressed branch in tick(), so a backlog built while suppressed
+        is never trimmed.
+        """
+        self.suppressed = value
+        if value:
+            self.flush()
+
+    def _trim_locked(self) -> None:
+        """Drop the head of the buffer, but only at a pause in the output.
+
+        Backlog growth is this project's experimental result, not a nuisance,
+        so the cap sits high and is expected never to fire in an ordinary
+        call. When it does, cutting mid-word would be worse than running long,
+        so a buffer with no quiet frame in it is left alone.
+        """
+        while len(self._pending) / TTS_BYTES_PER_S > self._lag_cap_s:
+            cut = find_silence_boundary(self._pending)
+            if not cut:
+                return
+            del self._pending[:cut]
+            self.dropped_s += cut / TTS_BYTES_PER_S
+            log.warning(
+                "%s playout %.1fs behind; dropped %.1fs at a pause (%.1fs total)",
+                self.direction.value,
+                len(self._pending) / TTS_BYTES_PER_S,
+                cut / TTS_BYTES_PER_S,
+                self.dropped_s,
+            )
+
+    def _take_locked(self) -> bytes | None:
+        if len(self._pending) >= CHUNK_BYTES:
+            chunk = bytes(self._pending[:CHUNK_BYTES])
+            del self._pending[:CHUNK_BYTES]
+            self._starved = 0
+            return chunk
+        if self._pending and self._starved >= STARVE_LIMIT_TICKS:
+            # The producer has stopped rather than merely fallen behind.
+            # Padding here splices at most one chunk of silence onto a tail
+            # that was ending anyway; padding on every tick, which is what
+            # doing this unconditionally would mean, would stutter.
+            chunk = bytes(self._pending) + b"\x00" * (CHUNK_BYTES - len(self._pending))
+            self._pending.clear()
+            self._starved = 0
+            return chunk
+        self._starved += 1
+        return None
+
+    def tick(self) -> bool:
+        """Write exactly one chunk. True if it carried speech.
+
+        The duck follows SPEECH in the output, not the presence of bytes.
+        That distinction is the whole ballgame: the model emits a continuous
+        24 kHz stream whether or not it is translating (measured - 151 s of
+        audio for 154 s of pure silence in), so a byte-presence trigger would
+        close the duck on the first chunk and never reopen it, muting the
+        remote party for the entire call. Silent chunks are still WRITTEN, to
+        keep pw-cat's buffer primed and the loop paced; they just do not
+        count as speech.
+        """
+        if self.suppressed:
+            if self._duck is not None:
+                self._duck.open()
+            self._sink.write(SILENCE_CHUNK)
+            return False
+
+        with self._lock:
+            chunk = self._take_locked()
+
+        if chunk is None:
+            chunk = SILENCE_CHUNK
+            speech = False
+        else:
+            speech = has_speech(chunk)
+
+        if speech:
+            self._idle_ticks = 0
+            self.spoken_s += CHUNK_MS / 1000
+            if self._duck is not None:
+                self._duck.close()
+        else:
+            self._idle_ticks += 1
+            if self._duck is not None and self._idle_ticks >= DUCK_HOLD_TICKS:
+                self._duck.open()
+
+        self._sink.write(chunk)
+        return speech
+
+    def run(self, stop: threading.Event) -> None:
+        """Pace comes from the sink.
+
+        pw-cat blocks on write once its buffer is full, so this loop runs at
+        real time with no sleep. But PwCatSink.write() swallows a dead pipe and
+        becomes a no-op, and a no-op never blocks - so a sink that dies
+        mid-call removes the only thing pacing this loop and it would pin a
+        core until hangup. The fallback wait is not belt-and-braces; it is the
+        whole reason the `failed` flag is readable from here.
+
+        The finally is the module's one fail-safe. Leaving the duck closed
+        silences the person you are talking to and leaves them speaking to
+        nobody, which is worse than this program not working at all.
+        """
+        try:
+            while not stop.is_set():
+                self.tick()
+                if getattr(self._sink, "failed", False):
+                    stop.wait(CHUNK_MS / 1000)
+        finally:
+            if self._duck is not None:
+                self._duck.open()
+            self._sink.close()
+
+
+def earcon(duration_s: float = 0.25, frequency: float = 880.0, level: float = 0.25) -> bytes:
+    """A short tone for the dead-air alarm.
+
+    During a call you are looking at the other person, not at a dashboard, so
+    the OUT direction failing silently has to make a sound. Generated rather
+    than shipped as an asset, and with math.sin rather than numpy, because the
+    audio path deliberately has no numpy in it.
+    """
+    import math
+    import struct
+
+    samples = int(TTS_BYTES_PER_S * duration_s) // 2
+    amplitude = int(32767 * level)
+    return b"".join(
+        struct.pack("<h", int(amplitude * math.sin(2 * math.pi * frequency * i / TTS_RATE)))
+        for i in range(samples)
+    )
