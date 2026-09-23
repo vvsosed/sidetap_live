@@ -23,7 +23,7 @@ def test_lag_is_one_decimal():
 @pytest.mark.asyncio
 async def test_the_pane_shows_both_transcription_streams():
     metrics = Metrics()
-    metrics.set_text(Direction.IN, source="privet", target="hello")
+    metrics.append_text(Direction.IN, source="privet", target="hello")
     metrics.set_backlog_s(Direction.IN, 0.4)
     metrics.set_session_state(Direction.IN, SessionState.RUNNING)
 

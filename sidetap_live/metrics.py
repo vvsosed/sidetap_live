@@ -15,6 +15,16 @@ from enum import Enum
 from .types import Direction, SessionState
 
 
+# Characters of live transcription kept per stream for the dashboard.
+#
+# The model emits no turn boundary - experiment 4 saw `finished=True` never
+# fire across a whole run - so text arrives as fragments of a few words, about
+# twice a second. Replacing on each one leaves the pane showing two words;
+# accumulating without a bound leaves it showing an hour. A rolling tail is
+# what a live display actually wants, and the transcript keeps the full record.
+LIVE_TEXT_CHARS = 240
+
+
 class Health(Enum):
     OK = "ok"
     RETRYING = "retrying"
@@ -75,14 +85,24 @@ class Metrics:
         self._muted_out = False
         self._overlap_pct = 0.0
 
-    def set_text(self, direction: Direction, *, source: str | None = None,
-                 target: str | None = None) -> None:
+    def append_text(self, direction: Direction, *, source: str | None = None,
+                    target: str | None = None) -> None:
+        """Add a transcription fragment, keeping a rolling tail.
+
+        APPEND, not set. The model sends no turn boundary, so each event is a
+        few words; setting would leave the dashboard showing the last two. The
+        tail is bounded because this is a live pane, not a log - the full text
+        is in the transcript.
+
+        Fragments arrive carrying their own leading space (" жили",
+        " всегда там"), so they join with no separator.
+        """
         with self._lock:
             state = self._states[direction]
             if source is not None:
-                state.source = source
+                state.source = (state.source + source)[-LIVE_TEXT_CHARS:]
             if target is not None:
-                state.target = target
+                state.target = (state.target + target)[-LIVE_TEXT_CHARS:]
 
     def set_backlog_s(self, direction: Direction, seconds: float) -> None:
         with self._lock:
