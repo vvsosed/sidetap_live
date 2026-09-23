@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# superpowers brainstorming scratch
+.superpowers/
+
+# experiment audio - large binaries, regenerate locally
+tests/fixtures/*.raw
+docs/experiments/audio/
+
+# call transcripts - real conversation content, and a log per run
+transcripts/
