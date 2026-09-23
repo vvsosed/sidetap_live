@@ -197,14 +197,46 @@ class GeminiLiveSession:
             self._inbound.put(_SENTINEL)
 
     async def _main(self) -> None:
+        """Run the send and receive loops until one of them finishes.
+
+        Whichever finishes first is retrieved and re-raised, and that is the
+        whole point. `asyncio.wait` RETURNS the completed task rather than
+        raising its exception, so without this a hard API rejection - a 1007
+        invalid-argument, a revoked key - was stored in the task and never
+        read: _thread_main took its `else` branch and queued
+        Closed(reason="ended"), the interpreter treated a fatal error as a
+        normal close and quietly reopened, and the real diagnosis surfaced
+        only as Python's "Task exception was never retrieved" noise at
+        garbage-collection time.
+
+        The cancelled task is gathered for the same reason - a cancellation
+        left unretrieved produces the same noise.
+        """
         async with self._connect(model=self._model, config=self._config) as session:
             sender = asyncio.create_task(self._send_loop(session))
             receiver = asyncio.create_task(self._recv_loop(session))
-            _, pending = await asyncio.wait(
+            done, pending = await asyncio.wait(
                 {sender, receiver}, return_when=asyncio.FIRST_COMPLETED
             )
             for task in pending:
                 task.cancel()
+            # Unblock the sender before awaiting it. It parks on a BLOCKING
+            # queue.get inside an executor thread, and cancelling the task
+            # does not interrupt that - the thread stays parked forever.
+            # Without this the gather below never returns; without the gather,
+            # the old code simply abandoned the thread, leaking one per failed
+            # session, and rotation produces one every nine minutes.
+            self._outbound.put(_SENTINEL)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    CLOSE_TIMEOUT_S,
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                log.warning("live session loops did not stop within %ss", CLOSE_TIMEOUT_S)
+            for task in done:
+                if task.exception() is not None:
+                    raise task.exception()
 
     async def _send_loop(self, session) -> None:
         from google.genai import types

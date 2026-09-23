@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -86,3 +87,78 @@ def test_translation_config_is_top_level_not_under_generation_config():
     config = build_config(target_lang="ru", echo=False, handle=None)
     assert config.translation_config is not None
     assert config.generation_config is None
+
+
+def test_a_failing_session_reports_why_it_died():
+    """The reason must reach the application, not just the logs.
+
+    asyncio.wait RETURNS the completed task rather than raising, so a hard
+    API rejection used to be stored in the task and never read: the session
+    queued Closed(reason="ended"), the interpreter treated a fatal error as
+    a normal close and quietly reopened, and the real diagnosis appeared
+    only as "Task exception was never retrieved" at GC time.
+    """
+    import contextlib
+
+    from sidetap_live.live import GeminiLiveSession
+    from sidetap_live.types import Closed
+
+    class _Session:
+        async def send_realtime_input(self, **kwargs):
+            await asyncio.sleep(0.01)
+
+        async def receive(self):
+            raise RuntimeError("1007 Request contains an invalid argument.")
+            yield  # pragma: no cover - makes this an async generator
+
+    @contextlib.asynccontextmanager
+    async def connect(*, model, config):
+        yield _Session()
+
+    session = GeminiLiveSession(connect=connect, config={}, model="m")
+    events = list(session.events())
+
+    assert len(events) == 1
+    assert isinstance(events[0], Closed)
+    assert "1007" in events[0].reason
+    assert events[0].reason != "ended"
+
+
+def test_a_failing_session_does_not_leak_its_sender_thread():
+    """_send_loop parks on a blocking queue.get in an executor thread.
+
+    Cancelling the task does not interrupt that, so the session must push a
+    sentinel to release it. Otherwise every failed session leaks a parked
+    thread, and rotation produces one every nine minutes.
+    """
+    import contextlib
+    import threading
+
+    from sidetap_live.live import GeminiLiveSession
+
+    before = threading.active_count()
+
+    class _Session:
+        async def send_realtime_input(self, **kwargs):
+            await asyncio.sleep(0.01)
+
+        async def receive(self):
+            await asyncio.sleep(0.05)
+            raise RuntimeError("1007 Request contains an invalid argument.")
+            yield  # pragma: no cover - makes this an async generator
+
+    @contextlib.asynccontextmanager
+    async def connect(*, model, config):
+        yield _Session()
+
+    session = GeminiLiveSession(connect=connect, config={}, model="m")
+    list(session.events())
+    session._thread.join(timeout=5.0)
+    assert not session._thread.is_alive()
+
+    # Give the executor a moment to unwind, then confirm we are not growing.
+    for _ in range(50):
+        if threading.active_count() <= before + 1:
+            break
+        threading.Event().wait(0.05)
+    assert threading.active_count() <= before + 1, "sender thread leaked"
