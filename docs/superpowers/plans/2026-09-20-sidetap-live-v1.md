@@ -68,78 +68,47 @@ produced code that passed every offline test and failed only on a live call.
 
 ---
 
-## Execution status — as of 2026-09-20, branch `sidetap-live-v1`
+## Execution status — COMPLETE, branch `sidetap-live-v1`
 
-**156 tests pass** with no audio hardware, no network and no credentials.
+**All 29 tasks done. 315 tests pass** with no audio hardware, no network and no
+credentials. Task 29 was removed rather than implemented.
 
-| Task | State |
+Phase 1 was run before Phase 0, and four Phase 2 tasks alongside it — the
+Task 6 gate exists to stop the interpreter being built on an unmeasured seam
+design, and a file copy, a ring buffer, a rate table and a time integral depend
+on none of the six measurements.
+
+**What the experiments changed.** Four of six contradicted either Google's
+documentation or this design:
+
+| Experiment | Consequence |
 |---|---|
-| 1 (Steps 1–3, skeleton) | done — `google-genai` resolved to **2.24.0** |
-| 1 (Steps 4–7), 2, 3, 4, 5, 6 | **blocked**: need `GEMINI_API_KEY` and `tests/fixtures/speech_en_16k.raw` |
-| 7, 8, 9, 10, 11 — Phase 1 port | done |
-| 12 `activity.py`, 15 `cost.py`, 16 `preroll.py`, 23 `OverlapWatch` | done |
-| 13, 14, 17–22, 24–30 | **held behind the Task 6 checkpoint** |
+| 1 — connect | `translation_config` is top-level, not nested. The nested form **connects** and yields a chatbot. |
+| 2 — seam | Rotate-at-a-pause produced a 3.12 s hole against a 0.80 s pause. Reversed to make-before-break. |
+| 3 — session limits | `GoAway` is an instruction with a hard 50 s deadline, `time_left` a string. |
+| 4 — pacing | The specified metric was uninformative; the real one showed lag flat at 0.24→0.25 s. |
+| 5 — detection | Confirmed as designed. |
+| 6 — cold start | ~500 ms, and later explained the seam. |
 
-Phase 1 was run **before** Phase 0, deviating from the ordering above. That gate exists to stop Phases 2+ being built on an unmeasured seam design; Phase 1 is a mechanical copy of the PipeWire layer that no experiment outcome can invalidate. Tasks 12, 15, 16 and 23 were run for the same reason — a ring buffer, a rate table, a VAD wrapper and a time integral depend on none of the six measurements.
+Plus one no question anticipated: the model streams output continuously, which
+would have welded the duck shut for entire calls.
 
-**What each held task is actually waiting on**, so the gate is not mistaken for caution:
+**Fourteen plan bugs surfaced during implementation**, most in the seams
+between tasks rather than inside them — three of one class, where code sends a
+block, falls through, and sends it again. They were caught by implementers
+running tests as written rather than adjusting them to fit.
 
-- **13, 14** — the SDK's real config shape. The `build_config` and `parse_message` code in this plan was written from the REST documentation (`translationConfig`, `targetLanguageCode`, `inputAudioTranscription`). `google-genai` 2.24.0 may name or nest these differently, and `parse_message` additionally depends on where transcription fields sit on a message object. Task 1 Step 5 and Task 5 Step 3 settle both.
-- **17, 18** — experiment 4's output pacing. Whether the input/output ratio exceeds 1.0 decides if `--lag-cap` is load-bearing or a safety valve that never fires.
-- **19–21** — experiment 2's seam verdict. The model card warns voices may shift after long pauses and this design rotates *at* pauses. If the voice changes at the seam, the state machine these tasks build is the wrong one and the spec's *Session continuity* decision reopens.
+**One bug the experiments did not catch, and should have.** The first real call
+died on `1007 Request contains an invalid argument`: `target_language_code`
+rejects a region subtag, and rejects it *late* — after the first block or two.
+All five audio experiments used bare codes copied from Google's examples, while
+the CLI takes full BCP-47 because that is what a user types. **The experiments
+validated a config the program never sends.** Recorded in
+`docs/experiments/01-connect.md`; the lesson is to drive the real code path
+rather than a hand-written config that resembles it.
 
-**Two amendments already made to this plan during execution**, both committed: the package-rename preamble (the `sed` misses `monkeypatch` dotted-path string literals, and must not touch PipeWire node names), and Task 8's "three Protocols" typo for four.
-
-**One decision taken that this plan did not anticipate**, applied in Task 10: anything this process creates in the PipeWire graph gets this program's name — `sidetap_live_duck`, `sidetap_live.<track>.<uuid>` capture nodes, `~/.local/state/sidetap_live/` journal — while the permanent shared virtual mic keeps sidetap's (`sidetap_virtmic`, `sidetap_tts_sink`, `90-sidetap-mic.conf`, all byte-identical). Without this the head-to-head produces two programs whose graph nodes cannot be told apart, and either program's `doctor --repair` could tear down the other's live duck. `recorder.py` is consequently no longer byte-identical to sidetap's.
-
-**One external change to watch:** `sidetap` gained 17 commits on a branch `streaming-playout` during this session. Task 18's premise — "sidetap queues whole utterances" — describes sidetap's `main`, not that branch. If it lands, re-read sidetap's `playout.py` and update both Task 18 and the spec's *Playout and the duck* comparison before implementing.
-
----
-
-## Read this before Task 1
-
-**The source repository is `/home/vvsosed/Documents/repo2/sidetap`.** It is referred to below as `$SIDETAP`. Set it once per shell:
-
-```bash
-export SIDETAP=/home/vvsosed/Documents/repo2/sidetap
-```
-
-Never modify `$SIDETAP` except in Task 31, which is explicitly cross-repo.
-
-**Three conventions are non-negotiable, because the ported code depends on them:**
-
-1. **`uv` only.** Never `pip install`, never activate `.venv` by hand. `uv run` does both, from the lockfile.
-2. **Every subprocess, socket and clock sits behind a `Protocol` in `ports.py`**, with one real implementation in `adapters.py` and one fake in `tests/conftest.py`. The whole suite must run with no audio hardware, no network and no API key.
-3. **Identify PipeWire nodes by `object.serial` — except `wpctl`, which resolves against `object.id`.** Conflating them makes the duck silently never close. See the `VolumeControl` docstring in `ports.py`.
-
-**Do not run `gcloud auth ...`.** This machine is attached to a live GCP project and re-authenticating has broken it before. This project does not use GCP credentials at all — it uses `GEMINI_API_KEY`.
-
-## Appending tests to a ported file: check the function names first
-
-When a task says "append to `tests/test_x.py`", the file may already contain a
-test of the same name from the port. Python does not error on two top-level
-`def`s with the same name — the second rebinds the first, and **pytest silently
-collects only the last one.** The earlier test vanishes from the suite while
-everything still reports PASS.
-
-This actually happened: Task 13's `test_fakes_satisfy_their_protocols` collided
-with the ported one in `tests/test_ports.py`, and appending it verbatim dropped
-the original Protocol-conformance test — a silent loss of coverage that no
-failure would have surfaced. The new one was renamed to
-`test_session_fakes_satisfy_their_protocols`.
-
-Before appending, run:
-
-```bash
-grep -oE '^def (test_[a-z0-9_]+)' tests/test_x.py | sort | uniq -d
-```
-
-after the append, and confirm it prints nothing. Rename the NEW test if it
-clashes; never delete the existing one to make room.
-
-The remaining tasks that append to ported test files — 22, 24, 25, 26, 27 —
-have been checked against their upstream counterparts and are collision-free
-as written.
+**What remains is not in this plan.** The program has never completed a call.
+`docs/manual-smoke.md` is twelve checks that no automated test can reach.
 
 ## The package rename is not just imports — read this before any port task
 
