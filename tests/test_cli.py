@@ -232,7 +232,16 @@ def test_idle_suspend_defaults_on():
     assert parse("--no-idle-suspend").idle_suspend is False
 
 
-def test_lag_cap_survives_with_the_higher_default():
+def test_lag_cap_defaults_to_none_so_run_can_tell_unset_from_equal():
+    """None rather than LAG_CAP_S, and deliberately so.
+
+    run.py resolves None to the constant. Defaulting to the constant here
+    would make "user did not pass --lag-cap" indistinguishable from "user
+    passed exactly 30", and it would force the help text to restate a number
+    that already lives in types.py.
+    """
     from sidetap_live.types import LAG_CAP_S
 
-    assert parse().lag_cap == LAG_CAP_S
+    assert parse().lag_cap is None
+    assert parse("--lag-cap", "12").lag_cap == 12.0
+    assert LAG_CAP_S == 30.0

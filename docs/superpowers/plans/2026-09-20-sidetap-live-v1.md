@@ -4701,10 +4701,19 @@ def test_idle_suspend_defaults_on():
     assert parse("--no-idle-suspend").idle_suspend is False
 
 
-def test_lag_cap_survives_with_the_higher_default():
+def test_lag_cap_defaults_to_none_so_run_can_tell_unset_from_equal():
+    """None rather than LAG_CAP_S, and deliberately so.
+
+    run.py resolves None to the constant. Defaulting to the constant here
+    would make "user did not pass --lag-cap" indistinguishable from "user
+    passed exactly 30", and it would force the help text to restate a number
+    that already lives in types.py.
+    """
     from sidetap_live.types import LAG_CAP_S
 
-    assert parse().lag_cap == LAG_CAP_S
+    assert parse().lag_cap is None
+    assert parse("--lag-cap", "12").lag_cap == 12.0
+    assert LAG_CAP_S == 30.0
 ```
 
 - [ ] **Step 3: Run to verify it fails**
@@ -4847,6 +4856,15 @@ from .types import LAG_CAP_S, NO_AUDIO_S, TTS_RATE, Direction, TranscriptEvent
 ```
 
 Delete `default_voice`, `build_direction_configs` and `_rate`.
+
+- [ ] **Step 2b: Update `cli.py`'s call site, or `run` breaks on first use**
+
+`cli.main()` still forwards `recognizer_factory`, `translator` and
+`synthesizer` to `run_session(...)` — cascade-era names this task removes from
+`Session.__init__`. Nothing catches it today because `run.py` does not exist
+yet, so the call is unreachable; the moment it does, `sidetap-live run` raises
+`TypeError` on its first real invocation. Replace those three kwargs with
+`sessions=None` to match the new constructor.
 
 - [ ] **Step 3: Replace the constructor's injectable ports**
 
