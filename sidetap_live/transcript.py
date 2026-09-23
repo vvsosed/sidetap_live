@@ -41,42 +41,68 @@ def event_to_dict(event: TranscriptEvent) -> dict:
     }
 
 
+# A paragraph ends after this much speech, at the first sentence boundary.
+#
+# MEASURED against a real call: the source and target streams alternate almost
+# exactly 1:1 (101 fragments each), roughly one per second per stream, and the
+# longest gap inside a single stream was 1.95 s. So grouping by "consecutive
+# events of the same kind" produces a heading per fragment and a transcript of
+# two-word lines, and a pause-based break never fires at all.
+PARAGRAPH_SPAN_S = 18.0
+# Hard cap, for a speaker who never reaches a sentence boundary.
+PARAGRAPH_MAX_S = 45.0
+SENTENCE_END = ".!?…。！？"
+
+
+def _paragraphs(events: list[TranscriptEvent]) -> list[tuple[float, Direction, str, str]]:
+    """Group one stream's fragments into readable paragraphs.
+
+    Grouped per (direction, kind) INDEPENDENTLY, not by runs of consecutive
+    events. The two streams interleave, so a run-based grouping restarts on
+    every fragment.
+
+    A paragraph closes at the first sentence boundary after PARAGRAPH_SPAN_S,
+    which keeps sentences whole, with a hard cap for speech that never
+    supplies one.
+    """
+    out: list[tuple[float, Direction, str, str]] = []
+    streams: dict[tuple[Direction, str], list[TranscriptEvent]] = {}
+    for event in sorted(events, key=lambda e: e.t):
+        streams.setdefault((event.direction, event.kind), []).append(event)
+
+    for (direction, kind), items in streams.items():
+        buffer: list[str] = []
+        started = items[0].t
+        for event in items:
+            buffer.append(event.text)
+            span = event.t - started
+            text = "".join(buffer).strip()
+            ends_sentence = text.endswith(tuple(SENTENCE_END))
+            if (span >= PARAGRAPH_SPAN_S and ends_sentence) or span >= PARAGRAPH_MAX_S:
+                out.append((started, direction, kind, text))
+                buffer, started = [], event.t
+        if buffer:
+            out.append((started, direction, kind, "".join(buffer).strip()))
+    return sorted(out, key=lambda p: (p[0], p[2] != "source"))
+
+
 def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
     """Chronological, both directions and both streams interleaved.
 
-    Consecutive fragments of the same direction and kind are joined into one
-    paragraph rather than one line each. That is not cosmetic: the model
-    emits no turn boundary at all - experiment 4 observed `finished=True`
-    never firing across a whole run - so transcription arrives as fragments
-    of a few words, roughly twice a second per stream. Rendered one per line,
-    an hour of conversation is some 14,000 two-word lines and unreadable.
-
-    The JSONL keeps every fragment exactly as it arrived; this is a
-    presentation choice and belongs here rather than on the write path,
-    where it would lose data.
+    Fragments are joined into paragraphs because the model emits no turn
+    boundary - experiment 4 saw `finished=True` never fire across a whole run -
+    so transcription arrives a few words at a time. The JSONL keeps every
+    fragment exactly as it arrived; this is a presentation choice and belongs
+    here, where it loses nothing.
     """
     lines = [f"# Interpretation transcript {session}", "", f"_engine: {ENGINE} ({MODEL})_", ""]
-    last: tuple[str, str] | None = None
-    buffer: list[str] = []
-
-    def flush() -> None:
-        if buffer:
-            lines.append("".join(buffer).strip())
-            buffer.clear()
-
-    for event in sorted(events, key=lambda e: e.t):
-        heading = (LABELS[event.direction], event.kind)
-        if heading != last:
-            flush()
-            lines.append("")
-            label, kind = heading
-            marker = "" if kind == "source" else " →"
-            lines.append(f"**{label}{marker}** _{hhmmss(event.t)}_")
-            last = heading
-        # Joined with no separator: fragments arrive carrying their own
-        # leading space (" жили", " всегда там").
-        buffer.append(event.text)
-    flush()
+    for t, direction, kind, text in _paragraphs(events):
+        if not text:
+            continue
+        marker = "" if kind == "source" else " →"
+        lines.append("")
+        lines.append(f"**{LABELS[direction]}{marker}** _{hhmmss(t)}_")
+        lines.append(text)
     return "\n".join(lines) + "\n"
 
 
