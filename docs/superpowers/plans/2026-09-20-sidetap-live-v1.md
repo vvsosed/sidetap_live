@@ -4956,7 +4956,14 @@ Replace everything from `self.transcript = BilingualTranscript(...)` down to the
                 if direction is Direction.IN
                 else None
             )
-            playout = Playout(direction, sink, duck=duck, lag_cap_s=args.lag_cap)
+            # args.lag_cap is None unless the user passed --lag-cap, so that
+            # "unset" stays distinguishable from "passed exactly 30". Resolve
+            # it HERE: Playout compares against it on every submit, and None
+            # raises TypeError on the first translated audio of the call -
+            # which no test in this task would catch, because none of them
+            # submit audio.
+            lag_cap = args.lag_cap if args.lag_cap is not None else LAG_CAP_S
+            playout = Playout(direction, sink, duck=duck, lag_cap_s=lag_cap)
             self.playouts[direction] = playout
 
             self.interpreters[direction] = DirectionInterpreter(
