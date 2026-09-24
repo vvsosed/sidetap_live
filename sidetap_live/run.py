@@ -118,6 +118,21 @@ class Session:
                 "pipewire-pulse"
             )
 
+        # Checked BEFORE the router is engaged, with the other cheap fatal
+        # checks. Reading an environment variable has no side effects, and
+        # failing after engage() means the graph is already rewired - the
+        # exact thing the virtual-mic check above is placed early to avoid.
+        # The value is never logged, echoed or stored beyond the client.
+        api_key = None
+        if self._sessions is None:
+            import os
+
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                raise CaptureError(
+                    "GEMINI_API_KEY is not set. Run: sidetap-live doctor"
+                )
+
         self.router = Router(
             graph=self._graph,
             linker=self._linker,
@@ -134,18 +149,9 @@ class Session:
         self.rates = Rates()
 
         if self._sessions is None:
-            import os
-
             from google import genai
 
-            key = os.environ.get("GEMINI_API_KEY")
-            if not key:
-                # Fail here rather than on the first block of audio: setup()
-                # has not yet engaged the router, so nothing needs undoing.
-                raise CaptureError(
-                    "GEMINI_API_KEY is not set. Run: sidetap-live doctor"
-                )
-            self._sessions = build_factory(genai.Client(api_key=key))
+            self._sessions = build_factory(genai.Client(api_key=api_key))
 
         # One detector per track. webrtcvad adapts to the noise floor across
         # calls, and the two tracks have very different ones - a raw room
