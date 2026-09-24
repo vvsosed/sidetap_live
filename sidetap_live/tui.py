@@ -123,6 +123,21 @@ class SidetapLiveApp(App):
         # crashing whatever test happens to be tearing down at that instant.
         if not self.is_running:
             return
+        # The only thing run_session()'s SIGINT/SIGTERM handler does is set
+        # this flag, and _run_headless is built around polling it. Without the
+        # same check here, App.run() never returned on a signal: every worker
+        # thread stopped itself, but run_session()'s `finally: shutdown()` -
+        # and with it router.restore() - never ran, leaving the call routed
+        # through the duck and silenced until somebody pressed a key. Ctrl-C
+        # cannot cover for this, because Textual clears the terminal's ISIG
+        # flag while it owns the screen and no SIGINT is delivered at all.
+        #
+        # Polled here rather than pushed from the pipeline deliberately: this
+        # module reads state and never gets called into, which is what keeps
+        # --no-tui and the headless suite the same code path.
+        if self._session is not None and self._session.stop.is_set():
+            self.exit()
+            return
         snapshot = self._metrics.snapshot()
         for direction, state in snapshot.directions.items():
             suffix = direction.value
