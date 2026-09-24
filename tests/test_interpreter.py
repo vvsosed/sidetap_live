@@ -610,3 +610,64 @@ def test_an_endlessly_failing_open_is_eventually_reported_as_fatal():
     clock.advance(REOPEN_BACKOFF_S + 0.1)
     interpreter.feed(block(SPEECH))
     assert len(fatal) == 1
+
+
+def test_audio_from_a_retired_session_is_not_played():
+    """The old session's queued events keep arriving after the switch.
+
+    note_event_from only filters _pending; anything else fell straight
+    through to _dispatch. close() lets the receive thread drain whatever the
+    session had already queued, so audio the outgoing session produced before
+    the handover was played AFTER the replacement took over - repeating a
+    sentence, which is the exact artefact discarding the replacement's early
+    output exists to prevent, just from the other side.
+    """
+    interpreter, sessions, _, _ = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    old, new = sessions.sessions
+
+    interpreter.note_event_from(new, AudioOut(pcm=LOUD))     # replacement warm
+    interpreter.note_event_from(old, AudioOut(pcm=QUIET))    # outgoing silent
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+    assert interpreter._session is new
+
+    backlog = interpreter._playout.backlog_s()
+    interpreter.note_event_from(old, AudioOut(pcm=LOUD))     # queued before close
+
+    assert interpreter._playout.backlog_s() == backlog, (
+        "a retired session's audio was played over the replacement's"
+    )
+
+
+def test_the_replacement_is_billed_while_it_overlaps():
+    """Both sessions are fed during a rotation, so both are charged for.
+
+    feed() sends to _pending directly rather than through _send, so the
+    replacement's input never reached Metrics - the estimate understated
+    every rotation, and rotations are the one part of the call where the
+    input bill doubles.
+    """
+    interpreter, sessions, metrics, _ = build()
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+
+    # What one block costs with a single session live.
+    before = metrics.snapshot().cost_usd
+    interpreter.feed(block(SPEECH))
+    single = metrics.snapshot().cost_usd - before
+    assert single > 0, "precondition: a block costs something"
+
+    goaway(interpreter)
+    assert interpreter.state is SessionState.OVERLAPPING
+
+    # The same block, now going to two live sessions.
+    before = metrics.snapshot().cost_usd
+    interpreter.feed(block(SPEECH))
+    both = metrics.snapshot().cost_usd - before
+
+    assert both == pytest.approx(single * 2, rel=1e-6), (
+        "only one of the two live sessions was billed for"
+    )
