@@ -625,3 +625,26 @@ def test_setup_fails_before_engaging_when_the_api_key_is_missing(
         session.setup()
 
     assert session.router is None, "the graph was engaged before a fatal check"
+
+
+def test_a_failing_transcript_close_does_not_swallow_a_clean_shutdown(
+    session_args, fake_ports, monkeypatch
+):
+    """Every other step in shutdown() is wrapped; this one was not.
+
+    The router has already been restored by the time it runs, so an
+    exception here - a full disk, a removed path - propagated out of
+    shutdown() and out of run_session()'s finally, past the "Saved:" summary,
+    making a clean exit look like a crash.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+
+    def boom():
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(session.transcript, "close", boom)
+
+    session.shutdown()          # must not raise
+
+    assert session.router_restored is True

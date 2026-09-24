@@ -577,7 +577,15 @@ class Session:
                 except Exception:
                     log.debug("could not close a playback sink", exc_info=True)
             if self.transcript is not None:
-                self.transcript.close()
+                # Wrapped like every other step above it. The router has
+                # already been restored by this point, so an exception here -
+                # a full disk, a removed path - used to propagate out of
+                # shutdown() and out of run_session()'s finally, past the
+                # "Saved:" summary, making a clean exit look like a crash.
+                try:
+                    self.transcript.close()
+                except Exception:
+                    log.exception("could not write the transcript markdown")
 
 
 def run_session(args, *, graph, launcher, linker, clock, sessions=None,

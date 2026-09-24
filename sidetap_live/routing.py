@@ -152,8 +152,24 @@ class Journal:
         }
         tmp = path.with_name(path.name + ".tmp")
         try:
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            # fsync the file before the rename and the directory after it.
+            # os.replace() alone survives a kill -9, because the page cache
+            # outlives the process - but this file exists to survive a crash
+            # mid-rewire, and a power loss or kernel panic is squarely inside
+            # that threat model. Without the syncs the journal can come back
+            # reverted to its previous contents, which is the one state
+            # doctor --repair cannot recover from: the graph is rewired and
+            # the record of it is gone.
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp, path)
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except BaseException:
             # Do not leave a stray .tmp behind. It is harmless to the journal
             # itself - load() never reads it - but a file that accumulates on

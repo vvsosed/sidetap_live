@@ -884,3 +884,29 @@ def test_the_routing_watcher_warns_once_it_keeps_failing(tmp_path, routing_graph
     assert any("repeatedly" in r.message for r in caplog.records), (
         "the routing watcher never escalated past DEBUG"
     )
+
+
+def test_the_journal_is_flushed_to_disk_before_the_rename(tmp_path, monkeypatch):
+    """The journal's whole purpose is surviving a crash mid-rewire.
+
+    tmp + os.replace() already protected against a torn file, but nothing was
+    fsynced, so the bar it actually met was "kill -9 with the OS still up"
+    rather than the power loss its own docstring implies. A journal that
+    reverts leaves the graph rewired with nothing on disk to repair from.
+    """
+    import sidetap_live.routing as routing_module
+
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        routing_module.os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1]
+    )
+
+    path = tmp_path / "state" / "j.json"
+    Journal(broken=(LinkRef(1, "a", 2, "b"),), made=()).save(path)
+
+    assert len(synced) >= 2, (
+        "expected the temp file and its directory to be fsynced, "
+        f"saw {len(synced)}"
+    )
+    assert Journal.load(path).broken[0].src_port == "a"
