@@ -57,6 +57,51 @@ def test_it_is_not_a_gate():
     assert not hasattr(activity, "allows")
 
 
+def test_not_one_byte_reaches_the_session_differently_for_having_been_observed():
+    """The name check above is necessary and nowhere near sufficient.
+
+    Gating reinstated under any other name - observe() returning a trimmed
+    buffer, a filter() added beside it, silence dropped in the pump - passes
+    a hasattr assertion untouched. What the invariant actually says is that
+    the bytes captured and the bytes sent are the same bytes, in the same
+    order, whatever the detector thinks. So assert that.
+    """
+    from sidetap_live.cost import Rates
+    from sidetap_live.interpreter import DirectionInterpreter, InterpreterConfig
+    from sidetap_live.metrics import Metrics
+    from sidetap_live.playout import Playout
+    from sidetap_live.preroll import PreRoll
+    from sidetap_live.types import BLOCK_BYTES, AudioChunk
+    from tests.conftest import FakeAudioSink, FakeSessionFactory
+
+    loud = b"\x00\x40" * (BLOCK_BYTES // 2)
+    quiet = b"\x00\x00" * (BLOCK_BYTES // 2)
+    blocks = [loud, quiet, quiet, loud, quiet, loud, loud, quiet]
+
+    clock = FakeClock()
+    sessions = FakeSessionFactory()
+    interpreter = DirectionInterpreter(
+        InterpreterConfig(direction=Direction.OUT, target_lang="ru", echo=True),
+        sessions=sessions,
+        playout=Playout(Direction.OUT, FakeAudioSink()),
+        # A detector that calls only the loud blocks speech: if anything
+        # anywhere gates on it, the quiet blocks are what goes missing.
+        activity=SpeechActivity(lambda pcm: pcm == loud, clock),
+        metrics=Metrics(),
+        clock=clock,
+        rates=Rates(),
+        preroll=PreRoll(seconds=1.0),
+    )
+
+    for pcm in blocks:
+        interpreter.feed(AudioChunk(track="mic", pcm=pcm, t_start=0.0))
+
+    sent = b"".join(bytes(s.sent) for s in sessions.sessions)
+    assert sent == b"".join(blocks), (
+        "the stream the model received is not the stream that was captured"
+    )
+
+
 from sidetap_live.activity import OverlapWatch
 from sidetap_live.types import Direction
 
