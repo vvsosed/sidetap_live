@@ -1,8 +1,9 @@
 # Experiment 6: does this model label the remote speakers?
 
-**Verdict: NO. `gemini-3.5-live-translate-preview` accepts
-`AudioTranscriptionConfig(diarization=True)` without complaint and ignores
-it.** Across a 48.0 s two-voice clip it returned 46 transcription fragments
+**Verdict: NO — and not for this model specifically: the Live API does not
+support speaker diarization at all.** `gemini-3.5-live-translate-preview`
+accepts `AudioTranscriptionConfig(diarization=True)` without complaint and
+ignores it. Across a 48.0 s two-voice clip it returned 46 transcription fragments
 and **zero** carrying a `speaker_label` — identical to the control run with
 the flag off. A raw probe over *every* `Transcription`-shaped field on
 `LiveServerContent` found no label anywhere. The flag is inert, so nothing in
@@ -78,12 +79,54 @@ model gains support.
   −0.05 s, output audio was identical to the byte, and connect times sat inside
   the 477–549 ms range measured in experiment 1. It costs nothing because it
   does nothing.
-- **Not ruled out:** that a future model, or the same model on Vertex, honours
-  it. Re-run `scripts/exp06_diarization.py` to find out; it is three minutes
-  and a few cents.
+- **Ruled out by Google's own documentation, found after the measurement:**
+  that another Live model would do it. The Live API does not support
+  diarization *at all* — "Speaker diarization is not supported in live
+  streaming sessions. For speaker diarization, use the non-streaming Audio
+  transcription endpoint."
+  ([live transcription docs](https://ai.google.dev/gemini-api/docs/live-api/live-transcribe))
+  The field is on `AudioTranscriptionConfig` only because that same object
+  serves the non-streaming endpoint.
 - **Not addressed:** local diarization. Separating voices ourselves would mean
   a neural model on the audio path — torch, and per-frame work in Python — in
   a program whose audio path deliberately carries no numpy. Not attempted.
+
+## There is nothing to switch to
+
+Models visible to this project's key, checked with `client.models.list()` on
+2026-09-24:
+
+| model | streaming | diarization |
+|---|---|---|
+| `gemini-3.5-transcribe` | **no** — upload a recording | **yes**, up to 8 speakers (3+ experimental) |
+| `gemini-3.5-transcribe-live` | yes | no |
+| `gemini-3.5-live-translate-preview` ← this project | yes | no |
+| `gemini-3.1-flash-live-preview` | yes | no |
+| `gemini-3.8-live` | yes | no |
+| `gemini-3.8-live-extended-thinking` | yes | no |
+
+So this is not a case of having picked the wrong model. Every streaming model
+lacks it, and the one model that has it cannot be streamed to. **Do not go
+looking for a Live model that does diarization; there is not one.**
+
+## The one route that would work, and what it would cost
+
+`gemini-3.5-transcribe` takes a recording and returns a diarized transcript.
+That makes a **post-call** diarized version of `<session>.original.md`
+achievable — not a live one. It would need:
+
+- the IN capture written to disk during the call, which this program does not
+  currently do at all: the transcript is text only, and `transcripts/` holds
+  no audio;
+- a second pass over the whole call after it ends, billed separately;
+- a length limit checked before relying on it — sources seen so far disagree
+  between 30 minutes and 1 hour, and an hour-long call is the normal case
+  here;
+- and it inherits "attribution for 3 or more speakers is experimental", which
+  is exactly the multi-party case that motivated this experiment.
+
+Nothing about this is live, so it cannot help the TUI or the duck. It would
+only improve the written record after the fact.
 
 ## Two incidental findings
 

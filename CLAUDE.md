@@ -356,9 +356,12 @@ let either program's `doctor --repair` tear down the other's live duck.
   and no `speaker_label` ever arrives, on any transcription field — measured
   over a two-voice clip in `docs/experiments/06-diarization.md`. There is
   therefore no way to tell apart the participants of a multi-party call, whose
-  audio the messenger has already mixed into one port before we see it. Do not
-  re-add a flag for it without re-running `scripts/exp06_diarization.py`
-  first.
+  audio the messenger has already mixed into one port before we see it.
+  **Nor is there another Live model to switch to** — Google's own docs say
+  diarization is unsupported in streaming sessions generally, and the one
+  model that has it, `gemini-3.5-transcribe`, cannot be streamed to. Do not
+  re-add a flag for it, and do not go model-shopping, without re-running
+  `scripts/exp06_diarization.py` first.
 - **Output billing does not stop during pauses.** The model streams output
   continuously while a session is open, so a call with ordinary conversational
   gaps bills output the whole time. `IDLE_SUSPEND_S` only catches gaps past
