@@ -212,8 +212,23 @@ class SidetapLiveApp(App):
         session's state, the mirror and the snapshot disagree and the next
         press does the opposite of what the screen shows.
         """
-        if self._session is not None:
-            self._session.set_bypass(not self._metrics.snapshot().bypassed)
+        if self._session is None:
+            return
+        target = not self._metrics.snapshot().bypassed
+        # Off the UI thread. set_bypass reaches _link_real_mic, which takes a
+        # pw-dump snapshot (timeout 10 s) and one or two pw-link calls (5 s
+        # each). Inline, that froze the whole dashboard - no repaint, no other
+        # key, not even quit - for as long as PipeWire took to answer, which
+        # is precisely when it would be slow. Session serialises the work
+        # under its own lifecycle lock, so queued presses are safe; the toggle
+        # is read here, on the UI thread, so it still reflects what the screen
+        # showed when the key was pressed.
+        self.run_worker(
+            lambda: self._session.set_bypass(target),
+            thread=True,
+            group="bypass",
+            name="set-bypass",
+        )
 
     def action_mute(self) -> None:
         """Stop sending your translated voice, without leaving the call.
