@@ -108,3 +108,23 @@ def test_every_character_produced_is_counted_not_just_the_tail_kept():
     assert len(state.source) == LIVE_TEXT_CHARS, "the tail is still bounded"
     assert state.source_produced == len(produced), "the count is not bounded"
     assert state.target_produced == len("hello")
+
+
+def test_the_reason_a_direction_failed_is_carried_for_the_ui():
+    """A red health marker says something is wrong, never what.
+
+    The API refuses a session with a message that says exactly what to do -
+    depleted credits, a rejected language code - and it reached the log file
+    only. Under the TUI the log is a file, so a user watching a dead pane had
+    to go and read it afterwards to find out why the call never worked.
+    """
+    metrics = Metrics()
+    assert metrics.snapshot().directions[Direction.IN].error is None
+
+    metrics.set_error(Direction.IN, "1011 ... prepayment credits are depleted")
+    assert "credits are depleted" in metrics.snapshot().directions[Direction.IN].error
+    # The other direction is unaffected.
+    assert metrics.snapshot().directions[Direction.OUT].error is None
+
+    metrics.set_error(Direction.IN, None)
+    assert metrics.snapshot().directions[Direction.IN].error is None

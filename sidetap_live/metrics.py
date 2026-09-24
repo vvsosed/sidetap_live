@@ -71,6 +71,13 @@ class DirectionState:
     capture_dropped: int = 0
     dead_air: bool = False
     no_audio: bool = False
+    # Why this direction is failing, in the API's own words.
+    #
+    # dead_air and no_audio are symptoms; this is the cause, and it is the
+    # only thing that tells the user what to do about it. It used to reach
+    # the log alone - which, under the TUI, is a file, so a user watching a
+    # dead pane could not see it until the call was over.
+    error: str | None = None
 
     session_state: SessionState = SessionState.SUSPENDED
     rotations: int = 0
@@ -125,6 +132,10 @@ class Metrics:
             if target is not None:
                 state.target = (state.target + target)[-LIVE_TEXT_CHARS:]
                 state.target_produced += len(target)
+
+    def set_error(self, direction: Direction, text: str | None) -> None:
+        with self._lock:
+            self._states[direction].error = text
 
     def set_backlog_s(self, direction: Direction, seconds: float) -> None:
         with self._lock:

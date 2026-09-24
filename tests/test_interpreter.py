@@ -22,7 +22,7 @@ SPEECH = b"\x00\x40" * (BLOCK_BYTES // 2)
 SILENCE = b"\x00\x00" * (BLOCK_BYTES // 2)
 
 
-def build(*, echo=False, idle_suspend=True, speaking=True):
+def build(*, echo=False, idle_suspend=True, speaking=True, on_fatal=None):
     clock = FakeClock()
     sessions = FakeSessionFactory()
     metrics = Metrics()
@@ -42,6 +42,7 @@ def build(*, echo=False, idle_suspend=True, speaking=True):
         clock=clock,
         rates=Rates(),
         preroll=PreRoll(seconds=1.0),
+        on_fatal=on_fatal,
     )
     return interpreter, sessions, metrics, clock
 
@@ -670,3 +671,89 @@ def test_the_replacement_is_billed_while_it_overlaps():
     assert both == pytest.approx(single * 2, rel=1e-6), (
         "only one of the two live sessions was billed for"
     )
+
+
+# The reason a real run produced, trimmed. The API refuses the WebSocket with
+# close code 1011 and this text; nothing about it ever gets better by retrying.
+DEPLETED = "1011 None. Your prepayment credits are depleted."
+
+
+def test_a_session_that_dies_without_producing_anything_counts_as_a_failed_open():
+    """The failure mode a real run hit, and the one the ceiling never saw.
+
+    `sessions.open()` only starts a thread - the WebSocket is established on
+    it - so a connection the API refuses outright does NOT raise out of
+    _open(). It arrives later as Closed. _open() therefore took its success
+    path and reset the counters, so _open_failures could never accumulate and
+    FATAL_OPEN_FAILURES was unreachable for the entire class of failure it was
+    written for: depleted credits, a revoked key, a withdrawn model.
+
+    Measured in transcripts/20260924-162439-190140.log: 32 sessions opened and
+    died in 16 seconds, every one logging the real reason, and not one fatal
+    report or backoff.
+    """
+    fatal = []
+    interpreter, sessions, _metrics, clock = build(
+        on_fatal=lambda direction, exc: fatal.append((direction, exc))
+    )
+
+    for _ in range(FATAL_OPEN_FAILURES):
+        interpreter.feed(block(SPEECH))
+        interpreter.note_event(Closed(reason=DEPLETED))
+        interpreter.feed(block(SPEECH))
+        clock.advance(REOPEN_BACKOFF_S + 0.1)
+
+    assert len(fatal) == 1, f"never reported fatal after {len(sessions.sessions)} deaths"
+    assert fatal[0][0] is Direction.IN
+    # The reason is the only thing that tells the user what to actually do.
+    assert "credits are depleted" in str(fatal[0][1])
+
+
+def test_a_session_that_dies_on_connect_is_not_retried_on_the_very_next_block():
+    """REOPEN_BACKOFF_S covers the path that cannot happen, not this one.
+
+    The invariant says the backoff exists so a revoked key does not become a
+    rate-limit ban - but it is armed only by _open() raising. A session that
+    dies after opening went straight back through _reopen -> _open with no
+    pacing at all: the real run reconnected every 512 ms, bounded by nothing
+    but the network round trip, on both directions at once.
+    """
+    interpreter, sessions, _metrics, clock = build()
+
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.sessions) == 1
+    interpreter.note_event(Closed(reason=DEPLETED))
+    interpreter.feed(block(SPEECH))          # notices the death
+
+    interpreter.feed(block(SPEECH))
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.sessions) == 1, "hammered the API without backing off"
+
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.sessions) == 2, "never retried at all"
+
+
+def test_a_session_that_worked_before_dying_is_reopened_at_once():
+    """A mid-call blip is not a failed open, and must not be paced or counted.
+
+    Rotation and ordinary network hiccups both land here. Making a session
+    that was working wait out REOPEN_BACKOFF_S would put a two-second hole in
+    a live call, and counting it would eventually declare a healthy direction
+    dead.
+    """
+    fatal = []
+    interpreter, sessions, _metrics, clock = build(
+        on_fatal=lambda direction, exc: fatal.append((direction, exc))
+    )
+
+    for _ in range(FATAL_OPEN_FAILURES + 3):
+        interpreter.feed(block(SPEECH))
+        interpreter.note_event(AudioOut(pcm=b"\x00" * 100))   # it proved itself
+        interpreter.note_event(Closed(reason="network blip"))
+        interpreter.feed(block(SPEECH))
+
+    assert len(sessions.sessions) == FATAL_OPEN_FAILURES + 4, (
+        "a session that was working was made to wait out the backoff"
+    )
+    assert fatal == [], "a working session that blipped was reported as fatal"

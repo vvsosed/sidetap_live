@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **367 tests that run with no audio hardware, no network and no
+`tests/` holds **372 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -80,7 +80,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 367 tests, no audio/network/creds
+uv run pytest -q                                    # 372 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -223,7 +223,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 367 tests import the package with no
+  `activity.py`. This is what lets 372 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -290,6 +290,28 @@ preference and these are not.
   consecutive failures the direction reports itself dead once through
   `Session._on_direction_fatal`, which stops that direction's pump and stops
   the call when both are gone. Retries continue; only the report is latched.
+- **Opening a session is not connecting one, and only an event proves it.**
+  `sessions.open()` returns as soon as the thread starts — the WebSocket is
+  established on it — so a connection the API refuses outright does not raise
+  out of `_open()`. It arrives later as `Closed`. Counting a constructed
+  session as a working one made `_open_failures` unable to accumulate, so the
+  ceiling above was unreachable for the whole class of failure it was written
+  for: depleted credits, a revoked key, a withdrawn model. A real run
+  reconnected **32 times in 16 seconds** on each direction, every attempt
+  logging the reason, with no backoff and no report
+  (`transcripts/20260924-162439-190140.log`). So `_session_proved` is set by
+  the first event that is not `Closed`, the counters reset there rather than
+  at open, and a session that dies unproven is accounted a failed open —
+  paced by `REOPEN_BACKOFF_S` and counted toward the ceiling. A session that
+  *had* produced something and then dies is a blip: it reopens at once and is
+  not counted, because making a working direction wait two seconds puts a hole
+  in a live call.
+- **A direction that fails carries the reason, not just a red marker.**
+  `DirectionState.error` holds the API's own words and the TUI gives them a
+  row of its own under the stats. `dead_air` and `no_audio` are symptoms; this
+  is the line that says what to do. Under the TUI the log is a *file*, so
+  without this a user watching a dead pane has to end the call and go read it
+  to find out why nothing ever worked — which is exactly what happened.
 - **The duck defaults open and fails open.** `DuckControl.close()` flips its
   flag only on a *successful* `wpctl` call, and `Playout.run()`'s `finally`
   opens it unconditionally. A duck stuck **closed** silences the person you are

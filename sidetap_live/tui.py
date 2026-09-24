@@ -35,6 +35,14 @@ MARKERS = {Health.OK: "●", Health.RETRYING: "◐", Health.FAILED: "○"}
 TITLES = {Direction.IN: "THEM → you", Direction.OUT: "YOU → them"}
 
 
+def _clip(text: str, limit: int) -> str:
+    """Keep the stats line one line. The full text is in the log."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "\u2026"
+
+
 def health_marker(health: Health) -> str:
     return MARKERS[health]
 
@@ -186,6 +194,9 @@ class SidetapLiveApp(App):
     .pane.alarm { border: heavy $error; }
     .title { text-style: bold; }
     .stats { color: $text-muted; }
+    /* height: auto, so it takes no row at all while there is nothing wrong.
+       The text is clipped to one line before it is set. */
+    .error { color: $error; text-style: bold; height: auto; }
 
     /* Each stream fills what the pane has left, so the two share it evenly
        and the live line sits directly under its own settled text. */
@@ -258,6 +269,7 @@ class SidetapLiveApp(App):
                 TextStream(classes="interim", id=f"source-{suffix}"),
                 TextStream(classes="target", id=f"target-{suffix}"),
                 Static("", classes="stats", id=f"stats-{suffix}"),
+                Static("", classes="error", id=f"error-{suffix}"),
                 classes="pane",
                 id=f"pane-{suffix}",
             )
@@ -320,8 +332,25 @@ class SidetapLiveApp(App):
                 f"dropped {format_lag(state.dropped_s)}/{state.capture_dropped}"
                 f"{alarm}"
             )
+            # The reason gets a row of its own, under the stats and clipped
+            # to one line. dead_air and no_audio are symptoms of it, so both
+            # stay visible; this is the line that says what to do. Appended to
+            # the stats line instead, it wrapped and pushed the other pane's
+            # stats off the screen.
+            banner = self.query_one(f"#error-{suffix}", Static)
+            # display, not an empty string: an empty Static still takes a row,
+            # which would cost every healthy pane a line of transcript for a
+            # banner that is almost never showing.
+            banner.display = bool(state.error)
+            if state.error:
+                banner.update(
+                    _clip(state.error, banner.content_size.width or FALLBACK_WRAP)
+                )
+
             pane = self.query_one(f"#pane-{suffix}")
-            pane.set_class(state.dead_air or state.no_audio, "alarm")
+            pane.set_class(
+                state.dead_air or state.no_audio or bool(state.error), "alarm"
+            )
 
         # Overlap leads because it is the result, not a diagnostic: it is the
         # fraction of the call where both people were talking at once.

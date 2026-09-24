@@ -94,6 +94,12 @@ class DirectionInterpreter:
         self._open_failed_at: float | None = None
         self._open_failures = 0
         self._reported_fatal = False
+        # Whether the session now on air has ever produced anything. `open()`
+        # only starts a thread - the WebSocket is established on it - so a
+        # connection the API refuses does not raise out of _open() and a
+        # constructed session is NOT a working one. Nothing but an event
+        # proves it.
+        self._session_proved = False
         self._handle: str | None = None
 
         # The replacement session while OVERLAPPING. Fed the same audio as
@@ -128,13 +134,19 @@ class DirectionInterpreter:
                 if self._speech_at is None:
                     self._speech_at = self._clock.monotonic()
 
-        if self._state is not SessionState.SUSPENDED and self._take_dead() is not None:
-            # Same reasoning as the SUSPENDED wake below: _reopen's pre-roll
-            # replay already drains this chunk - it was added to the ring
-            # above, before the dead check ran. Falling through to the send
-            # at the end of feed() would put it on the wire twice.
-            self._reopen()
-            return
+        if self._state is not SessionState.SUSPENDED:
+            # Checked inside the state guard, not beside it: while SUSPENDED
+            # the flag must be left alone for the wake path to find.
+            dead = self._take_dead()
+            if dead is not None:
+                # Same reasoning as the SUSPENDED wake below: _reopen's
+                # pre-roll replay already drains this chunk - it was added to
+                # the ring above, before the dead check ran. Falling through
+                # to the send at the end of feed() would put it on the wire
+                # twice. The reason travels with it because it is the only
+                # thing that tells the user what to do about it.
+                self._reopen(dead)
+                return
 
         if self._state is SessionState.SUSPENDED:
             if not self._should_wake(speaking):
@@ -192,6 +204,38 @@ class DirectionInterpreter:
             return False
         return self._clock.monotonic() - self._open_failed_at < REOPEN_BACKOFF_S
 
+    def _note_open_failure(self, exc: BaseException) -> None:
+        """Count an attempt that produced no working session, and pace the next.
+
+        A blip clears; depleted credits, a rejected language code or a revoked
+        key fail the same way every time. Without this ceiling the direction
+        retries for the whole call and nothing but a health marker ever says
+        so. Reported once: the retries continue, the report does not.
+        """
+        self._open_failed_at = self._clock.monotonic()
+        self._open_failures += 1
+        self._metrics.set_error(self.direction, str(exc))
+        if (
+            self._open_failures >= FATAL_OPEN_FAILURES
+            and not self._reported_fatal
+            and self._on_fatal is not None
+        ):
+            self._reported_fatal = True
+            self._on_fatal(self.direction, exc)
+
+    def _note_proved(self) -> None:
+        """This session has produced something, so the connection is real.
+
+        The only honest place to clear the failure counters. Doing it when
+        `open()` returned counted a thread starting as a working session.
+        """
+        if self._session_proved:
+            return
+        self._session_proved = True
+        self._open_failures = 0
+        self._reported_fatal = False
+        self._metrics.set_error(self.direction, None)
+
     def _should_wake(self, speaking: bool) -> bool:
         if self._backing_off():
             return False
@@ -220,27 +264,18 @@ class DirectionInterpreter:
             # subject to the backoff below.
             log.error("%s could not open a session: %s", self.direction.value, exc)
             self._session = None
-            self._open_failed_at = self._clock.monotonic()
             self._metrics.set_health(self.direction, session=Health.FAILED)
             self._set_state(SessionState.SUSPENDED)
-            # A blip clears; a rejected language code or a revoked key fails
-            # the same way every time. Without this ceiling the direction
-            # retried for the whole call and nothing but a health marker ever
-            # said so - Session._on_direction_fatal, and the "both directions
-            # are dead" stop behind it, had no production caller at all.
-            # Reported once: the retries continue, but the report does not.
-            self._open_failures += 1
-            if (
-                self._open_failures >= FATAL_OPEN_FAILURES
-                and not self._reported_fatal
-                and self._on_fatal is not None
-            ):
-                self._reported_fatal = True
-                self._on_fatal(self.direction, exc)
+            self._note_open_failure(exc)
             return 0.0
         self._open_failed_at = None
-        self._open_failures = 0
-        self._reported_fatal = False
+        # NOT a success yet, and the counters are not reset here. `open()`
+        # returns as soon as the thread starts, so resetting on construction
+        # made _open_failures unable to accumulate for every failure that
+        # surfaces on the socket rather than at the call - depleted credits,
+        # a revoked key, a withdrawn model - which is the whole class the
+        # ceiling exists for. They are reset when the session proves itself.
+        self._session_proved = False
         with self._lock:
             self._goaway_at = None
             self._dead = None
@@ -478,6 +513,10 @@ class DirectionInterpreter:
         filters them out, because its first seconds translate audio this
         session has already spoken and playing them would repeat a sentence.
         """
+        # Anything that is not the session ending is proof the socket came
+        # up and the API accepted us.
+        if not isinstance(event, Closed):
+            self._note_proved()
         match event:
             case AudioOut(pcm=pcm):
                 self._playout.submit(pcm)
@@ -545,7 +584,7 @@ class DirectionInterpreter:
             )
         )
 
-    def _reopen(self) -> None:
+    def _reopen(self, reason: str) -> None:
         """The session died. Prefer a warming replacement over a cold start.
 
         If an overlap was in progress there is already a session listening,
@@ -565,5 +604,15 @@ class DirectionInterpreter:
         if self._pending is not None:
             self._switch(forced=True)
             return
+        proved = self._session_proved
         self._close("died")
+        if not proved:
+            # It never produced anything, so this was a failed open in all but
+            # the exception - and reopening straight away is how a refusing
+            # API got reconnected every 512 ms on both directions at once.
+            # Falling back to SUSPENDED hands the retry to _should_wake, which
+            # already honours REOPEN_BACKOFF_S.
+            self._note_open_failure(RuntimeError(reason))
+            self._set_state(SessionState.SUSPENDED)
+            return
         self._open(replay=True, handle=self._handle)

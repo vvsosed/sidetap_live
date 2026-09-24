@@ -508,3 +508,34 @@ async def test_the_text_panes_do_not_take_focus():
         await pilot.pause()
         assert app.focused is None, f"something took focus: {app.focused!r}"
         assert app.screen.focus_chain == [], "the panes joined the focus chain"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_direction_shows_why_not_just_that_it_failed():
+    """The reason outranks both alarms, because it explains them.
+
+    NO AUDIO and DEAD AIR describe symptoms. "prepayment credits are
+    depleted" is the one line that tells the user what to do, and under the
+    TUI the log it used to go to is a file they cannot see.
+    """
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    metrics.set_error(Direction.IN, "1011 None. Your prepayment credits are depleted.")
+    metrics.set_dead_air(Direction.IN, True)
+
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        banner = app.query_one("#error-in", Static)
+        assert "credits are depleted" in str(banner.content)
+        # On its own row and clipped to it. Appended to the stats line it
+        # wrapped and pushed the other pane's stats off the screen entirely.
+        assert banner.size.height == 1, "the reason wrapped and moved the layout"
+        assert str(banner.content) in _screen_text(app) or len(
+            str(banner.content)
+        ) >= banner.size.width - 1
+
+        # A healthy direction shows no banner at all - and costs no row for
+        # it, which an empty Static would.
+        assert app.query_one("#error-out", Static).display is False
