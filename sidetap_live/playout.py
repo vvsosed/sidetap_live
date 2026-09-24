@@ -356,7 +356,19 @@ class Playout:
         """
         try:
             while not stop.is_set():
-                self.tick()
+                try:
+                    self.tick()
+                except Exception:
+                    # The same reasoning as the interpreter's pump(): one bad
+                    # chunk must not take the direction down for the rest of
+                    # the call. Without this, a single exception ended playout
+                    # permanently - the finally below opened the duck, so IN
+                    # degraded to the unmediated call, but OUT has no raw path
+                    # and the remote party simply heard nothing from then on.
+                    # The wait keeps a persistently failing tick from spinning.
+                    log.exception("%s playout tick failed", self.direction.value)
+                    stop.wait(CHUNK_MS / 1000)
+                    continue
                 if getattr(self._sink, "failed", False):
                     stop.wait(CHUNK_MS / 1000)
         finally:
