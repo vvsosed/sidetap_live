@@ -583,3 +583,25 @@ def test_headless_reports_no_audio_on_either_direction(caplog):
     assert any("NO AUDIO" in r.message for r in caplog.records), (
         "headless never reported that a direction had gone deaf"
     )
+
+
+def test_a_fatal_direction_is_wired_from_the_interpreter(session_args, fake_ports):
+    """_on_direction_fatal had no production caller - only tests reached it.
+
+    Session must hand the interpreter a way back, and must stop that
+    direction's pump when it fires, or the "both directions are dead" check
+    can never become true.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        interpreter = session.interpreters[Direction.IN]
+        assert interpreter._on_fatal is not None, "the interpreter cannot report a fatal"
+
+        interpreter._on_fatal(Direction.IN, RuntimeError("1007 invalid argument"))
+        assert session.direction_stop[Direction.IN].is_set(), (
+            "the dead direction's pump was left running"
+        )
+        assert not session.stop.is_set(), "one dead direction dropped the whole call"
+    finally:
+        session.shutdown()

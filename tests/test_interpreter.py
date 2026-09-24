@@ -8,6 +8,7 @@ from sidetap_live.playout import Playout
 from sidetap_live.preroll import PreRoll
 from sidetap_live.types import (
     BLOCK_BYTES,
+    FATAL_OPEN_FAILURES,
     IDLE_SUSPEND_S,
     OVERLAP_MAX_S,
     REOPEN_BACKOFF_S,
@@ -569,3 +570,43 @@ def test_a_replacement_that_dies_mid_overlap_is_dropped_not_promoted():
     clock.advance(OVERLAP_MAX_S + 1.0)
     interpreter.feed(block(SPEECH))
     assert interpreter._session is outgoing
+
+
+def test_an_endlessly_failing_open_is_eventually_reported_as_fatal():
+    """Session._on_direction_fatal existed with no production caller.
+
+    _open() falls back to SUSPENDED and retries every REOPEN_BACKOFF_S
+    forever, so a permanently misconfigured --their-lang - the region-subtag
+    1007, a revoked key - retried against the API for the whole call instead
+    of ever saying so. The direction showed Health.FAILED, but the "both
+    directions are dead, stop the call" net and the "check --their-lang"
+    guidance could never fire.
+    """
+    fatal = []
+    clock = FakeClock()
+    interpreter = DirectionInterpreter(
+        InterpreterConfig(direction=Direction.IN, target_lang="ru-RU", echo=False),
+        sessions=_DeadFactory(),
+        playout=Playout(Direction.IN, FakeAudioSink()),
+        activity=SpeechActivity(lambda pcm: True, clock),
+        metrics=Metrics(),
+        clock=clock,
+        rates=Rates(),
+        preroll=PreRoll(seconds=1.0),
+        on_fatal=lambda direction, exc: fatal.append((direction, exc)),
+    )
+
+    for _ in range(FATAL_OPEN_FAILURES - 1):
+        interpreter.feed(block(SPEECH))
+        clock.advance(REOPEN_BACKOFF_S + 0.1)
+    assert fatal == [], "gave up before the retries were exhausted"
+
+    interpreter.feed(block(SPEECH))
+
+    assert len(fatal) == 1
+    assert fatal[0][0] is Direction.IN
+
+    # And it must not keep firing for the rest of the call.
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+    assert len(fatal) == 1

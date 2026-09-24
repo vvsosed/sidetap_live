@@ -57,6 +57,17 @@ OVERLAP_MAX_S = 15.0
 # one missed phrase rather than the rest of the call.
 REOPEN_BACKOFF_S = 2.0
 
+# Consecutive failed opens after which a direction is called dead.
+#
+# _open() falls back to SUSPENDED and retries on the next speech onset, which
+# is right for a network blip and wrong for a misconfiguration: a rejected
+# language code or a revoked key fails identically every time, and without a
+# ceiling the direction retries for the whole call while the user is told
+# nothing beyond a health marker. At REOPEN_BACKOFF_S apart, this gives a
+# transient failure about ten seconds to clear before the call is declared
+# one-way.
+FATAL_OPEN_FAILURES = 5
+
 # Silence after which a session is closed entirely. Reopening costs the
 # cold-start latency measured in docs/experiments/01-connect.md, paid only
 # when someone starts talking again after most of a minute of nothing.
