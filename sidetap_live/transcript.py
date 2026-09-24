@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -207,7 +208,19 @@ class EventTranscript:
                 return self.md_path
             self._closed = True
             self._jsonl.close()
-            self.md_path.write_text(
-                render_markdown(self.session, self._events), encoding="utf-8"
-            )
+            # Atomic, for the same reason Journal.save() is: a bare
+            # write_text() can leave a truncated file if interrupted, and this
+            # runs inside Session.shutdown(), which is exactly where a crash
+            # or a second Ctrl-C lands. The .jsonl survives either way - it is
+            # flushed per line - but nothing regenerates the .md from it, so a
+            # torn write loses the readable half of the record outright.
+            tmp = self.md_path.with_name(self.md_path.name + ".tmp")
+            try:
+                tmp.write_text(
+                    render_markdown(self.session, self._events), encoding="utf-8"
+                )
+                os.replace(tmp, self.md_path)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                raise
         return self.md_path
