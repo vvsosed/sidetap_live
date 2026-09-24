@@ -605,3 +605,23 @@ def test_a_fatal_direction_is_wired_from_the_interpreter(session_args, fake_port
         assert not session.stop.is_set(), "one dead direction dropped the whole call"
     finally:
         session.shutdown()
+
+
+def test_setup_fails_before_engaging_when_the_api_key_is_missing(
+    session_args, fake_ports, monkeypatch
+):
+    """The same rule the virtmic check above establishes: nothing may be
+    rewired before a fatal check, or there is nobody left to restore it.
+
+    The key check sat after router.engage(), with a comment claiming "setup()
+    has not yet engaged the router, so nothing needs undoing" - which was
+    false by the time it ran. Reading an environment variable has no side
+    effects, so it belongs with the other cheap checks.
+    """
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    session = build_session(session_args, fake_ports, sessions=None)
+
+    with pytest.raises(Exception, match="GEMINI_API_KEY"):
+        session.setup()
+
+    assert session.router is None, "the graph was engaged before a fatal check"
