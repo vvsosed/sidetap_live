@@ -126,7 +126,17 @@ class OverlapWatch:
         self._overlap_s = 0.0
         self._total_s = 0.0
 
-    def sample(self) -> float:
+    @property
+    def available(self) -> bool:
+        """False if any track has no detector.
+
+        overlap needs BOTH tracks to report speech, and a track with no
+        detector never does - so one missing detector makes the figure
+        unmeasurable, not zero.
+        """
+        return bool(self._tracks) and all(a.available for a in self._tracks.values())
+
+    def sample(self) -> float | None:
         now = self._clock.monotonic()
         elapsed = now - self._last
         self._last = now
@@ -141,7 +151,17 @@ class OverlapWatch:
         return self.pct
 
     @property
-    def pct(self) -> float:
+    def pct(self) -> float | None:
+        """None when it cannot be measured at all - NOT 0.0.
+
+        Without webrtcvad, observe() always returns False, so `speaking`
+        never becomes True and this reported a confident zero that reads
+        exactly like two people who never once talked over each other.
+        Overlap is this project's chosen axis, so a fabricated zero is the
+        worst reading it could give.
+        """
+        if not self.available:
+            return None
         if self._total_s <= 0:
             return 0.0
         return 100.0 * self._overlap_s / self._total_s

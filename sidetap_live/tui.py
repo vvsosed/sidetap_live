@@ -168,10 +168,13 @@ class SidetapLiveApp(App):
         # Overlap leads because it is the result, not a diagnostic: it is the
         # fraction of the call where both people were talking at once.
         bypassed = "BYPASSED  " if snapshot.bypassed else ""
-        self.sub_title = (
-            f"{bypassed}overlap {snapshot.overlap_pct:.0f}%  "
-            f"est. ${snapshot.cost_usd:.2f}"
+        # An em dash, not 0%: without webrtcvad this cannot be measured, and
+        # showing a confident zero for the one metric the project exists to
+        # produce would be worse than showing nothing.
+        overlap = (
+            "—" if snapshot.overlap_pct is None else f"{snapshot.overlap_pct:.0f}%"
         )
+        self.sub_title = f"{bypassed}overlap {overlap}  est. ${snapshot.cost_usd:.2f}"
 
         # Mute has no Metrics mirror of its own - unlike bypass, which the
         # session already writes into Metrics on its way to the playouts.

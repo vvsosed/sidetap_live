@@ -147,3 +147,32 @@ def test_overlap_is_a_running_fraction_of_wall_clock():
 def test_it_reports_zero_before_any_time_has_passed():
     clock = FakeClock()
     assert OverlapWatch(two_tracks(clock, True, True), clock).sample() == 0.0
+
+
+def test_overlap_is_unavailable_rather_than_zero_without_a_detector():
+    """0.0% and "cannot be measured" are not the same claim.
+
+    observe() returns False with no detector, so `speaking` never becomes
+    True and OverlapWatch reported a confident 0.0% - indistinguishable from
+    two people who genuinely never talked over each other. Overlap is the
+    project's chosen axis and the thing manual smoke check 10 exists to
+    produce, so a fabricated zero is the worst possible reading.
+    """
+    clock = FakeClock()
+    tracks = {d: SpeechActivity(None, clock) for d in Direction}
+    watch = OverlapWatch(tracks, clock)
+
+    clock.advance(10.0)
+    assert watch.sample() is None
+    assert watch.pct is None
+
+
+def test_overlap_is_a_number_once_every_track_can_be_measured():
+    clock = FakeClock()
+    tracks = {d: SpeechActivity(always(True), clock) for d in Direction}
+    watch = OverlapWatch(tracks, clock)
+    for track in tracks.values():
+        track.observe(b"\x00\x00")
+
+    clock.advance(10.0)
+    assert watch.sample() == pytest.approx(100.0)
