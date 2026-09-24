@@ -206,9 +206,26 @@ already inside `pw-cat`'s buffer**, so expect a short tail.
 
 ## Output
 
-Ctrl-C writes `transcripts/<session>.jsonl` and `.md` — both directions,
-chronological. The `.jsonl` is flushed per event, so an unclean exit still
-leaves everything up to that moment on disk.
+Ctrl-C writes four files into `transcripts/`, all sharing one session stem:
+
+| file | |
+|---|---|
+| `<session>.jsonl` | every fragment exactly as it arrived |
+| `<session>.md` | both directions and both streams, interleaved chronologically |
+| `<session>.original.md` | only what was actually said |
+| `<session>.translated.md` | only what each side heard |
+
+**The two split files are not monolingual, and cannot be.** There are two
+directions, so the originals are their language *and* yours, and the
+translations likewise — the `**Them**` / `**You**` labels are what carries
+that. Paragraphs are grouped once and then filtered by stream, so all three
+Markdown files share block boundaries and timestamps: `.original.md` and
+`.translated.md` line up block for block when read side by side.
+
+The `.jsonl` is flushed per event, so an unclean exit still leaves everything
+up to that moment on disk. The Markdown is rendered at close, and nothing
+regenerates it from the `.jsonl` — so a `kill -9` leaves the events but not
+the readable files.
 
 The two transcription streams are recorded as **independent timestamped
 events, not source/target pairs.** The model emits no turn boundary at all —

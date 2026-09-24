@@ -171,7 +171,7 @@ code path.
 | `cost.py` | audio-token rates as configuration | new |
 | `playout.py` | chunk queue, `DuckControl`, `has_speech` | rewritten |
 | `metrics.py` | backlog, offset, overlap, rotations, cost | ported, reshaped |
-| `transcript.py` | event-stream `.jsonl` + interleaved `.md` | rewritten |
+| `transcript.py` | event-stream `.jsonl` + three `.md` renderings (interleaved, original, translated) | rewritten |
 | `tui.py` | Textual dashboard, hotkeys | ported, reshaped |
 | `doctor.py` | environment checks, virtual-mic config | ported, API checks replaced |
 | `run.py` | `Session` — builds every stage, startup/shutdown | ported, rewired |

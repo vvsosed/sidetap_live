@@ -6,6 +6,12 @@ pairing would be this program's invention rather than an observation. The
 Markdown interleaves them by time instead, which is honest about what is
 actually known.
 
+Three Markdown files are rendered from the same events at close: the
+interleaved one, `.original.md` (every source fragment - what was actually
+said) and `.translated.md` (every target fragment - what each side heard).
+All three are grouped into paragraphs ONCE and then filtered, so their blocks
+share boundaries and timestamps and can be read side by side.
+
 sidetap emits the same schema with engine "cascade" (see that repository's
 transcript.py), which is what makes the two comparable.
 """
@@ -159,6 +165,40 @@ def _paragraphs(events: list[TranscriptEvent]) -> list[tuple[float, Direction, s
     return sorted(out, key=lambda p: (p[0], p[2] != "source"))
 
 
+BOTH_STREAMS = ("source", "target")
+
+
+def _render(
+    session: str,
+    events: list[TranscriptEvent],
+    *,
+    title: str,
+    kinds: tuple[str, ...] = BOTH_STREAMS,
+    mark_target: bool = True,
+) -> str:
+    """One rendering, filtered to the streams asked for.
+
+    **The filter runs AFTER _paragraphs, never before**, and that is the whole
+    of it. _paragraphs cuts both streams at the same boundary and the SOURCE
+    decides where it falls; handed a target-only list it takes its `else`
+    branch, makes the boundary the last fragment of the call, and renders an
+    entire hour as one paragraph.
+
+    Grouping once is also what makes the split files worth having together:
+    the same blocks, at the same timestamps, in the same order, so
+    `.original.md` and `.translated.md` line up when read side by side.
+    """
+    lines = [f"# {title} {session}", "", f"_engine: {ENGINE} ({MODEL})_", ""]
+    for t, direction, kind, text in _paragraphs(events):
+        if kind not in kinds or not text:
+            continue
+        marker = " →" if mark_target and kind == "target" else ""
+        lines.append("")
+        lines.append(f"**{LABELS[direction]}{marker}** _{hhmmss(t)}_")
+        lines.append(text)
+    return "\n".join(lines) + "\n"
+
+
 def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
     """Chronological, both directions and both streams interleaved.
 
@@ -168,15 +208,28 @@ def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
     fragment exactly as it arrived; this is a presentation choice and belongs
     here, where it loses nothing.
     """
-    lines = [f"# Interpretation transcript {session}", "", f"_engine: {ENGINE} ({MODEL})_", ""]
-    for t, direction, kind, text in _paragraphs(events):
-        if not text:
-            continue
-        marker = "" if kind == "source" else " →"
-        lines.append("")
-        lines.append(f"**{LABELS[direction]}{marker}** _{hhmmss(t)}_")
-        lines.append(text)
-    return "\n".join(lines) + "\n"
+    return _render(session, events, title="Interpretation transcript")
+
+
+def render_original(session: str, events: list[TranscriptEvent]) -> str:
+    """What was actually said - both directions, so both languages.
+
+    The arrow marker is dropped: every block here is a source, so marking each
+    one says nothing and costs the alignment with the translated file.
+    """
+    return _render(
+        session, events, title="Original transcript",
+        kinds=("source",), mark_target=False,
+    )
+
+
+def render_translated(session: str, events: list[TranscriptEvent]) -> str:
+    """What each side heard - the IN translation in your language, the OUT
+    translation in theirs."""
+    return _render(
+        session, events, title="Translated transcript",
+        kinds=("target",), mark_target=False,
+    )
 
 
 class EventTranscript:
@@ -187,6 +240,11 @@ class EventTranscript:
         self.session = session or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         self.jsonl_path = outdir / f"{self.session}.jsonl"
         self.md_path = outdir / f"{self.session}.md"
+        # `.original.` / `.translated.` rather than a suffix swap, so all four
+        # of a run's files sort together under one stem. session_name() is
+        # "%Y%m%d-%H%M%S-%f" and carries no dots of its own.
+        self.original_path = outdir / f"{self.session}.original.md"
+        self.translated_path = outdir / f"{self.session}.translated.md"
         self._lock = threading.Lock()
         self._events: list[TranscriptEvent] = []
         self._closed = False
@@ -219,25 +277,38 @@ class EventTranscript:
             self._events.append(event)
             self._write_line(event_to_dict(event))
 
+    def _write_atomic(self, path: Path, text: str) -> None:
+        """Atomic, for the same reason Journal.save() is.
+
+        A bare write_text() can leave a truncated file if interrupted, and
+        this runs inside Session.shutdown(), which is exactly where a crash or
+        a second Ctrl-C lands. The .jsonl survives either way - it is flushed
+        per line - but nothing regenerates a .md from it, so a torn write
+        loses the readable half of the record outright.
+        """
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+
     def close(self) -> Path:
         with self._lock:
             if self._closed:
                 return self.md_path
             self._closed = True
             self._jsonl.close()
-            # Atomic, for the same reason Journal.save() is: a bare
-            # write_text() can leave a truncated file if interrupted, and this
-            # runs inside Session.shutdown(), which is exactly where a crash
-            # or a second Ctrl-C lands. The .jsonl survives either way - it is
-            # flushed per line - but nothing regenerates the .md from it, so a
-            # torn write loses the readable half of the record outright.
-            tmp = self.md_path.with_name(self.md_path.name + ".tmp")
-            try:
-                tmp.write_text(
-                    render_markdown(self.session, self._events), encoding="utf-8"
-                )
-                os.replace(tmp, self.md_path)
-            except BaseException:
-                tmp.unlink(missing_ok=True)
-                raise
+            # Interleaved first: it is the primary record, so if the disk
+            # fills part-way through it is the one that survives.
+            self._write_atomic(
+                self.md_path, render_markdown(self.session, self._events)
+            )
+            self._write_atomic(
+                self.original_path, render_original(self.session, self._events)
+            )
+            self._write_atomic(
+                self.translated_path, render_translated(self.session, self._events)
+            )
         return self.md_path

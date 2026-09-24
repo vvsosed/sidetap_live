@@ -189,6 +189,13 @@ fragments joined into paragraphs. Check the tail is there: the `.jsonl` is
 flushed per event, so an unclean exit should still leave everything up to that
 moment.
 
+Then open `<session>.original.md` and `<session>.translated.md` side by side.
+Every block should carry the **same timestamp and the same speaker** in both —
+they are one paragraph grouping filtered two ways, so a block present in one
+and missing from the other, or shifted against it, is a real finding. Read the
+original against your memory of the call: that is the only check that says
+whether the transcription itself was right, separately from the translation.
+
 **12. The graph is restored.**
 
 ```bash
