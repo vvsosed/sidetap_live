@@ -252,3 +252,42 @@ def test_the_cap_still_trims_when_the_buffer_opens_on_a_pause():
 
     assert playout.dropped_s > 0.0, "the cap never fired on a quiet head"
     assert playout.backlog_s() <= 0.5
+
+
+def test_one_bad_chunk_does_not_end_playout_for_the_call():
+    """pump() wraps feed() so "one malformed block must not take the
+    direction down for the rest of the call". run() had no equivalent, so a
+    single exception out of tick() ended playout permanently - the duck
+    opened via the finally, but that direction never spoke again, and on OUT
+    there is no raw path for the remote party to fall back to.
+    """
+    import threading
+
+    class SometimesFailingSink(FakeAudioSink):
+        def __init__(self):
+            super().__init__()
+            self.writes = 0
+
+        def write(self, pcm):
+            self.writes += 1
+            if self.writes == 2:
+                raise RuntimeError("transient pw-cat hiccup")
+            super().write(pcm)
+
+    sink = SometimesFailingSink()
+    playout = Playout(Direction.IN, sink)
+    stop = threading.Event()
+
+    thread = threading.Thread(target=playout.run, args=(stop,), daemon=True)
+    thread.start()
+    for _ in range(200):
+        if sink.writes > 5:
+            break
+        threading.Event().wait(0.01)
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert sink.writes > 5, (
+        f"playout died on the failing chunk after {sink.writes} writes"
+    )
