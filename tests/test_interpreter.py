@@ -9,6 +9,7 @@ from sidetap_live.preroll import PreRoll
 from sidetap_live.types import (
     BLOCK_BYTES,
     IDLE_SUSPEND_S,
+    OVERLAP_MAX_S,
     REOPEN_BACKOFF_S,
     AudioChunk,
     Direction,
@@ -538,3 +539,33 @@ def test_a_replacement_that_failed_to_open_is_retried_before_the_window_closes()
 
     assert interpreter.state is SessionState.OVERLAPPING
     assert interpreter._pending is not None
+
+
+def test_a_replacement_that_dies_mid_overlap_is_dropped_not_promoted():
+    """note_event_from handled only AudioOut and ResumptionHandle from
+    _pending; everything else hit the bare `return`, so a Closed from the
+    replacement was discarded.
+
+    It therefore never warmed, OVERLAP_MAX_S expired, and _switch_if_ready
+    forced the switch onto a session that was already dead. Nothing recovered
+    afterwards, because that session's events() had already ended, so _dead
+    was never set again: the direction went silent for the rest of the call.
+    On OUT that means the remote party hears nothing at all.
+    """
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.OVERLAPPING
+    outgoing, replacement = sessions.sessions[0], sessions.sessions[1]
+
+    interpreter.note_event_from(replacement, Closed(reason="1007 invalid argument"))
+
+    assert interpreter._pending is None, "the dead replacement was kept"
+    assert interpreter.state is SessionState.RUNNING
+    assert interpreter._session is outgoing, "the still-live session was abandoned"
+
+    # And the overlap must not fire later on the corpse.
+    clock.advance(OVERLAP_MAX_S + 1.0)
+    interpreter.feed(block(SPEECH))
+    assert interpreter._session is outgoing

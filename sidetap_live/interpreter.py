@@ -370,10 +370,41 @@ class DirectionInterpreter:
                 self._pending_warm = True
             elif isinstance(event, ResumptionHandle):
                 self.note_handle(event.handle)
+            elif isinstance(event, Closed):
+                self._drop_pending(event.reason)
             return
         if isinstance(event, AudioOut):
             self._outgoing_silent = not self._has_speech(event.pcm)
         self._dispatch(event)
+
+    def _drop_pending(self, reason: str) -> None:
+        """The replacement died before it could take over.
+
+        Everything but AudioOut and ResumptionHandle used to fall through the
+        bare `return` above, so this event was discarded. The replacement then
+        never warmed, OVERLAP_MAX_S expired, and _switch_if_ready promoted a
+        corpse - after which nothing recovered, because that session's events()
+        had already ended and Closed never arrived again. The direction went
+        silent for the rest of the call, and on OUT there is no raw path to
+        fall back to, so the remote party simply heard nothing.
+
+        _goaway_at is left set so the pump thread still owes a rotation and
+        opens a fresh replacement, paced by REOPEN_BACKOFF_S. Dropping back to
+        RUNNING is safe to do from the receive thread for the same reason
+        note_goaway's promotion is: it touches only _pending and the state,
+        never the session the pump is iterating.
+        """
+        log.warning(
+            "%s replacement session died before taking over (%s); "
+            "staying on the outgoing session and retrying",
+            self.direction.value,
+            reason,
+        )
+        self._pending = None
+        self._pending_warm = False
+        self._open_failed_at = self._clock.monotonic()
+        if self._state is SessionState.OVERLAPPING:
+            self._set_state(SessionState.RUNNING)
 
     def note_handle(self, handle: str) -> None:
         """Remember the latest resumption handle for `_reopen` (Task 21)."""
