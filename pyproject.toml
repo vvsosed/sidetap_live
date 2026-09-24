@@ -5,9 +5,16 @@ description = "Single-box real-time voice interpretation for any call, captured 
 requires-python = ">=3.13"
 
 dependencies = [
-    "google-genai>=1.0.0",
+    # Floors are the versions actually exercised, not the oldest that might
+    # work. google-genai's Live surface is preview and has already moved
+    # under this project once: docs/experiments/01-connect.md exists because
+    # translation_config is a TOP-LEVEL field of LiveConnectConfig in 2.24.0
+    # while the REST docs nest it under generationConfig - and the nested
+    # form still type-checks, connects, and silently produces a chatbot.
+    # >=1.0.0 admitted 24 major versions nobody here has ever run.
+    "google-genai>=2.24.0",
     "webrtcvad-wheels>=2.0.14",
-    "textual>=0.80",
+    "textual>=8.2.8",
 ]
 
 [project.scripts]
