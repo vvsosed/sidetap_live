@@ -141,6 +141,12 @@ class DirectionInterpreter:
             return
         elif self._state is SessionState.OVERLAPPING:
             self._switch_if_ready()
+        elif self._rotation_due():
+            # A GoAway arrived but the replacement could not be opened. Retry
+            # here, on the pump thread, rather than leaving the direction to
+            # run past time_left into a 1008. Ordered before _should_suspend so
+            # an owed rotation is never traded for an idle suspend.
+            self._open_pending()
         elif self._should_suspend():
             self._suspend()
             return
@@ -271,10 +277,37 @@ class DirectionInterpreter:
             self._goaway_at = self._clock.monotonic() + event.time_left_s
         self._open_pending()
 
+    def _rotation_due(self) -> bool:
+        """A GoAway landed and there is still no replacement listening."""
+        with self._lock:
+            pending_deadline = self._goaway_at
+        return pending_deadline is not None and not self._backing_off()
+
     def _open_pending(self) -> None:
-        self._pending = self._sessions.open(
-            self._config.target_lang, echo=self._config.echo, handle=None
-        )
+        try:
+            self._pending = self._sessions.open(
+                self._config.target_lang, echo=self._config.echo, handle=None
+            )
+        except Exception as exc:
+            # _open() has guarded its connect from the start; this one did not,
+            # and it runs on the receive thread, whose loop logs and swallows.
+            # So a transient refusal at the nine-minute mark left _pending None
+            # with the state still RUNNING - and note_goaway() early-returns on
+            # anything but RUNNING, so nothing ever tried again. The session
+            # then overran GoAway's time_left and the server aborted it with
+            # 1008, mid-conversation, every time this happened.
+            #
+            # _goaway_at is deliberately left set: it is what tells feed() a
+            # rotation is still owed, so the next block retries, paced by
+            # REOPEN_BACKOFF_S exactly as a failed first open is.
+            log.error(
+                "%s could not open a replacement session: %s",
+                self.direction.value,
+                exc,
+            )
+            self._pending = None
+            self._open_failed_at = self._clock.monotonic()
+            return
         self._pending_warm = False
         self._pending_since = self._clock.monotonic()
         self._outgoing_silent = False

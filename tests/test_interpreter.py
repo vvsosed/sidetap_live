@@ -9,6 +9,7 @@ from sidetap_live.preroll import PreRoll
 from sidetap_live.types import (
     BLOCK_BYTES,
     IDLE_SUSPEND_S,
+    REOPEN_BACKOFF_S,
     AudioChunk,
     Direction,
     SessionState,
@@ -473,3 +474,67 @@ def test_recovery_clears_the_backoff_and_the_health_flag():
 
     assert interpreter.state is SessionState.RUNNING
     assert metrics.snapshot().directions[Direction.IN].session is Health.OK
+
+
+class _FlakyFactory(FakeSessionFactory):
+    """Opens fine except on the nth call, which raises."""
+
+    def __init__(self, fail_on: int):
+        super().__init__()
+        self._fail_on = fail_on
+        self.attempts = 0
+
+    def open(self, target_lang, *, echo, handle=None):
+        self.attempts += 1
+        if self.attempts == self._fail_on:
+            raise RuntimeError("503 backend unavailable")
+        return super().open(target_lang, echo=echo, handle=handle)
+
+
+def build_flaky(fail_on):
+    clock = FakeClock()
+    sessions = _FlakyFactory(fail_on)
+    interpreter = DirectionInterpreter(
+        InterpreterConfig(direction=Direction.OUT, target_lang="ru", echo=True),
+        sessions=sessions,
+        playout=Playout(Direction.OUT, FakeAudioSink()),
+        activity=SpeechActivity(lambda pcm: pcm == SPEECH, clock),
+        metrics=Metrics(),
+        clock=clock,
+        rates=Rates(),
+        preroll=PreRoll(seconds=1.0),
+    )
+    return interpreter, sessions, clock
+
+
+def test_a_replacement_that_cannot_be_opened_does_not_escape_or_wedge_the_state():
+    """_open() guards its connect; _open_pending() did not.
+
+    It runs on the receive thread, whose loop logs and swallows, so a 503 at
+    the nine-minute mark silently left _pending None with the state still
+    RUNNING - and note_goaway() early-returns on anything but RUNNING, so
+    nothing ever tried again. The session then overran GoAway's time_left and
+    the server killed it with 1008, mid-conversation.
+    """
+    interpreter, sessions, _ = build_flaky(fail_on=2)
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+
+    goaway(interpreter)  # must not raise out onto the receive thread
+
+    assert interpreter.state is SessionState.RUNNING
+    assert interpreter._pending is None
+
+
+def test_a_replacement_that_failed_to_open_is_retried_before_the_window_closes():
+    """A transient failure must cost a retry, not the connection."""
+    interpreter, sessions, clock = build_flaky(fail_on=2)
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    assert interpreter.state is SessionState.RUNNING, "precondition: the open failed"
+
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.OVERLAPPING
+    assert interpreter._pending is not None
