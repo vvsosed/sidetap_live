@@ -193,3 +193,59 @@ def test_build_config_normalises_what_the_cli_passes():
     """The CLI takes full BCP-47 because that is what a user types."""
     assert build_config(target_lang="ru-RU", echo=False,
                         handle=None).translation_config.target_language_code == "ru"
+
+
+@pytest.mark.asyncio
+async def test_close_returns_even_when_the_socket_has_stopped_draining():
+    """close() must never block on the outbound queue.
+
+    send() already documents a full queue as an expected condition - it is
+    what happens when the socket stops draining - and close() then put the
+    sentinel with a BLOCKING put on that same bounded queue. With nothing
+    consuming it, the put never returned.
+
+    Every caller of close() is on the pump thread (_close, _suspend,
+    _switch), so a wedged socket at rotation time stopped that direction
+    feeding audio at all, for the rest of the call.
+    """
+    import contextlib
+    import threading
+
+    from sidetap_live.live import OUTBOUND_BLOCKS, GeminiLiveSession
+    from sidetap_live.types import BLOCK_BYTES
+
+    entered_send = threading.Event()
+
+    class WedgedSocket:
+        async def send_realtime_input(self, **_):
+            entered_send.set()
+            await asyncio.Event().wait()
+
+        async def receive(self):
+            await asyncio.Event().wait()
+            yield
+
+    @contextlib.asynccontextmanager
+    async def connect(**_):
+        yield WedgedSocket()
+
+    session = GeminiLiveSession(connect=connect, config=None, model="m")
+
+    # Pin the send loop INSIDE send_realtime_input before filling the queue.
+    # Otherwise it may still be parked on the blocking get in the executor,
+    # which would consume the sentinel and hide the bug intermittently.
+    session.send(b"\x00" * BLOCK_BYTES)
+    assert await asyncio.get_running_loop().run_in_executor(
+        None, entered_send.wait, 5.0
+    ), "the send loop never reached the socket"
+
+    for _ in range(OUTBOUND_BLOCKS + 20):
+        session.send(b"\x00" * BLOCK_BYTES)
+    assert session._outbound.full(), "precondition: the socket is not draining"
+
+    returned = threading.Event()
+    threading.Thread(target=lambda: (session.close(), returned.set()), daemon=True).start()
+
+    assert await asyncio.get_running_loop().run_in_executor(
+        None, returned.wait, 8.0
+    ), "close() blocked on a full outbound queue"

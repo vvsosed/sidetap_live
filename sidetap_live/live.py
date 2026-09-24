@@ -39,6 +39,13 @@ MODEL = "gemini-3.5-live-translate-preview"
 OUTBOUND_BLOCKS = 100
 CLOSE_TIMEOUT_S = 3.0
 
+# How long the send loop parks on the outbound queue before looking at
+# _closing again. It must be a bounded wait, not a blocking get: an
+# indefinite one cannot be interrupted from outside, which is what made
+# shutdown depend on pushing a sentinel through a queue that is full exactly
+# when shutdown matters most.
+QUEUE_POLL_S = 0.1
+
 _SENTINEL = object()
 
 
@@ -212,8 +219,18 @@ class GeminiLiveSession:
             yield item
 
     def close(self) -> None:
+        """Must never block. Every caller is on a pump thread.
+
+        This used to unblock the send loop by putting a sentinel on the
+        outbound queue - a BLOCKING put on a bounded queue that send() already
+        documents as expected to fill whenever the socket stops draining. With
+        nothing consuming it, the put never returned, and since _close,
+        _suspend and _switch all run on the pump thread, a wedged socket at
+        rotation time stopped that direction feeding audio for the rest of the
+        call. The send loop now polls _closing instead, so setting it is
+        enough.
+        """
         self._closing.set()
-        self._outbound.put(_SENTINEL)
         self._thread.join(timeout=CLOSE_TIMEOUT_S)
 
     def _thread_main(self) -> None:
@@ -253,13 +270,13 @@ class GeminiLiveSession:
             )
             for task in pending:
                 task.cancel()
-            # Unblock the sender before awaiting it. It parks on a BLOCKING
-            # queue.get inside an executor thread, and cancelling the task
-            # does not interrupt that - the thread stays parked forever.
-            # Without this the gather below never returns; without the gather,
-            # the old code simply abandoned the thread, leaking one per failed
-            # session, and rotation produces one every nine minutes.
-            self._outbound.put(_SENTINEL)
+            # Tell the sender to stop before awaiting it. Cancelling the task
+            # does not interrupt the queue wait running inside an executor
+            # thread, so without this the gather below waits out the full
+            # timeout; without the gather, the old code abandoned the thread
+            # outright, leaking one per failed session - and rotation produces
+            # one every nine minutes.
+            self._closing.set()
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*pending, return_exceptions=True),
@@ -271,6 +288,13 @@ class GeminiLiveSession:
                 if task.exception() is not None:
                     raise task.exception()
 
+    def _next_block(self) -> bytes | None:
+        """One block, or None if the queue stayed empty for QUEUE_POLL_S."""
+        try:
+            return self._outbound.get(timeout=QUEUE_POLL_S)
+        except queue.Empty:
+            return None
+
     async def _send_loop(self, session) -> None:
         from google.genai import types
 
@@ -279,9 +303,14 @@ class GeminiLiveSession:
             # The outbound queue is thread-safe but blocking, so it is drained
             # on a worker thread rather than stalling the event loop - which
             # would stop the receive side too, for as long as nobody speaks.
-            pcm = await loop.run_in_executor(None, self._outbound.get)
-            if pcm is _SENTINEL:
-                return
+            # The wait is BOUNDED so that setting _closing is enough to end
+            # this loop: an unbounded get also parked a default-executor
+            # thread forever, and those are joined at interpreter exit, so a
+            # session that was never closed stopped the process exiting at all
+            # despite the thread being a daemon.
+            pcm = await loop.run_in_executor(None, self._next_block)
+            if pcm is None:
+                continue
             # MEASURED: scripts/exp02_voice_stability.py, exp03 and exp04 all
             # pass a `types.Blob(...)`, not a plain dict, even though
             # `AsyncSession.send_realtime_input`'s `audio` parameter also
