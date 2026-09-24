@@ -78,6 +78,26 @@ def find_silence_boundary(
     return None
 
 
+def leading_silence_bytes(
+    pcm, frame_bytes: int = CHUNK_BYTES, threshold: int = SPEECH_PEAK
+) -> int:
+    """Length of the run of quiet frames at the head, in whole frames.
+
+    The lag cap needs this for the case where the buffer already STARTS in a
+    pause. `find_silence_boundary` correctly answers 0 there, which is not a
+    byte offset the cap can cut at - dropping nothing makes no progress - so
+    it needs to know where that opening pause ends instead.
+    """
+    offset = 0
+    while offset + frame_bytes <= len(pcm):
+        samples = array("h")
+        samples.frombytes(bytes(pcm[offset : offset + frame_bytes]))
+        if max(abs(s) for s in samples) >= threshold:
+            break
+        offset += frame_bytes
+    return offset
+
+
 def has_speech(pcm: bytes, frame_bytes: int = CHUNK_BYTES,
                threshold: int = SPEECH_PEAK) -> bool:
     """Does this buffer carry speech anywhere in it?
@@ -238,8 +258,20 @@ class Playout:
         """
         while len(self._pending) / TTS_BYTES_PER_S > self._lag_cap_s:
             cut = find_silence_boundary(self._pending)
-            if not cut:
+            if cut is None:
                 return
+            if cut == 0:
+                # The buffer already opens on a pause. `if not cut` used to
+                # treat this exactly like "no pause anywhere" and return - and
+                # since the model streams a near-silent output whenever it has
+                # nothing to translate, a quiet head is the common case. The
+                # cap therefore almost never fired: measured at 40 s of
+                # backlog held against a 30 s cap with nothing dropped.
+                #
+                # Dropping the opening pause is inaudible and is what lets the
+                # next iteration reach the boundary after it. It always
+                # advances by at least one frame, so the loop cannot spin.
+                cut = leading_silence_bytes(self._pending)
             del self._pending[:cut]
             self.dropped_s += cut / TTS_BYTES_PER_S
             log.warning(
