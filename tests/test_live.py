@@ -249,3 +249,53 @@ async def test_close_returns_even_when_the_socket_has_stopped_draining():
     assert await asyncio.get_running_loop().run_in_executor(
         None, returned.wait, 8.0
     ), "close() blocked on a full outbound queue"
+
+
+def test_an_unparseable_duration_degrades_instead_of_raising():
+    """seconds_of promises to accept shapes other than the one observed.
+
+    It coerced str with float(value.rstrip("s")), which throws on anything
+    that is not a bare number - and it sits on the GoAway path, so a shape
+    change in the preview SDK would kill the session at the one moment the
+    rotation depends on, rather than costing a forced rotation.
+    """
+    assert seconds_of("PT50S") == 0.0
+    assert seconds_of("1m30s") == 0.0
+    assert seconds_of("50s") == 50.0      # still the measured shape
+
+
+@pytest.mark.asyncio
+async def test_the_receive_loop_does_not_spin_when_the_stream_ends():
+    """`while True` around `async for ... session.receive()` had no exit.
+
+    receive() is a per-turn generator, so the outer loop is what keeps the
+    connection alive past the first turn. But a generator that ends without
+    raising - a half-closed connection - turned that into a hot loop:
+    measured at 3.4 million re-entries in 2 seconds, one pegged core for the
+    rest of the call.
+    """
+    import contextlib
+
+    from sidetap_live.live import GeminiLiveSession
+
+    entries = 0
+
+    class HalfClosed:
+        async def send_realtime_input(self, **_):
+            await asyncio.Event().wait()
+
+        async def receive(self):
+            nonlocal entries
+            entries += 1
+            return
+            yield
+
+    @contextlib.asynccontextmanager
+    async def connect(**_):
+        yield HalfClosed()
+
+    session = GeminiLiveSession(connect=connect, config=None, model="m")
+    await asyncio.sleep(1.0)
+    session.close()
+
+    assert entries < 1000, f"receive() was re-entered {entries:,} times in 1s"
