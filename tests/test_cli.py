@@ -245,3 +245,18 @@ def test_lag_cap_defaults_to_none_so_run_can_tell_unset_from_equal():
     assert parse().lag_cap is None
     assert parse("--lag-cap", "12").lag_cap == 12.0
     assert LAG_CAP_S == 30.0
+
+
+def test_lag_cap_must_be_positive():
+    """A non-positive cap destroys the translation instead of bounding it.
+
+    _trim_locked's condition is `backlog_s > lag_cap_s`, so at 0 or below it
+    is true as soon as a single byte is pending: playout drops to the first
+    pause continuously and the user hears almost nothing, with no error and
+    nothing to explain why. --duck-level has been bounded from the start for
+    the same class of reason; this one was not.
+    """
+    for bad in ("0", "-5"):
+        with pytest.raises(SystemExit):
+            parse("--lag-cap", bad)
+    assert parse("--lag-cap", "12.5").lag_cap == 12.5
