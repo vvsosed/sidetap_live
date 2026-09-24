@@ -320,3 +320,191 @@ async def test_the_pane_catches_up_when_it_falls_further_behind_than_metrics_kee
         metrics.append_text(Direction.IN, source=" after")
         await _tick(app, pilot)
         assert stream.live_text.endswith("after")
+
+
+def _screen_text(app) -> str:
+    """What is actually composited, not what the widgets believe.
+
+    Reaches for the private compositor deliberately: asserting on widget
+    attributes is exactly how a live line laid out outside its container
+    shipped green.
+    """
+    return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+
+@pytest.mark.asyncio
+async def test_the_line_being_spoken_is_on_screen_once_the_log_has_filled():
+    """The newest words must survive the log filling up.
+
+    Sizing the log `height: auto; max-height: 1fr` let it take the whole
+    TextStream, so the live Static was laid out one row BELOW its container
+    and clipped away. Everything still read correctly off the widgets - the
+    text was simply never drawn - and the pane silently stopped showing the
+    three seconds of speech the user is waiting on.
+    """
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for i in range(40):
+            metrics.append_text(Direction.IN, source=f" SRC{i:02d}x0 SRC{i:02d}x1 SRC{i:02d}x2")
+            app.refresh_from_metrics()
+            await pilot.pause()
+
+        stream = app.query_one("#source-in", TextStream)
+        assert stream.live_text, "nothing was pending - the test proves nothing"
+        assert stream.live_text.strip() in _screen_text(app), (
+            "the line being spoken is not on screen"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bracketed_transcription_is_not_taken_as_markup():
+    """Transcripts contain brackets, and Static defaults to markup=True.
+
+    The settled log is markup=False, so the same words changed as they
+    scrolled: `[inaudible]` vanished on the live line and reappeared once it
+    settled. An unmatched closing tag is worse - `[/b]` raises MarkupError out
+    of the refresh timer and takes the dashboard down mid-call.
+    """
+    from textual.widgets import Static
+
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        metrics.append_text(Direction.IN, source="he said [inaudible] then left")
+        app.refresh_from_metrics()
+        await pilot.pause()
+
+        stream = app.query_one("#source-in", TextStream)
+        assert "[inaudible]" in str(stream.query_one(Static).render())
+
+        # And a tag that closes nothing must not end the call.
+        metrics.append_text(Direction.IN, source=" closing [/b] tag")
+        app.refresh_from_metrics()
+        await pilot.pause()
+        assert app.is_running
+
+
+@pytest.mark.asyncio
+async def test_double_width_text_wraps_by_cell_width_not_character_count():
+    """`--their-lang zh-CN` is an ordinary input for this program.
+
+    Measuring the cut in code points writes a line twice as wide as the pane,
+    which RichLog then re-wraps - reintroducing the full line plus ragged
+    remainder that passing `width=` exists to prevent.
+    """
+    from rich.cells import cell_len
+    from textual.widgets import Static
+
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        metrics.append_text(Direction.IN, source="你好世界" * 60)
+        app.refresh_from_metrics()
+        await pilot.pause()
+
+        stream = app.query_one("#source-in", TextStream)
+        widths = [cell_len(line) for line in stream.settled_lines]
+        assert widths, "nothing settled"
+        for width in widths:
+            assert width <= stream.wrap_width, "a line is wider than the pane"
+            assert width > stream.wrap_width // 2, (
+                f"line was re-wrapped by the widget: cell widths {widths}"
+            )
+        assert stream.query_one(Static).size.height == 1, (
+            "the live line grew past one row and pushes the layout"
+        )
+
+
+@pytest.mark.asyncio
+async def test_speech_is_not_lost_when_a_feed_fails():
+    """The cursor is a promise that the text reached the screen.
+
+    Advancing it before feed() returns means anything that raises - a markup
+    error, a NoMatches during a mount race - drops that speech from the pane
+    for the rest of the call.
+    """
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        stream = app.query_one("#source-in", TextStream)
+
+        boom = {"armed": True}
+        real_feed = stream.feed
+
+        def failing_feed(text):
+            if boom["armed"]:
+                boom["armed"] = False
+                raise RuntimeError("the widget refused")
+            real_feed(text)
+
+        stream.feed = failing_feed
+        metrics.append_text(Direction.IN, source="do not lose me")
+        with pytest.raises(RuntimeError):
+            app.refresh_from_metrics()
+
+        # Next poll must offer the same text again.
+        app.refresh_from_metrics()
+        await pilot.pause()
+        assert "do not lose me" in stream.live_text
+
+
+@pytest.mark.asyncio
+async def test_scrolling_back_is_not_undone_by_new_speech():
+    """Scrollback that a new fragment yanks away is not scrollback.
+
+    README promises the mouse and arrow keys work; auto_scroll snaps to the
+    end on every write, which during speech is about twice a second.
+    """
+    from textual.widgets import RichLog
+
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        for i in range(30):
+            metrics.append_text(Direction.IN, source=f" frag{i:02d} aaa bbb ccc ddd eee")
+            app.refresh_from_metrics()
+            await pilot.pause()
+
+        log = app.query_one("#source-in", TextStream).query_one(RichLog)
+        assert log.max_scroll_y > 0, "nothing to scroll - the test proves nothing"
+        log.scroll_to(y=0, animate=False)
+        await pilot.pause()
+
+        for i in range(30, 36):
+            metrics.append_text(Direction.IN, source=f" frag{i:02d} aaa bbb ccc ddd eee")
+            app.refresh_from_metrics()
+            await pilot.pause()
+
+        assert log.scroll_y == 0, "new speech yanked the view back to the end"
+
+
+@pytest.mark.asyncio
+async def test_the_text_panes_do_not_take_focus():
+    """Nothing in this app was focusable before the panes became RichLogs.
+
+    RichLog's own CSS tints whichever one holds focus, so one pane comes up
+    shaded differently from the other three for no reason a user can act on -
+    and Tab silently starts cycling them.
+    """
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        assert app.focused is None, f"something took focus: {app.focused!r}"
+        assert app.screen.focus_chain == [], "the panes joined the focus chain"

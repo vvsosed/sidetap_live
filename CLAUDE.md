@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **351 tests that run with no audio hardware, no network and no
+`tests/` holds **367 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -80,7 +80,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 351 tests, no audio/network/creds
+uv run pytest -q                                    # 367 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -223,7 +223,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 351 tests import the package with no
+  `activity.py`. This is what lets 367 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -327,7 +327,18 @@ preference and these are not.
   any wider terminal it re-wraps each line into a full one plus a ragged
   remainder. `test_a_long_stretch_settles_into_lines_broken_between_words`
   guards it, and runs at 120 columns deliberately, because at the default test
-  width of 80 the bug cannot appear.
+  width of 80 the bug cannot appear. Two more traps sit in the same widget.
+  **The live line's row is sized `1`, never `auto`** — sizing the log
+  `height: auto; max-height: 1fr` reads as tidier and lets it take the whole
+  stream once it fills, which lays the Static out one row below its container
+  where it is clipped: every widget attribute still reads correctly and the
+  words being spoken simply stop being drawn. **And the live Static is built
+  `markup=False`** to match the log; `Static` defaults to markup on, so
+  `[inaudible]` vanished on the live line and reappeared once it settled, and
+  a tag closing nothing — `[/b]` — raised `MarkupError` out of the refresh
+  timer and ended the call. Cuts are measured in **cells, not code points**,
+  because a CJK character is two columns wide. Asserting on widget attributes
+  cannot catch any of this; the tests read the composited screen.
 - **The TUI polls `session.stop`; the pipeline never calls into it.** The
   SIGINT/SIGTERM handler does nothing but set that flag, so a TUI that does not
   read it means `App.run()` never returns, `shutdown()` never runs, and

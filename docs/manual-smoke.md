@@ -1,6 +1,6 @@
 # Manual smoke checklist
 
-The automated suite is 351 tests that run with no audio hardware, no network
+The automated suite is 367 tests that run with no audio hardware, no network
 and no credentials. That property is why it is worth having — and it is also
 exactly why it cannot answer anything below.
 
@@ -237,10 +237,15 @@ this checklist is for — treat these as unconfirmed until it has been run:
   unverified in practice.
 - **The text panes stream instead of redrawing.** Checked against fakes and a
   headless render only; no real terminal has shown it. Watch during any call
-  that lines settle and then stay put, that the words being spoken now are
-  visible at the bottom of each stream, and that a resize does not leave the
-  older lines ragged enough to matter — RichLog does not re-wrap what it has
-  already written.
+  that lines settle and then stay put, and that **the words being spoken now
+  are visible on the last row of each stream** — that one is worth checking
+  once the pane has filled, not just at the start, because the failure it
+  replaced only appeared after the log filled up.
+  Two knowingly-accepted rough edges: until a stream has filled, its live row
+  sits at the bottom with a gap above it, and a resize leaves already-written
+  lines at their old width, because RichLog does not re-wrap them. Both are
+  cosmetic. If a narrowed terminal ever costs a pane a whole row to a
+  horizontal scrollbar, that is not cosmetic and is a regression.
 
 ## Things that are known-untested
 

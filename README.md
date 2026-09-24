@@ -187,9 +187,12 @@ what it was translated into (bold), with the session's health and lag beneath.
 Text **streams upward** — new words appear at the bottom edge and older lines
 scroll up out of view. A line, once written, is never rewritten, so what you
 have already read stays where it was and the eye can follow the speech. The
-line currently being spoken sits just under the settled text and updates in
-place until it fills, then settles in its turn. Scroll back with the mouse or
-the arrow keys; the full record is in the transcript files either way.
+line currently being spoken sits on the last row of its stream and updates in
+place until it fills, then settles in its turn.
+
+Scroll back with the mouse or the arrow keys — the view follows the live end
+only while you are already at it, so scrolling up stays put through the next
+fragment. The full record is in the transcript files either way.
 
 ### Hotkeys
 
@@ -285,7 +288,7 @@ Real, current limitations — not aspirational TODOs.
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
   leaves unverified — it is a twelve-item checklist, and every item on it is
-  something the 351 automated tests structurally cannot reach.
+  something the 367 automated tests structurally cannot reach.
 
 ## More detail
 

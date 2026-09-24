@@ -8,6 +8,7 @@ path rather than a second implementation.
 
 from __future__ import annotations
 
+from rich.cells import cell_len
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Footer, RichLog, Static
@@ -58,6 +59,22 @@ def format_state(state: SessionState) -> str:
     return state.value
 
 
+def _fits_in(text: str, width: int) -> int:
+    """Index just past the longest prefix of `text` that fits in `width` CELLS.
+
+    Measured in cells, not code points: a CJK character occupies two columns,
+    so a cut counted in characters writes a line twice as wide as the pane and
+    RichLog re-wraps it - the very artefact passing an explicit width exists
+    to prevent. `--their-lang zh-CN` is an ordinary input for this program.
+    """
+    total = 0
+    for index, char in enumerate(text):
+        total += cell_len(char)
+        if total > width:
+            return index
+    return len(text)
+
+
 class TextStream(Vertical):
     """One transcription stream, rendered append-only.
 
@@ -94,7 +111,16 @@ class TextStream(Vertical):
             highlight=False,
             classes="settled",
         )
-        self._live = Static("", classes="live")
+        # Nothing in this app was focusable before the panes became RichLogs.
+        # Left alone, one comes up focused and RichLog's own CSS tints it
+        # differently from the other three, and Tab starts cycling them.
+        self._log.can_focus = False
+        # markup=False, to match the log. Static defaults to markup=True, so
+        # "[inaudible]" was eaten on the live line and then reappeared when it
+        # settled into the markup-free log - the same words changing as they
+        # scrolled. A tag that closes nothing, "[/b]", raises MarkupError out
+        # of the refresh timer and ends the call outright.
+        self._live = Static("", classes="live", markup=False)
         self._pending = ""
 
     def compose(self) -> ComposeResult:
@@ -126,21 +152,30 @@ class TextStream(Vertical):
             return
         self._pending += text
         width = self.wrap_width
-        while len(self._pending) > width:
-            # Break between words. A single run longer than the line - a URL,
-            # a language with no spaces - is cut at the width instead, which
-            # is what wrapping would have done anyway.
-            cut = self._pending.rfind(" ", 0, width + 1)
+        # Whether the viewer is following the live end. Read BEFORE writing,
+        # because writing is what moves the bottom. Scrollback that the next
+        # fragment yanks away is not scrollback, and speech settles a line
+        # about twice a second.
+        follow = self._log.scroll_y >= self._log.max_scroll_y
+        while cell_len(self._pending) > width:
+            limit = _fits_in(self._pending, width)
+            # Break between words. A run longer than the line - a URL, a
+            # language that does not use spaces - is cut at the width instead,
+            # which is what wrapping would have done anyway.
+            cut = self._pending.rfind(" ", 0, limit + 1)
             if cut <= 0:
-                cut = width
-            # `width=` is not optional. Left to itself, RichLog measures the
-            # write against the Rich CONSOLE - 80 columns - rather than
-            # against its own region, so on any terminal wider than 80 it
-            # re-wrapped each line into a full one plus a ragged remainder.
-            # Passing the width overrides that, and the lines are already cut
-            # to fit, so nothing wraps twice.
-            self._log.write(self._pending[:cut].rstrip(), width=width)
+                cut = max(limit, 1)
+            line = self._pending[:cut].strip()
             self._pending = self._pending[cut:].lstrip()
+            # An all-whitespace cut renders as a blank scrollback line.
+            if line:
+                # `width=` is not optional. Left to itself, RichLog measures
+                # the write against the Rich CONSOLE - 80 columns - rather
+                # than against its own region, so on any terminal wider than
+                # 80 it re-wrapped each line into a full one plus a ragged
+                # remainder. The line is already cut to fit, so nothing wraps
+                # twice.
+                self._log.write(line, width=width, scroll_end=follow)
         self._live.update(self._pending)
 
 
@@ -155,16 +190,25 @@ class SidetapLiveApp(App):
     /* Each stream fills what the pane has left, so the two share it evenly
        and the live line sits directly under its own settled text. */
     TextStream { height: 1fr; }
+    /* The live line gets a row of its own and the log takes what is left.
+       `height: auto; max-height: 1fr` on the log reads as tidier and is
+       wrong: once the log fills it takes the whole TextStream, the Static is
+       laid out one row below its container and clipped, and the pane silently
+       stops showing the words being spoken - while every widget attribute
+       still reads correctly. Sizes here are fixed so that cannot happen. */
     TextStream > RichLog {
-        height: auto;
-        max-height: 1fr;
+        height: 1fr;
         background: transparent;
         scrollbar-size-vertical: 1;
         /* Reserved from the start, so the width lines were written at does
            not change the moment the first one scrolls off. */
         scrollbar-gutter: stable;
+        /* RichLog never shrinks its widest-line width, so narrowing the
+           terminal would otherwise leave a permanent horizontal scrollbar -
+           a whole row out of a pane that may only have two. */
+        overflow-x: hidden;
     }
-    TextStream > .live { height: auto; }
+    TextStream > .live { height: 1; }
 
     /* Named on the descendants, not the container: Textual does not cascade
        these onto a child widget that paints its own content. */
@@ -204,6 +248,7 @@ class SidetapLiveApp(App):
         # here, not in Metrics: the pipeline must not have to know whether
         # anyone is watching, which is what keeps --no-tui the same path.
         self._cursors: dict[str, int] = {}
+        self._streams: dict[str, TextStream] = {}
 
     def compose(self) -> ComposeResult:
         for direction in Direction:
@@ -321,8 +366,19 @@ class SidetapLiveApp(App):
             new = "\u2026 " + tail
         else:
             new = tail[-delta:]
+        # Resolved once and kept: these four are created in compose() and
+        # never replaced, and this runs forty times a second on the thread
+        # that shares a GIL with capture and playout.
+        stream = self._streams.get(stream_id)
+        if stream is None:
+            stream = self.query_one(f"#{stream_id}", TextStream)
+            self._streams[stream_id] = stream
+        # Feed FIRST. The cursor is a promise that the text reached the
+        # screen, so advancing it past something feed() then refused - a
+        # markup error, a NoMatches during a mount race - drops that speech
+        # from the pane for the rest of the call.
+        stream.feed(new)
         self._cursors[stream_id] = produced
-        self.query_one(f"#{stream_id}", TextStream).feed(new)
 
     def _paint_toggles(self, engaged: dict[str, bool]) -> None:
         """Light the footer key of a toggle that is currently on.
