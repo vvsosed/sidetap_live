@@ -1,4 +1,5 @@
 import json
+import os
 
 from sidetap_live.transcript import ENGINE, EventTranscript, render_markdown
 from sidetap_live.types import Direction, TranscriptEvent
@@ -140,3 +141,35 @@ def test_source_and_target_blocks_cover_the_same_window(tmp_path):
     assert len(starts["source"]) == len(starts["target"]), "streams cut differently"
     for src_t, tgt_t in zip(starts["source"], starts["target"]):
         assert abs(src_t - tgt_t) <= 3.0, f"blocks drifted apart: {src_t} vs {tgt_t}"
+
+
+def test_the_markdown_is_written_atomically(tmp_path, monkeypatch):
+    """routing.py's Journal.save() avoids a bare write_text precisely because
+    "it can leave a truncated file if interrupted"; the transcript did not.
+
+    close() runs inside Session.shutdown(), so a crash there could leave a
+    half-written .md. The .jsonl survives - it is flushed per line - but
+    nothing regenerates the .md from it.
+    """
+    from sidetap_live import transcript as transcript_module
+
+    transcript = EventTranscript(tmp_path, session="s")
+    transcript.write(
+        TranscriptEvent(t=0.0, direction=Direction.IN, kind="source", text="hello")
+    )
+
+    real_replace = os.replace
+    seen = {}
+
+    def watching_replace(src, dst):
+        seen["tmp"] = str(src)
+        seen["dst"] = str(dst)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(transcript_module.os, "replace", watching_replace)
+    path = transcript.close()
+
+    assert seen.get("dst") == str(path), "the markdown was not renamed into place"
+    assert seen["tmp"] != seen["dst"], "it wrote straight to the final path"
+    assert "hello" in path.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*.tmp")), "the temp file was left behind"
