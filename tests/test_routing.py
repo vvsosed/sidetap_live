@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 import os
@@ -735,3 +736,60 @@ def test_has_routed_is_false_until_a_stream_is_actually_rewired(
     )
     playing.engage(app_pattern="zoom")
     assert playing.has_routed is True
+
+
+def _without_duck_ports(graph):
+    """The same graph one registry beat earlier: duck Node, no Ports yet."""
+    duck = graph.node_by_name(DUCK_NODE)
+    return dataclasses.replace(
+        graph, ports=tuple(p for p in graph.ports if p.node_id != duck.id)
+    )
+
+
+def _without_duck(graph):
+    """Before pw-loopback has registered anything - what engage() really sees."""
+    duck = graph.node_by_name(DUCK_NODE)
+    return dataclasses.replace(
+        graph,
+        nodes=tuple(n for n in graph.nodes if n.id != duck.id),
+        ports=tuple(p for p in graph.ports if p.node_id != duck.id),
+    )
+
+
+def test_a_duck_with_no_ports_yet_does_not_unlink_the_call_from_the_speakers(
+    tmp_path, routing_graph
+):
+    """PipeWire announces a Node before its Ports finish registering.
+
+    engage() deliberately snapshots before spawning pw-loopback, so the first
+    poll_once() can land in the window where the duck node exists but has no
+    input ports. The unlink from the speakers and the link into the duck are
+    decided independently, so that window unlinked the call from the speakers
+    and linked it to nothing - and because both unlinks SUCCEEDED, the stream
+    was marked routed and never retried. Silent call, nothing in the log.
+    """
+    linker = FakeLinker()
+    router = Router(
+        graph=FakeGraphSource(
+            _without_duck(routing_graph),        # engage(): pre-spawn
+            _without_duck_ports(routing_graph),  # first poll: the race window
+            routing_graph,                       # later poll: duck fully up
+        ),
+        linker=linker,
+        unlinker=linker,
+        loopbacks=FakeLoopbackFactory(),
+        journal_path=tmp_path / "j.json",
+    )
+    router.engage(app_pattern="zoom")
+
+    router.poll_once()
+    assert linker.unlinks == [], (
+        "the call was unlinked from the speakers while the duck had no ports "
+        "to link it into - the user now hears nothing"
+    )
+
+    # And the stream must not have been recorded as done: once the duck's
+    # ports appear, the next poll has to complete the routing.
+    router.poll_once()
+    assert linker.unlinks, "the deferred stream was never routed once the duck was ready"
+    assert linker.links, "the deferred stream was never linked into the duck"

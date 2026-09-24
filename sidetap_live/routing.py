@@ -362,6 +362,16 @@ class Router:
         if duck is None:
             return 0
         duck_inputs = snapshot.ports_of(duck.id, "in")
+        # Same deferral as `duck is None`, and for the same reason. PipeWire
+        # announces a node before its ports finish registering, and pw-loopback
+        # is a freshly-forked process here, so a snapshot can legitimately show
+        # the duck with nothing to link into. Without this, the unlink below
+        # still ran while the link did not: the call was cut from the speakers
+        # and joined to nothing, every unlink SUCCEEDED so the stream was
+        # marked routed, and no later poll ever retried it. Silent call, and
+        # nothing in the log to say why, because `failed` was empty.
+        if not duck_inputs:
+            return 0
 
         default_sink = snapshot.node_by_name(snapshot.default_sink or "")
         sink_inputs = snapshot.ports_of(default_sink.id, "in") if default_sink else ()

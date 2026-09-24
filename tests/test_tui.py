@@ -1,7 +1,15 @@
+import asyncio
+
 import pytest
 
 from sidetap_live.metrics import Health, Metrics
-from sidetap_live.tui import SidetapLiveApp, format_lag, format_rotations, health_marker
+from sidetap_live.tui import (
+    REFRESH_HZ,
+    SidetapLiveApp,
+    format_lag,
+    format_rotations,
+    health_marker,
+)
 from sidetap_live.types import Direction, SessionState
 
 
@@ -47,3 +55,50 @@ async def test_overlap_and_cost_are_in_the_subtitle():
         await pilot.pause()
         assert "overlap 12%" in app.sub_title
         assert "$1.23" in app.sub_title
+
+
+@pytest.mark.asyncio
+async def test_the_tui_exits_when_the_session_is_stopped_from_outside():
+    """SIGTERM must be able to end the call.
+
+    run_session()'s signal handler does nothing but `session.stop.set()`.
+    _run_headless polls that flag; the TUI did not, so App.run() never
+    returned, run_session()'s `finally: session.shutdown()` never ran, and
+    router.restore() never ran either - leaving the user's call routed
+    through the duck and silenced until somebody pressed a key.
+
+    Ctrl-C cannot stand in for this: Textual clears the terminal's ISIG flag
+    while it owns the screen, so no SIGINT is delivered at all.
+    """
+    import threading
+
+    class StubPlayout:
+        suppressed = False
+
+    class StoppableSession:
+        def __init__(self):
+            self.metrics = Metrics()
+            self.stop = threading.Event()
+            self.playouts = {d: StubPlayout() for d in Direction}
+
+    session = StoppableSession()
+    app = SidetapLiveApp(metrics=session.metrics, session=session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.is_running
+
+        session.stop.set()            # what handle_signal does, and all it does
+
+        # Wait for the refresh timer rather than assuming a fixed number of
+        # frames: it runs at REFRESH_HZ, so two pauses are not guaranteed to
+        # contain a tick and the assertion below would flake under load.
+        for _ in range(50):
+            await pilot.pause()
+            if not app.is_running:
+                break
+            await asyncio.sleep(1 / REFRESH_HZ)
+
+        assert not app.is_running, (
+            "the TUI ignored session.stop, so shutdown() and router.restore() "
+            "would never run"
+        )
