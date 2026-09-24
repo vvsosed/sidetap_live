@@ -241,3 +241,46 @@ def test_the_report_marks_warnings_distinctly():
     # A warning must not claim everything passed.
     assert "All checks passed" not in report
 
+
+
+def test_the_live_check_probes_the_languages_the_user_named():
+    """--their-lang/--my-lang were parsed and then ignored.
+
+    The help text said "check this language too" and nothing checked it: the
+    probe always opened "en". This project's own lesson from the 1007
+    post-mortem is that a health check doing less than the real thing does
+    not check the real thing, and the languages are the part most likely to
+    be wrong.
+    """
+    opened = []
+
+    class _Factory:
+        def open(self, target_lang, *, echo, handle=None):
+            opened.append(target_lang)
+
+            class _S:
+                def close(self_inner):
+                    pass
+
+            return _S()
+
+    check = check_live_session(_Factory(), languages=("ru-RU", "en-US"))
+    assert check.ok
+    assert opened == ["ru-RU", "en-US"]
+
+
+def test_the_live_check_names_the_language_that_failed():
+    class _Factory:
+        def open(self, target_lang, *, echo, handle=None):
+            if target_lang == "xx":
+                raise RuntimeError("1007 Request contains an invalid argument")
+
+            class _S:
+                def close(self_inner):
+                    pass
+
+            return _S()
+
+    check = check_live_session(_Factory(), languages=("en", "xx"))
+    assert not check.ok
+    assert "xx" in check.detail

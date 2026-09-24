@@ -51,10 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--no-api-check", action="store_true", help="skip opening a live session"
     )
-    # Reserved for a future check that verifies the model actually serves
-    # these languages, rather than merely that the key opens a session.
-    doctor.add_argument("--their-lang", metavar="BCP47", help="check this language too")
-    doctor.add_argument("--my-lang", metavar="BCP47", help="check this language too")
+    # Passed to the live-session probe, which opens one session per language
+    # named. Without them it probes "en" only, which tells you the key works
+    # and nothing about the languages you are about to interpret between.
+    doctor.add_argument(
+        "--their-lang", metavar="BCP47", help="open a live session for this language too"
+    )
+    doctor.add_argument(
+        "--my-lang", metavar="BCP47", help="open a live session for this language too"
+    )
     doctor.add_argument("-v", "--verbose", action="store_true")
 
     run = sub.add_parser(
@@ -321,9 +326,17 @@ def _doctor(args, graph: GraphSource, launcher, linker, clock) -> int:
 
         from .live import build_factory
 
+        # Probe what the user actually named, in order, de-duplicated -
+        # falling back to "en" when they named nothing.
+        languages = tuple(
+            dict.fromkeys(
+                lang for lang in (args.their_lang, args.my_lang) if lang
+            )
+        ) or ("en",)
         checks.append(
             check_live_session(
-                build_factory(genai.Client(api_key=os.environ["GEMINI_API_KEY"]))
+                build_factory(genai.Client(api_key=os.environ["GEMINI_API_KEY"])),
+                languages=languages,
             )
         )
 

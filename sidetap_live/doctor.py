@@ -176,24 +176,41 @@ def check_activity(detector=None) -> Check:
     return Check("speech activity", True, "webrtcvad available")
 
 
-def check_live_session(factory) -> Check:
-    """Open one real session and close it.
+def check_live_session(factory, languages: tuple[str, ...] = ("en",)) -> Check:
+    """Open one real session per language and close it.
 
     One cheap round trip here fails in a second, rather than two minutes into
     a live conversation with the graph already rewired. `factory` is anything
     with the SessionFactory shape (`.open(target_lang, *, echo,
     handle=None)`) - production passes
     `live.build_factory(genai.Client(api_key=...))`.
+
+    The languages are probed rather than assumed. This used to open "en"
+    whatever the user passed, while --their-lang and --my-lang advertised
+    "check this language too" and checked nothing - and the languages are the
+    part most likely to be wrong. The 1007 post-mortem is the standing lesson
+    here: a health check that does less than the real thing does not check
+    the real thing.
     """
-    try:
-        session = factory.open("en", echo=False)
-    except Exception as exc:
-        return Check("live session", False, f"{type(exc).__name__}: {exc}")
-    try:
-        session.close()
-    except Exception as exc:
-        return Check("live session", False, f"opened but failed to close: {exc}")
-    return Check("live session", True, "opened and closed a live-translate session")
+    for language in languages:
+        try:
+            session = factory.open(language, echo=False)
+        except Exception as exc:
+            return Check(
+                "live session", False, f"{language}: {type(exc).__name__}: {exc}"
+            )
+        try:
+            session.close()
+        except Exception as exc:
+            return Check(
+                "live session", False, f"{language}: opened but failed to close: {exc}"
+            )
+    return Check(
+        "live session",
+        True,
+        "opened and closed a live-translate session for "
+        + ", ".join(languages),
+    )
 
 
 def install_virtmic_config(path: Path = VIRTMIC_CONFIG_PATH) -> bool:
