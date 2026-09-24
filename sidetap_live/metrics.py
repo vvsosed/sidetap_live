@@ -14,7 +14,6 @@ from enum import Enum
 
 from .types import Direction, SessionState
 
-
 # Characters of live transcription kept per stream for the dashboard.
 #
 # The model emits no turn boundary - experiment 4 saw `finished=True` never
@@ -73,7 +72,7 @@ class Snapshot:
     # Session-wide, not per-direction: it is a property of the two tracks
     # together. Fraction of wall clock where BOTH carry speech at once -
     # the most direct measure of whether the humans stopped taking turns.
-    overlap_pct: float = 0.0
+    overlap_pct: float | None = 0.0
 
 
 class Metrics:
@@ -196,7 +195,7 @@ class Metrics:
         with self._lock:
             self._bypassed = value
 
-    def set_overlap_pct(self, value: float) -> None:
+    def set_overlap_pct(self, value: float | None) -> None:
         with self._lock:
             self._overlap_pct = value
 

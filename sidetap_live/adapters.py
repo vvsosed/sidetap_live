@@ -22,7 +22,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import IO, BinaryIO, Sequence
+from collections.abc import Sequence
+from typing import IO, BinaryIO
 
 from .graph import PwGraph, parse_graph
 from .ports import LinkResult, LoopbackSpec
@@ -287,7 +288,7 @@ WPCTL = "wpctl"
 #
 # --latency alone does nothing: at the default pipe size it measured 1180 ms,
 # because the OS pipe is the buffer, not pw-cat's node latency. Both are
-# needed. See docs/experiments/02-pwcat-playback.md.
+# needed. See sidetap's docs/experiments/02-pwcat-playback.md.
 PIPE_BYTES = 16384
 PW_CAT_LATENCY = "20ms"
 F_SETPIPE_SZ = 1031
@@ -349,7 +350,7 @@ class WpctlVolumeControl:
         """Returns False rather than raising.
 
         `object_id` is PipeWire's global object.id, not object.serial - wpctl
-        resolves against the id. See docs/experiments/01-tap-volume.md.
+        resolves against the id. See sidetap's docs/experiments/01-tap-volume.md.
 
         This runs inside the playout loop on every duck transition. A raise
         here would kill playout for the rest of the call over a node that

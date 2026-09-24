@@ -256,11 +256,12 @@ Real, current limitations — not aspirational TODOs.
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
   leaves unverified — it is a twelve-item checklist, and every item on it is
-  something the 304 automated tests structurally cannot reach.
+  something the 351 automated tests structurally cannot reach.
 
 ## More detail
 
-- `docs/experiments/` — the six measurements the design rests on. Four of them
+- `docs/experiments/` — the six measurements the design rests on, in five files
+  (the sixth is an addendum to `01-connect.md`). Four of them
   contradicted either Google's documentation or the original design.
 - `docs/manual-smoke.md` — what only a human with a real call can check.
 - `docs/superpowers/specs/` — the design, and what each decision rejected.

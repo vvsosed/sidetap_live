@@ -152,8 +152,24 @@ class Journal:
         }
         tmp = path.with_name(path.name + ".tmp")
         try:
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            # fsync the file before the rename and the directory after it.
+            # os.replace() alone survives a kill -9, because the page cache
+            # outlives the process - but this file exists to survive a crash
+            # mid-rewire, and a power loss or kernel panic is squarely inside
+            # that threat model. Without the syncs the journal can come back
+            # reverted to its previous contents, which is the one state
+            # doctor --repair cannot recover from: the graph is rewired and
+            # the record of it is gone.
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(tmp, path)
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
         except BaseException:
             # Do not leave a stray .tmp behind. It is harmless to the journal
             # itself - load() never reads it - but a file that accumulates on
@@ -209,16 +225,13 @@ def resolve(graph: PwGraph, ref: LinkRef) -> tuple[int, int] | None:
     dst = next(
         (p for p in graph.ports_of(dst_node.id, "in") if p.name == ref.dst_port), None
     )
-    if src is None:
-        src = next(
-            (p for p in graph.ports if p.node_id == src_node.id and p.name == ref.src_port),
-            None,
-        )
-    if dst is None:
-        dst = next(
-            (p for p in graph.ports if p.node_id == dst_node.id and p.name == ref.dst_port),
-            None,
-        )
+    # No direction-ignoring retry. There used to be one - if the filtered
+    # lookup missed, it searched every port of the node by name - with nothing
+    # to say when it was meant to fire and no test covering it. What it would
+    # actually do is hand pw-link a port of the wrong direction and journal
+    # the result as though it were the link that was asked for. Returning None
+    # instead makes restore() and repair() report a ref they cannot resolve,
+    # which is the outcome that can be acted on.
     if src is None or dst is None:
         return None
     return (src.id, dst.id)
@@ -274,7 +287,7 @@ class Router:
         # BOTH, deliberately. The serial is the durable identifier the journal
         # records; the id is what wpctl resolves against for the duck volume.
         # Conflating them makes the duck silently never close - see
-        # docs/experiments/01-tap-volume.md.
+        # sidetap's docs/experiments/01-tap-volume.md.
         self.duck_serial: int | None = None
         self.duck_id: int | None = None
 
@@ -353,7 +366,7 @@ class Router:
         # once poll_once() goes on to find and route through it - and the
         # duck volume control that reads duck_id from here would then never
         # be able to close it, exactly the failure
-        # docs/experiments/01-tap-volume.md flags.
+        # sidetap's docs/experiments/01-tap-volume.md flags.
         if duck is not None:
             self.duck_serial = duck.serial
             self.duck_id = duck.id

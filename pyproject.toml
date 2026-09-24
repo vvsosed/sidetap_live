@@ -33,3 +33,25 @@ packages = ["sidetap_live"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# Deliberately narrow. The rules left out are left out on purpose:
+#   BLE001 blind-except  - the watchers catch Exception by design, so that a
+#                          transient graph read cannot kill a thread that must
+#                          survive the whole call.
+#   S110   try-except-pass - same shape, same reason.
+#   SIM115 open-without-context-manager - the transcript's .jsonl handle is
+#                          deliberately long-lived and closed in close().
+#   E501   line-too-long - the comments here carry the reasoning behind the
+#                          measurements and are wrapped by hand.
+# A linter that flags the design is a linter that gets switched off.
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests import next to the group of tests that use them, which reads better
+# than one block at the top of a 700-line file.
+"tests/*" = ["E402"]

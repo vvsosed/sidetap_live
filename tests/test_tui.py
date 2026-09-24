@@ -152,3 +152,14 @@ async def test_bypass_does_not_run_graph_work_on_the_ui_thread():
 
         assert started.is_set(), "the bypass work never started"
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_unmeasurable_overlap_shows_a_dash_not_zero_percent():
+    metrics = Metrics()
+    metrics.set_overlap_pct(None)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "overlap —" in app.sub_title
+        assert "0%" not in app.sub_title

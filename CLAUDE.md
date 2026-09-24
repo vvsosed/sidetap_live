@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **304 tests that run with no audio hardware, no network and no
+`tests/` holds **351 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -35,8 +35,11 @@ credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 env -u GOOGLE_APPLICATION_CREDENTIALS -u GEMINI_API_KEY uv run pytest -q
 ```
 
-`docs/experiments/` records the six measurements the design rests on — **prefer
-a number from there over a claim from memory.** Four of the six contradicted
+`docs/experiments/` records the six measurements the design rests on, in five
+files: the sixth, the `1007` region-subtag post-mortem, is an addendum at the
+end of `01-connect.md` rather than a file of its own, because it was found by
+a real call failing rather than by an experiment. **Prefer a number from there
+over a claim from memory.** Four of the six contradicted
 either Google's documentation or the original design, and two of those would
 have produced code that passed every offline test and failed only on a live
 call.
@@ -69,7 +72,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 304 tests, no audio/network/creds
+uv run pytest -q                                    # 351 tests, no audio/network/creds
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
 uv run sidetap-live doctor --install                # write the virtual-mic config (once)
@@ -207,7 +210,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 304 tests import the package with no
+  `activity.py`. This is what lets 351 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `GoAway` opens a replacement, `Closed` sets a flag, a handle is

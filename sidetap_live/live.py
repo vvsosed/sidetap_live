@@ -290,7 +290,7 @@ class GeminiLiveSession:
                     asyncio.gather(*pending, return_exceptions=True),
                     CLOSE_TIMEOUT_S,
                 )
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 log.warning("live session loops did not stop within %ss", CLOSE_TIMEOUT_S)
             for task in done:
                 if task.exception() is not None:

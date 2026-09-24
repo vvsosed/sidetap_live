@@ -7,8 +7,9 @@ is why nothing in this package does sample-rate conversion.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import BinaryIO, Iterator
+from typing import BinaryIO
 
 from .ports import ManagedProcess, ProcessLauncher
 from .types import BLOCK_BYTES, TARGET_RATE

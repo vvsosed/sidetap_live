@@ -1,7 +1,7 @@
 import json
 import os
 
-from sidetap_live.transcript import ENGINE, EventTranscript, render_markdown
+from sidetap_live.transcript import ENGINE, EventTranscript
 from sidetap_live.types import Direction, TranscriptEvent
 
 
@@ -173,3 +173,19 @@ def test_the_markdown_is_written_atomically(tmp_path, monkeypatch):
     assert seen["tmp"] != seen["dst"], "it wrote straight to the final path"
     assert "hello" in path.read_text(encoding="utf-8")
     assert not list(tmp_path.glob("*.tmp")), "the temp file was left behind"
+
+
+def test_an_abbreviation_does_not_end_a_paragraph():
+    """"и т.д." and "e.g." end in a period without ending a sentence.
+
+    _ends_sentence looked only at the final character, so a fragment closing
+    on a common abbreviation cut the paragraph there and split a sentence
+    across two blocks in the rendered markdown.
+    """
+    from sidetap_live.transcript import _ends_sentence
+
+    assert _ends_sentence("Это конец.")
+    assert _ends_sentence("That is the end!")
+    assert not _ends_sentence("книги, статьи и т.д.")
+    assert not _ends_sentence("formats e.g.")
+    assert not _ends_sentence("Mr.")

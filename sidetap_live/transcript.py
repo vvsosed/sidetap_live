@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .live import MODEL
@@ -63,8 +63,25 @@ SENTENCE_END = ".!?…。！？"
 TARGET_SENTENCE_TOLERANCE_S = 3.0
 
 
+# Fragments that end in a period without ending a sentence. Kept short and
+# lowercase-matched: the cost of missing one is a paragraph cut slightly
+# early, which is what happened for all of them before, so this only has to
+# catch the common cases to be worth having.
+ABBREVIATIONS = (
+    "т.д.", "т.п.", "т.е.", "др.", "г.", "гг.", "рис.", "см.",
+    "e.g.", "i.e.", "etc.", "vs.", "mr.", "mrs.", "ms.", "dr.", "st.",
+    "fig.", "no.", "cf.", "al.",
+)
+
+
 def _ends_sentence(text: str) -> bool:
-    return text.strip().endswith(tuple(SENTENCE_END))
+    stripped = text.strip()
+    if not stripped.endswith(tuple(SENTENCE_END)):
+        return False
+    # A trailing period is ambiguous in a way that ! ? … are not, so only
+    # that case is worth checking against the abbreviation list.
+    lowered = stripped.lower()
+    return not any(lowered.endswith(abbr) for abbr in ABBREVIATIONS)
 
 
 def _cut_target(fragments: list[TranscriptEvent], after: float) -> int:
@@ -180,7 +197,7 @@ class EventTranscript:
                     "engine": ENGINE,
                     "model": MODEL,
                     "session": self.session,
-                    "started": datetime.now(timezone.utc).isoformat(),
+                    "started": datetime.now(UTC).isoformat(),
                 }
             }
         )

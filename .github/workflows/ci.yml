@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uvx ruff check .
+
+      # The suite's defining property is that it needs no audio hardware, no
+      # network and no credentials - everything that would need them sits
+      # behind a Protocol in ports.py with a fake in tests/conftest.py. The
+      # unset variables are not belt-and-braces: they are the assertion. A
+      # test that quietly started reaching for real credentials would pass on
+      # a developer's machine and fail only here, which is the point.
+      - name: Test
+        env:
+          GEMINI_API_KEY: ""
+          GOOGLE_APPLICATION_CREDENTIALS: ""
+        run: env -u GEMINI_API_KEY -u GOOGLE_APPLICATION_CREDENTIALS uv run pytest -q

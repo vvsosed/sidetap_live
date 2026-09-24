@@ -8,9 +8,10 @@ or the wall clock.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import BinaryIO, Iterator, Protocol, Sequence, runtime_checkable
+from typing import BinaryIO, Protocol, runtime_checkable
 
 from .graph import PwGraph
 from .types import SessionEvent
@@ -99,7 +100,7 @@ class VolumeControl(Protocol):
         yields "Object not found". This does not contradict the project's
         "identify nodes by object.serial" rule - that is about DURABLE
         references (the routing journal, the tap's dedup keys) where ids get
-        recycled over time. See docs/experiments/01-tap-volume.md, which hit
+        recycled over time. See sidetap's docs/experiments/01-tap-volume.md, which hit
         this exact trap.
         """
         ...

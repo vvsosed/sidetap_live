@@ -17,8 +17,8 @@ from __future__ import annotations
 import logging
 import queue as queue_module
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .activity import SpeechActivity
 from .cost import Rates, input_seconds, output_seconds
@@ -159,7 +159,12 @@ class DirectionInterpreter:
         self._check_dead_air()
         self._send(chunk.pcm)
         if self._pending is not None:
-            self._pending.send(chunk.pcm)
+            # Through _send_to, not a bare send: the replacement is a second
+            # live session being fed the same audio, and Google bills it.
+            # Sending directly meant the estimate understated every rotation,
+            # which is the one stretch of the call where the input cost
+            # genuinely doubles.
+            self._send_to(self._pending, chunk.pcm)
 
     def pump(self, chunks, stop: threading.Event) -> None:
         """Drain a capture queue into the session until told to stop."""
@@ -269,7 +274,10 @@ class DirectionInterpreter:
     def _send(self, pcm: bytes) -> None:
         if self._session is None:
             return
-        self._session.send(pcm)
+        self._send_to(self._session, pcm)
+
+    def _send_to(self, session, pcm: bytes) -> None:
+        session.send(pcm)
         seconds = input_seconds(len(pcm))
         self._metrics.add_cost(self._rates.input_usd(seconds))
 
@@ -393,6 +401,17 @@ class DirectionInterpreter:
                 self.note_handle(event.handle)
             elif isinstance(event, Closed):
                 self._drop_pending(event.reason)
+            return
+        if session is not None and session is not self._session:
+            # A session that is neither on air nor warming is retired, and
+            # close() still lets its receive thread drain whatever it had
+            # already queued. Those events used to fall through to _dispatch,
+            # so audio the outgoing session produced before the handover was
+            # played AFTER the replacement took over - repeating a sentence,
+            # which is the artefact discarding the replacement's early output
+            # exists to prevent, arriving from the other side. Its Closed is
+            # dropped here too, deliberately: a session we retired on purpose
+            # must not look like the live one dying.
             return
         if isinstance(event, AudioOut):
             self._outgoing_silent = not self._has_speech(event.pcm)

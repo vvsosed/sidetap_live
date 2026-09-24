@@ -1,7 +1,7 @@
-import pytest
-
 import subprocess
 import tempfile
+
+import pytest
 
 from sidetap_live.adapters import (
     STDERR_TAIL_BYTES,
@@ -94,15 +94,13 @@ def test_a_link_timeout_is_a_failure(monkeypatch):
 
 
 from sidetap_live.adapters import (
-    PopenWriter,
     PwCatSink,
     PwLoopbackFactory,
     WpctlVolumeControl,
-    classify_link_output,
     loopback_argv,
     pwcat_argv,
 )
-from sidetap_live.ports import LinkResult, LoopbackSpec
+from sidetap_live.ports import LoopbackSpec
 from tests.conftest import FakeLauncher
 
 

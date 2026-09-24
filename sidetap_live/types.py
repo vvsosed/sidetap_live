@@ -10,8 +10,10 @@ TARGET_RATE = 16_000
 BLOCK_MS = 100
 BLOCK_BYTES = TARGET_RATE * 2 * BLOCK_MS // 1000
 
-# Playout side. Chirp 3 HD streaming synthesis returns LINEAR16 at this rate;
-# pw-cat resamples it to whatever the sink wants.
+# Playout side. gemini-3.5-live-translate-preview returns s16 at this rate;
+# pw-cat resamples it to whatever the sink wants. (The rate is right but the
+# reason used to name Chirp 3 HD, which is sidetap's TTS and has no successor
+# in this program - the model synthesises the speech itself.)
 TTS_RATE = 24_000
 TTS_BYTES_PER_S = TTS_RATE * 2
 
