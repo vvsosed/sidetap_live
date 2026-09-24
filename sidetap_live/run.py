@@ -626,6 +626,9 @@ def run_session(args, *, graph, launcher, linker, clock, sessions=None,
 
 def _run_headless(session: Session) -> None:
     alarmed = False
+    # Latched per direction so a standing condition is reported once rather
+    # than twice a second for the rest of the call.
+    deaf: dict[Direction, bool] = {d: False for d in Direction}
     while not session.stop.is_set():
         session.stop.wait(0.5)
         snapshot = session.metrics.snapshot()
@@ -636,3 +639,19 @@ def _run_headless(session: Session) -> None:
             alarmed = True
         elif not out.dead_air:
             alarmed = False
+
+        # The TUI has shown this as NO AUDIO ARRIVING from the start; headless
+        # only ever looked at OUT's dead_air. An unlinked capture node
+        # delivers zero bytes rather than silence, so with no gate in the path
+        # we simply stop sending - which looks healthy at every stage
+        # downstream. This watchdog is the only thing that sees it, and under
+        # --no-tui nothing was reporting it at all.
+        for direction, state in snapshot.directions.items():
+            if state.no_audio and not deaf[direction]:
+                log.error(
+                    "NO AUDIO reaching the %s direction - its capture node is "
+                    "delivering nothing; check `wpctl status` and the app is "
+                    "still streaming",
+                    direction.value,
+                )
+            deaf[direction] = state.no_audio
