@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from sidetap_live.doctor import (
     Check,

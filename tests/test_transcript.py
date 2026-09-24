@@ -1,7 +1,7 @@
 import json
 import os
 
-from sidetap_live.transcript import ENGINE, EventTranscript, render_markdown
+from sidetap_live.transcript import ENGINE, EventTranscript
 from sidetap_live.types import Direction, TranscriptEvent
 
 

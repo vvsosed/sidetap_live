@@ -22,7 +22,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import IO, BinaryIO, Sequence
+from collections.abc import Sequence
+from typing import IO, BinaryIO
 
 from .graph import PwGraph, parse_graph
 from .ports import LinkResult, LoopbackSpec

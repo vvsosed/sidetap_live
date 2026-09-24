@@ -17,8 +17,8 @@ from __future__ import annotations
 import logging
 import queue as queue_module
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from .activity import SpeechActivity
 from .cost import Rates, input_seconds, output_seconds

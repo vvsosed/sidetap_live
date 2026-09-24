@@ -18,9 +18,9 @@ from .adapters import (
     SystemClock,
 )
 from .capture import CaptureError
-from .types import IDLE_SUSPEND_S, LAG_CAP_S
 from .graph import PLAYBACK_STREAM, SINK, SOURCE, PwGraph
 from .ports import Clock, GraphSource, Linker, ProcessLauncher
+from .types import IDLE_SUSPEND_S, LAG_CAP_S
 
 log = logging.getLogger(__name__)
 

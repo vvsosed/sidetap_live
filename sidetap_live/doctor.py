@@ -93,8 +93,8 @@ def check_virtmic(graph: PwGraph, config_path: Path = VIRTMIC_CONFIG_PATH) -> Ch
         return Check(
             "virtual mic",
             False,
-            f"config is written but not loaded yet - run: "
-            f"systemctl --user restart pipewire pipewire-pulse",
+            "config is written but not loaded yet - run: "
+            "systemctl --user restart pipewire pipewire-pulse",
         )
     return Check(
         "virtual mic",

@@ -19,7 +19,7 @@ from .ports import LinkResult
 from .preroll import PreRoll
 from .routing import JOURNAL_PATH, VIRTMIC_SINK, Router
 from .transcript import EventTranscript
-from .types import LAG_CAP_S, NO_AUDIO_S, TTS_RATE, Direction, TranscriptEvent
+from .types import LAG_CAP_S, NO_AUDIO_S, TTS_RATE, Direction
 
 log = logging.getLogger(__name__)
 

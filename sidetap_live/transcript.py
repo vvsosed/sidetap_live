@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .live import MODEL
@@ -197,7 +197,7 @@ class EventTranscript:
                     "engine": ENGINE,
                     "model": MODEL,
                     "session": self.session,
-                    "started": datetime.now(timezone.utc).isoformat(),
+                    "started": datetime.now(UTC).isoformat(),
                 }
             }
         )

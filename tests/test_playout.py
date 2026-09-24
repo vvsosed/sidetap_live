@@ -1,6 +1,11 @@
 import pytest
 
-from sidetap_live.playout import CHUNK_BYTES, DuckControl, find_silence_boundary
+from sidetap_live.playout import (
+    CHUNK_BYTES,
+    DuckControl,
+    find_silence_boundary,
+    has_speech,
+)
 from tests.conftest import FakeVolumeControl
 
 LOUD = (b"\x00\x40" * (CHUNK_BYTES // 2))     # peak 0x4000
@@ -88,7 +93,6 @@ def test_has_speech_is_not_find_silence_boundary_inverted():
     outgoing session has stopped talking; getting it backwards switches
     sessions mid-word on every rotation.
     """
-    from sidetap_live.playout import has_speech
 
     chunk = bytearray()
     for frame in range(12):
@@ -101,7 +105,6 @@ def test_has_speech_is_not_find_silence_boundary_inverted():
 
 
 def test_has_speech_says_no_to_the_models_idle_stream():
-    from sidetap_live.playout import has_speech
 
     idle = bytearray()
     for _ in range(CHUNK_BYTES * 6):
@@ -110,7 +113,6 @@ def test_has_speech_says_no_to_the_models_idle_stream():
 
 
 def test_has_speech_judges_a_short_buffer_rather_than_ignoring_it():
-    from sidetap_live.playout import has_speech
 
     assert has_speech(b"") is False
     assert has_speech(b"\x00\x40" * 10) is True      # 20 samples, loud
@@ -121,7 +123,6 @@ from sidetap_live.playout import (
     DUCK_HOLD_TICKS,
     STARVE_LIMIT_TICKS,
     Playout,
-    has_speech,
 )
 from sidetap_live.types import TTS_BYTES_PER_S, Direction
 from tests.conftest import FakeAudioSink

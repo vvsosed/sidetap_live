@@ -121,7 +121,7 @@ def test_input_audio_is_billed():
     assert metrics.snapshot().cost_usd == pytest.approx(0.1 * 25 * 3.50 / 1e6, rel=1e-6)
 
 
-from sidetap_live.types import OVERLAP_MAX_S, AudioOut, GoAway
+from sidetap_live.types import AudioOut, GoAway
 
 LOUD = b"\x00\x40" * 600       # 24 kHz s16, peak 0x4000 - reads as speech
 QUIET = b"\x00\x00" * 600      # reads as silence
@@ -257,7 +257,6 @@ from sidetap_live.metrics import Health
 from sidetap_live.types import (
     DEAD_AIR_S,
     TTS_BYTES_PER_S,
-    AudioOut,
     Closed,
     ResumptionHandle,
     SourceText,

@@ -182,7 +182,7 @@ async def receiver(session, start: float, run_s: float, stop: asyncio.Event) -> 
                         msg = await asyncio.wait_for(
                             gen.__anext__(), timeout=min(remaining, 1.0)
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     except StopAsyncIteration:
                         # One interaction/turn ended; loop the outer while to

@@ -9,7 +9,7 @@ import pytest
 
 from sidetap_live.metrics import Metrics
 from sidetap_live.run import Session
-from sidetap_live.types import Direction, NO_AUDIO_S, TTS_RATE
+from sidetap_live.types import NO_AUDIO_S, TTS_RATE, Direction
 from tests.conftest import (
     FakeClock,
     FakeGraphSource,

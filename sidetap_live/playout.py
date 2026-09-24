@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from array import array
-from typing import Callable
+from collections.abc import Callable
 
 from .ports import AudioSink, VolumeControl
 from .types import DUCK_HOLD_S, LAG_CAP_S, TTS_BYTES_PER_S, TTS_RATE, Direction

@@ -176,7 +176,7 @@ async def receiver(session, start: float, stop: asyncio.Event, state: State) -> 
                 while not stop.is_set():
                     try:
                         msg = await asyncio.wait_for(gen.__anext__(), timeout=0.5)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     except StopAsyncIteration:
                         break

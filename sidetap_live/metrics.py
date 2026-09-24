@@ -14,7 +14,6 @@ from enum import Enum
 
 from .types import Direction, SessionState
 
-
 # Characters of live transcription kept per stream for the dashboard.
 #
 # The model emits no turn boundary - experiment 4 saw `finished=True` never

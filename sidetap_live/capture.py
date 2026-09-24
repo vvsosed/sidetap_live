@@ -6,7 +6,6 @@ import logging
 import queue
 import threading
 import time
-
 from dataclasses import dataclass
 
 from .graph import SINK, SOURCE, PwGraph

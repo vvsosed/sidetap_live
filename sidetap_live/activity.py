@@ -12,10 +12,10 @@ someone to reinstate gating, and gating is the one thing it must not do.
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from .ports import Clock
-from .types import Direction, TARGET_RATE
+from .types import TARGET_RATE, Direction
 
 log = logging.getLogger(__name__)
 

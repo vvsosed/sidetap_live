@@ -21,7 +21,7 @@ from sidetap_live.routing import (
     resolve,
 )
 from sidetap_live.tap import GRAPH_ERROR_WARN_AFTER
-from tests.conftest import FakeGraphSource, FakeLinker, FakeLoopbackFactory, load_graph
+from tests.conftest import FakeGraphSource, FakeLinker, FakeLoopbackFactory
 
 
 def test_the_duck_loopback_presents_a_sink_we_can_route_into():
@@ -316,7 +316,7 @@ def test_poll_routes_a_stream_that_appeared_after_engage(tmp_path, routing_graph
     """
     from dataclasses import replace
 
-    from sidetap_live.graph import PLAYBACK_STREAM, PwNode, PwPort
+    from sidetap_live.graph import PLAYBACK_STREAM
 
     empty = replace(
         routing_graph,

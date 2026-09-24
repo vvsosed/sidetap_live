@@ -8,9 +8,10 @@ or the wall clock.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import BinaryIO, Iterator, Protocol, Sequence, runtime_checkable
+from typing import BinaryIO, Protocol, runtime_checkable
 
 from .graph import PwGraph
 from .types import SessionEvent
