@@ -225,6 +225,7 @@ class Session:
                 rates=self.rates,
                 preroll=PreRoll(),
                 on_event=self.transcript.write,
+                on_fatal=self._on_direction_fatal,
                 session_t0=session_t0,
             )
 
@@ -276,6 +277,11 @@ class Session:
         Only when BOTH directions are gone is there nothing left to do.
         """
         self.metrics.set_health(direction, session=Health.FAILED)
+        # Stop that direction's pump here rather than relying on the caller to
+        # have done it: the `all(...)` check below is only meaningful if every
+        # path into this method sets the flag, and until now the only callers
+        # were tests that set it by hand.
+        self.direction_stop[direction].set()
         log.error(
             "%s direction is dead: %s. The call continues one-way; Ctrl-C and "
             "check --%s-lang.",

@@ -28,6 +28,7 @@ from .ports import Clock, SessionFactory
 from .preroll import PreRoll
 from .types import (
     DEAD_AIR_S,
+    FATAL_OPEN_FAILURES,
     IDLE_SUSPEND_S,
     OVERLAP_MAX_S,
     REOPEN_BACKOFF_S,
@@ -72,6 +73,7 @@ class DirectionInterpreter:
         rates: Rates | None = None,
         preroll: PreRoll | None = None,
         on_event: Callable[[TranscriptEvent], None] | None = None,
+        on_fatal: Callable[[Direction, BaseException], None] | None = None,
         session_t0: float = 0.0,
     ):
         self._config = config
@@ -83,12 +85,15 @@ class DirectionInterpreter:
         self._rates = rates or Rates()
         self._preroll = preroll or PreRoll()
         self._on_event = on_event
+        self._on_fatal = on_fatal
         self._session_t0 = session_t0
 
         self._state = SessionState.SUSPENDED
         self._session = None
         # Monotonic time of the last failed open, or None. Gates retries.
         self._open_failed_at: float | None = None
+        self._open_failures = 0
+        self._reported_fatal = False
         self._handle: str | None = None
 
         # The replacement session while OVERLAPPING. Fed the same audio as
@@ -213,8 +218,24 @@ class DirectionInterpreter:
             self._open_failed_at = self._clock.monotonic()
             self._metrics.set_health(self.direction, session=Health.FAILED)
             self._set_state(SessionState.SUSPENDED)
+            # A blip clears; a rejected language code or a revoked key fails
+            # the same way every time. Without this ceiling the direction
+            # retried for the whole call and nothing but a health marker ever
+            # said so - Session._on_direction_fatal, and the "both directions
+            # are dead" stop behind it, had no production caller at all.
+            # Reported once: the retries continue, but the report does not.
+            self._open_failures += 1
+            if (
+                self._open_failures >= FATAL_OPEN_FAILURES
+                and not self._reported_fatal
+                and self._on_fatal is not None
+            ):
+                self._reported_fatal = True
+                self._on_fatal(self.direction, exc)
             return 0.0
         self._open_failed_at = None
+        self._open_failures = 0
+        self._reported_fatal = False
         with self._lock:
             self._goaway_at = None
             self._dead = None
