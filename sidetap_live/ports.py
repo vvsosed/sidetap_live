@@ -100,7 +100,7 @@ class VolumeControl(Protocol):
         yields "Object not found". This does not contradict the project's
         "identify nodes by object.serial" rule - that is about DURABLE
         references (the routing journal, the tap's dedup keys) where ids get
-        recycled over time. See docs/experiments/01-tap-volume.md, which hit
+        recycled over time. See sidetap's docs/experiments/01-tap-volume.md, which hit
         this exact trap.
         """
         ...

@@ -287,7 +287,7 @@ class Router:
         # BOTH, deliberately. The serial is the durable identifier the journal
         # records; the id is what wpctl resolves against for the duck volume.
         # Conflating them makes the duck silently never close - see
-        # docs/experiments/01-tap-volume.md.
+        # sidetap's docs/experiments/01-tap-volume.md.
         self.duck_serial: int | None = None
         self.duck_id: int | None = None
 
@@ -366,7 +366,7 @@ class Router:
         # once poll_once() goes on to find and route through it - and the
         # duck volume control that reads duck_id from here would then never
         # be able to close it, exactly the failure
-        # docs/experiments/01-tap-volume.md flags.
+        # sidetap's docs/experiments/01-tap-volume.md flags.
         if duck is not None:
             self.duck_serial = duck.serial
             self.duck_id = duck.id
