@@ -634,7 +634,12 @@ def run_session(args, *, graph, launcher, linker, clock, sessions=None,
     finally:
         session_obj.shutdown()
 
-    saved = [session_obj.transcript.jsonl_path, session_obj.transcript.md_path]
+    saved = [
+        session_obj.transcript.jsonl_path,
+        session_obj.transcript.md_path,
+        session_obj.transcript.original_path,
+        session_obj.transcript.translated_path,
+    ]
     log_path = session_obj.transcript.jsonl_path.with_suffix(".log")
     if log_path.exists():
         saved.append(log_path)

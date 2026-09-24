@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from sidetap_live.transcript import ENGINE, EventTranscript
 from sidetap_live.types import Direction, TranscriptEvent
@@ -149,7 +150,8 @@ def test_the_markdown_is_written_atomically(tmp_path, monkeypatch):
 
     close() runs inside Session.shutdown(), so a crash there could leave a
     half-written .md. The .jsonl survives - it is flushed per line - but
-    nothing regenerates the .md from it.
+    nothing regenerates the .md from it. All three rendered files are written
+    the same way, for the same reason.
     """
     from sidetap_live import transcript as transcript_module
 
@@ -159,20 +161,23 @@ def test_the_markdown_is_written_atomically(tmp_path, monkeypatch):
     )
 
     real_replace = os.replace
-    seen = {}
+    seen: list[tuple[str, str]] = []
 
     def watching_replace(src, dst):
-        seen["tmp"] = str(src)
-        seen["dst"] = str(dst)
+        seen.append((str(src), str(dst)))
         return real_replace(src, dst)
 
     monkeypatch.setattr(transcript_module.os, "replace", watching_replace)
     path = transcript.close()
 
-    assert seen.get("dst") == str(path), "the markdown was not renamed into place"
-    assert seen["tmp"] != seen["dst"], "it wrote straight to the final path"
+    renamed = {dst for _tmp, dst in seen}
+    for expected in (path, transcript.original_path, transcript.translated_path):
+        assert str(expected) in renamed, f"{expected.name} was not renamed into place"
+    for tmp, dst in seen:
+        assert tmp != dst, f"{dst} was written straight to its final path"
     assert "hello" in path.read_text(encoding="utf-8")
-    assert not list(tmp_path.glob("*.tmp")), "the temp file was left behind"
+    assert "hello" in transcript.original_path.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*.tmp")), "a temp file was left behind"
 
 
 def test_an_abbreviation_does_not_end_a_paragraph():
@@ -189,3 +194,93 @@ def test_an_abbreviation_does_not_end_a_paragraph():
     assert not _ends_sentence("книги, статьи и т.д.")
     assert not _ends_sentence("formats e.g.")
     assert not _ends_sentence("Mr.")
+
+
+def _heading_times(text: str, prefix: str) -> list[str]:
+    """Timestamps of every heading line starting with `prefix`, in order."""
+    return [
+        match.group(1)
+        for line in text.splitlines()
+        if line.startswith(prefix)
+        for match in [re.search(r"_(\d\d:\d\d:\d\d)_", line)]
+        if match
+    ]
+
+
+def test_the_original_file_holds_only_what_was_actually_said(tmp_path):
+    """What was spoken, without the translation of it between every block.
+
+    The interleaved .md alternates streams, so reading back the conversation
+    itself means skipping every second block. Both directions belong here:
+    the record of what was said is their language AND yours.
+    """
+    transcript = EventTranscript(tmp_path, session="s1")
+    transcript.write(event(1.0, Direction.IN, "source", "privet"))
+    transcript.write(event(1.4, Direction.IN, "target", "hello"))
+    transcript.write(event(2.0, Direction.OUT, "source", "how are you"))
+    transcript.write(event(2.4, Direction.OUT, "target", "kak dela"))
+    transcript.close()
+
+    text = transcript.original_path.read_text(encoding="utf-8")
+    assert "privet" in text
+    assert "how are you" in text
+    assert "hello" not in text
+    assert "kak dela" not in text
+
+
+def test_the_translated_file_holds_only_what_each_party_heard(tmp_path):
+    """The mirror: what the model produced, for checking it against the call."""
+    transcript = EventTranscript(tmp_path, session="s1")
+    transcript.write(event(1.0, Direction.IN, "source", "privet"))
+    transcript.write(event(1.4, Direction.IN, "target", "hello"))
+    transcript.write(event(2.0, Direction.OUT, "source", "how are you"))
+    transcript.write(event(2.4, Direction.OUT, "target", "kak dela"))
+    transcript.close()
+
+    text = transcript.translated_path.read_text(encoding="utf-8")
+    assert "hello" in text
+    assert "kak dela" in text
+    assert "privet" not in text
+    assert "how are you" not in text
+
+
+def test_the_split_files_share_the_interleaved_file_s_block_boundaries(tmp_path):
+    """Group once on ALL events, then filter - never filter first.
+
+    _paragraphs cuts both streams at the same boundary, and the SOURCE decides
+    where that is. Handed a target-only list it takes its `else` branch, makes
+    the boundary the last fragment of the call, and renders the whole hour as
+    one paragraph.
+
+    Grouping once is also what makes the two files readable side by side: the
+    same blocks, at the same timestamps, in the same order.
+    """
+    transcript = EventTranscript(tmp_path, session="s1")
+    # Source ends sentences often, target almost never - the measured pattern.
+    for i in range(40):
+        transcript.write(event(float(i), Direction.IN, "source", f" sentence {i}."))
+        transcript.write(event(i + 0.3, Direction.IN, "target", f" fragment {i}"))
+    interleaved = transcript.close().read_text(encoding="utf-8")
+
+    source_times = _heading_times(interleaved, "**Them**")
+    target_times = _heading_times(interleaved, "**Them \u2192**")
+    assert len(target_times) > 1, "the interleaved file itself lost its blocks"
+
+    original = transcript.original_path.read_text(encoding="utf-8")
+    translated = transcript.translated_path.read_text(encoding="utf-8")
+    assert _heading_times(original, "**Them**") == source_times
+    assert _heading_times(translated, "**Them**") == target_times
+
+
+def test_the_split_files_do_not_mark_every_heading_as_a_translation(tmp_path):
+    """Every block in the translated file is a translation, so the arrow on
+    each heading is noise - and it is what would stop the two files lining up
+    when read side by side."""
+    transcript = EventTranscript(tmp_path, session="s1")
+    transcript.write(event(1.0, Direction.IN, "source", "privet"))
+    transcript.write(event(1.4, Direction.IN, "target", "hello"))
+    transcript.close()
+
+    assert "\u2192" not in transcript.translated_path.read_text(encoding="utf-8")
+    # The interleaved file still needs it: there, the two streams sit together.
+    assert "\u2192" in transcript.md_path.read_text(encoding="utf-8")

@@ -182,6 +182,10 @@ def test_the_transcript_is_closed_on_shutdown(session_args, fake_ports):
     session.setup()
     session.shutdown()
     assert session.transcript.md_path.exists()
+    # Every rendered file, not just the interleaved one: they are written in
+    # the same close(), so a half-done shutdown leaves the set incomplete.
+    assert session.transcript.original_path.exists()
+    assert session.transcript.translated_path.exists()
 
 
 def test_bypass_opens_the_duck_and_links_the_real_mic(session_args, fake_ports):
