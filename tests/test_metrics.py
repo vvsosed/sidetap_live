@@ -84,3 +84,27 @@ def test_the_two_streams_accumulate_independently():
     metrics.append_text(Direction.IN, source=" kak dela")
     state = metrics.snapshot().directions[Direction.IN]
     assert (state.source, state.target) == ("privet kak dela", "hello")
+
+
+def test_every_character_produced_is_counted_not_just_the_tail_kept():
+    """The count is what lets a POLLING reader append only what is new.
+
+    The dashboard renders text append-only - it writes the fragments that
+    arrived since its last poll and never re-renders the tail - because
+    re-rendering a rolling tail re-wraps every line twice a second, which is
+    what made the pane unreadable. A poller cannot work out what is new from
+    a bounded tail alone, so it reads its own position against this.
+
+    Metrics stays a pure state holder: the reader keeps the cursor, which is
+    why --no-tui simply never looks at either.
+    """
+    from sidetap_live.metrics import LIVE_TEXT_CHARS
+
+    metrics = Metrics()
+    produced = "x" * (LIVE_TEXT_CHARS * 2)
+    metrics.append_text(Direction.IN, source=produced, target="hello")
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert len(state.source) == LIVE_TEXT_CHARS, "the tail is still bounded"
+    assert state.source_produced == len(produced), "the count is not bounded"
+    assert state.target_produced == len("hello")

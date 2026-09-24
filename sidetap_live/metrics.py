@@ -14,14 +14,21 @@ from enum import Enum
 
 from .types import Direction, SessionState
 
-# Characters of live transcription kept per stream for the dashboard.
+# Characters of live transcription kept per stream.
 #
 # The model emits no turn boundary - experiment 4 saw `finished=True` never
 # fire across a whole run - so text arrives as fragments of a few words, about
-# twice a second. Replacing on each one leaves the pane showing two words;
-# accumulating without a bound leaves it showing an hour. A rolling tail is
-# what a live display actually wants, and the transcript keeps the full record.
-LIVE_TEXT_CHARS = 240
+# twice a second. Replacing on each one leaves a reader showing two words;
+# accumulating without a bound leaves it holding an hour.
+#
+# This is NOT how much the dashboard shows - the dashboard appends what is new
+# and keeps its own scrollback. It is how far a reader may fall behind and
+# still catch up: at the TUI's 10 Hz poll against roughly 30 characters of
+# speech a second, 2000 is about a minute of stall, far longer than anything
+# that should ever block the UI thread. Past it the reader resyncs and says so
+# rather than printing a gap silently; the transcript keeps the full record
+# either way.
+LIVE_TEXT_CHARS = 2000
 
 
 class Health(Enum):
@@ -36,6 +43,20 @@ class DirectionState:
     # each other by design; the TUI shows both rather than pairing them.
     source: str = ""
     target: str = ""
+    # Total characters ever appended to each stream, monotonic and unbounded.
+    #
+    # This is the cursor an append-only reader works against. The dashboard
+    # writes only the fragments that arrived since its last poll, because
+    # re-rendering the rolling tail re-wrapped every line ten times a second
+    # and made the panes unreadable - and made per-tick work grow with the
+    # length of the call rather than with the speech in it, on a thread that
+    # shares a GIL with capture and playout.
+    #
+    # Metrics stays a pure state holder: the READER keeps its own position, so
+    # nothing here has to know whether anyone is looking and --no-tui simply
+    # never does.
+    source_produced: int = 0
+    target_produced: int = 0
 
     # The headline number. Translated audio queued but not yet played.
     # Whether this stays bounded under continuous speech is the result this
@@ -100,8 +121,10 @@ class Metrics:
             state = self._states[direction]
             if source is not None:
                 state.source = (state.source + source)[-LIVE_TEXT_CHARS:]
+                state.source_produced += len(source)
             if target is not None:
                 state.target = (state.target + target)[-LIVE_TEXT_CHARS:]
+                state.target_produced += len(target)
 
     def set_backlog_s(self, direction: Direction, seconds: float) -> None:
         with self._lock:

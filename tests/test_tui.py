@@ -40,8 +40,13 @@ async def test_the_pane_shows_both_transcription_streams():
         await pilot.pause()
         from textual.widgets import Static
 
-        assert "privet" in str(app.query_one("#source-in", Static).content)
-        assert "hello" in str(app.query_one("#target-in", Static).content)
+        from sidetap_live.tui import TextStream
+
+        # Text produced before the app started still reaches the pane: the
+        # cursor begins at zero, so the first poll is a catch-up like any
+        # other.
+        assert "privet" in app.query_one("#source-in", TextStream).live_text
+        assert "hello" in app.query_one("#target-in", TextStream).live_text
         assert "0.4s" in str(app.query_one("#stats-in", Static).content)
 
 
@@ -163,3 +168,155 @@ async def test_unmeasurable_overlap_shows_a_dash_not_zero_percent():
         await pilot.pause()
         assert "overlap —" in app.sub_title
         assert "0%" not in app.sub_title
+
+
+async def _tick(app, pilot):
+    """Drive one refresh deterministically.
+
+    Waiting on the 10 Hz timer is what made an earlier test flaky under load;
+    the poll is a plain method, so call it.
+    """
+    app.refresh_from_metrics()
+    await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_new_speech_is_appended_not_the_whole_tail_re_rendered():
+    """The pane writes what arrived since the last poll, and only that.
+
+    Re-rendering Metrics' rolling tail every tick is what made the panes
+    unreadable: the FRONT was chopped on every fragment, so all of the text
+    re-wrapped ten times a second and the words crawled between lines. It
+    also made per-tick work grow with the length of the call instead of with
+    the speech in it, on the thread that shares a GIL with capture and
+    playout.
+    """
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        metrics.append_text(Direction.IN, source="privet ")
+        await _tick(app, pilot)
+        metrics.append_text(Direction.IN, source="kak dela")
+        await _tick(app, pilot)
+
+        stream = app.query_one("#source-in", TextStream)
+        assert stream.live_text == "privet kak dela", "text was re-appended"
+
+
+@pytest.mark.asyncio
+async def test_the_words_being_spoken_now_are_visible_before_the_line_fills():
+    """A line's worth of speech is about three seconds.
+
+    Holding the newest words back until they fill a line would hide exactly
+    the part of the translation the user is waiting on, which is the whole
+    reason to be looking at the pane at all.
+    """
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        metrics.append_text(Direction.IN, target="hello")
+        await _tick(app, pilot)
+
+        stream = app.query_one("#target-in", TextStream)
+        assert stream.live_text == "hello"
+        assert "hello" in stream.rendered_live_text
+
+
+@pytest.mark.asyncio
+async def test_a_long_stretch_settles_into_lines_broken_between_words():
+    """Run this WIDER than 80 columns deliberately.
+
+    RichLog measures a write against the Rich console, which is 80 columns,
+    and the default test terminal is 80 too - so at the default size the
+    re-wrap this guards against cannot happen and the test passes either way.
+    Every real terminal this runs in is wider.
+    """
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        words = " ".join(f"word{i}" for i in range(80))
+        metrics.append_text(Direction.IN, source=words)
+        await _tick(app, pilot)
+
+        stream = app.query_one("#source-in", TextStream)
+        lines = stream.settled_lines
+        assert len(lines) > 1, "a long stretch never settled into lines"
+        for line in lines:
+            assert len(line) <= stream.wrap_width, f"line overruns the pane: {line!r}"
+            # And it must USE the pane's width. RichLog measures a write
+            # against the Rich console (80 columns), not against its own
+            # region, so an unqualified write() re-wraps anything longer and
+            # leaves a ragged short line after every full one - which is what
+            # the pane actually looked like before `width=` was passed.
+            assert len(line) > stream.wrap_width // 2, (
+                f"line was re-wrapped by the widget: {line!r} "
+                f"(pane is {stream.wrap_width} wide)"
+            )
+        # No word may be cut in half by the line break.
+        rejoined = " ".join(lines + ([stream.live_text] if stream.live_text else []))
+        assert rejoined.split() == words.split(), "a word was split across lines"
+
+
+@pytest.mark.asyncio
+async def test_lines_already_on_screen_do_not_change_when_more_speech_arrives():
+    """The anti-reflow guarantee, and the point of the whole exercise.
+
+    Settled lines are written once and never rewritten, so text that has
+    already been read stays exactly where it was and the eye can follow the
+    stream. Anything that re-wraps the buffer breaks this.
+    """
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        metrics.append_text(Direction.IN, source=" ".join(f"word{i}" for i in range(60)))
+        await _tick(app, pilot)
+        stream = app.query_one("#source-in", TextStream)
+        before = list(stream.settled_lines)
+        assert before
+
+        metrics.append_text(Direction.IN, source=" " + " ".join(f"later{i}" for i in range(60)))
+        await _tick(app, pilot)
+        after = stream.settled_lines
+
+        assert after[: len(before)] == before, "earlier lines were re-wrapped"
+
+
+@pytest.mark.asyncio
+async def test_the_pane_catches_up_when_it_falls_further_behind_than_metrics_keeps():
+    """Metrics keeps a bounded tail; the pane's cursor could outrun it.
+
+    Only reachable if the UI thread stalls for many seconds - which is what
+    running pw-dump on it used to do. It must resync rather than slice a
+    negative offset out of the tail and print text that was never said.
+    """
+    from sidetap_live.metrics import LIVE_TEXT_CHARS
+    from sidetap_live.tui import TextStream
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        metrics.append_text(Direction.IN, source="a" * (LIVE_TEXT_CHARS * 3))
+        await _tick(app, pilot)
+
+        stream = app.query_one("#source-in", TextStream)
+        shown = "\n".join(stream.settled_lines) + stream.live_text
+        assert "…" in shown, "the gap was not marked as a gap"
+        assert shown.count("a") <= LIVE_TEXT_CHARS, "it invented text it never had"
+
+        # And it carries on normally from there.
+        metrics.append_text(Direction.IN, source=" after")
+        await _tick(app, pilot)
+        assert stream.live_text.endswith("after")

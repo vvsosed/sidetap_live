@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
-from textual.widgets import Footer, Static
+from textual.widgets import Footer, RichLog, Static
 
 # Private on purpose: Textual exports Footer but not the per-key widget it
 # builds, and a footer key is the only place a toggle's state can be shown
@@ -23,6 +23,12 @@ from .metrics import Health, Metrics
 from .types import Direction, SessionState
 
 REFRESH_HZ = 10
+
+# Lines of scrollback kept per stream. The full record is in the transcript;
+# this only has to cover glancing back at what was said a moment ago.
+SCROLLBACK_LINES = 500
+# Only used before the widget has been laid out and knows its own width.
+FALLBACK_WRAP = 60
 
 MARKERS = {Health.OK: "●", Health.RETRYING: "◐", Health.FAILED: "○"}
 TITLES = {Direction.IN: "THEM → you", Direction.OUT: "YOU → them"}
@@ -52,15 +58,118 @@ def format_state(state: SessionState) -> str:
     return state.value
 
 
+class TextStream(Vertical):
+    """One transcription stream, rendered append-only.
+
+    Settled lines sit in a RichLog and the line still being spoken sits in a
+    Static underneath it, so the newest words are on screen the moment they
+    arrive while everything above them stays exactly where it was.
+
+    **Why not simply re-render the text every tick.** That is what this
+    replaced. Metrics keeps a rolling tail, so re-rendering it chopped the
+    FRONT on every fragment - which re-wraps every line - ten times a second.
+    The words crawled between lines and the pane could not be read at all. It
+    also made the work per tick grow with the length of the call rather than
+    with the speech in it, on the thread that shares a GIL with capture and
+    playout.
+
+    RichLog wraps at write time and does not re-wrap afterwards, which is
+    exactly the property wanted here: a line, once read, never moves. The cost
+    is that lines written before the terminal was made narrower stay at their
+    old width. Better than reflowing continuously, and the transcript files
+    are the readable record regardless.
+    """
+
+    def __init__(self, *, classes: str = "", id: str | None = None) -> None:
+        super().__init__(classes=classes, id=id)
+        # Built here rather than looked up later: feed() runs on every poll
+        # and compose()'s children mount asynchronously, so holding the
+        # references removes a query and a lifecycle race in one go. RichLog
+        # defers writes itself until it knows its size.
+        self._log = RichLog(
+            wrap=True,
+            max_lines=SCROLLBACK_LINES,
+            auto_scroll=True,
+            markup=False,
+            highlight=False,
+            classes="settled",
+        )
+        self._live = Static("", classes="live")
+        self._pending = ""
+
+    def compose(self) -> ComposeResult:
+        yield self._log
+        yield self._live
+
+    @property
+    def wrap_width(self) -> int:
+        """Width to break lines at, excluding any scrollbar."""
+        width = self._log.scrollable_content_region.width
+        return width if width > 0 else FALLBACK_WRAP
+
+    @property
+    def settled_lines(self) -> list[str]:
+        return [strip.text.rstrip() for strip in self._log.lines]
+
+    @property
+    def live_text(self) -> str:
+        """The line still being spoken - not yet settled into the log."""
+        return self._pending
+
+    @property
+    def rendered_live_text(self) -> str:
+        return str(self._live.content)
+
+    def feed(self, text: str) -> None:
+        """Append new speech. Only ever called with text not yet shown."""
+        if not text:
+            return
+        self._pending += text
+        width = self.wrap_width
+        while len(self._pending) > width:
+            # Break between words. A single run longer than the line - a URL,
+            # a language with no spaces - is cut at the width instead, which
+            # is what wrapping would have done anyway.
+            cut = self._pending.rfind(" ", 0, width + 1)
+            if cut <= 0:
+                cut = width
+            # `width=` is not optional. Left to itself, RichLog measures the
+            # write against the Rich CONSOLE - 80 columns - rather than
+            # against its own region, so on any terminal wider than 80 it
+            # re-wrapped each line into a full one plus a ragged remainder.
+            # Passing the width overrides that, and the lines are already cut
+            # to fit, so nothing wraps twice.
+            self._log.write(self._pending[:cut].rstrip(), width=width)
+            self._pending = self._pending[cut:].lstrip()
+        self._live.update(self._pending)
+
+
 class SidetapLiveApp(App):
     CSS = """
     Screen { layout: vertical; }
     .pane { border: round $primary; padding: 1 2; height: 1fr; }
     .pane.alarm { border: heavy $error; }
     .title { text-style: bold; }
-    .interim { color: $text-muted; }
-    .target { text-style: bold; }
     .stats { color: $text-muted; }
+
+    /* Each stream fills what the pane has left, so the two share it evenly
+       and the live line sits directly under its own settled text. */
+    TextStream { height: 1fr; }
+    TextStream > RichLog {
+        height: auto;
+        max-height: 1fr;
+        background: transparent;
+        scrollbar-size-vertical: 1;
+        /* Reserved from the start, so the width lines were written at does
+           not change the moment the first one scrolls off. */
+        scrollbar-gutter: stable;
+    }
+    TextStream > .live { height: auto; }
+
+    /* Named on the descendants, not the container: Textual does not cascade
+       these onto a child widget that paints its own content. */
+    .interim RichLog, .interim .live { color: $text-muted; }
+    .target RichLog, .target .live { text-style: bold; }
 
     /* An engaged toggle. $warning, not $error: .pane.alarm owns $error for
        "something is wrong", and bypass and mute are things the user did on
@@ -91,14 +200,18 @@ class SidetapLiveApp(App):
         super().__init__()
         self._metrics = metrics
         self._session = session
+        # How much of each stream this app has already put on screen. Kept
+        # here, not in Metrics: the pipeline must not have to know whether
+        # anyone is watching, which is what keeps --no-tui the same path.
+        self._cursors: dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         for direction in Direction:
             suffix = direction.value
             yield Vertical(
                 Static(TITLES[direction], classes="title", id=f"title-{suffix}"),
-                Static("", classes="interim", id=f"source-{suffix}"),
-                Static("", classes="target", id=f"target-{suffix}"),
+                TextStream(classes="interim", id=f"source-{suffix}"),
+                TextStream(classes="target", id=f"target-{suffix}"),
                 Static("", classes="stats", id=f"stats-{suffix}"),
                 classes="pane",
                 id=f"pane-{suffix}",
@@ -141,8 +254,8 @@ class SidetapLiveApp(App):
         snapshot = self._metrics.snapshot()
         for direction, state in snapshot.directions.items():
             suffix = direction.value
-            self.query_one(f"#source-{suffix}", Static).update(state.source)
-            self.query_one(f"#target-{suffix}", Static).update(state.target)
+            self._feed_stream(f"source-{suffix}", state.source, state.source_produced)
+            self._feed_stream(f"target-{suffix}", state.target, state.target_produced)
             # The two alarms are named, not merely coloured. They point at
             # opposite ends of the pipeline - NO AUDIO means nothing is
             # arriving to work on, DEAD AIR means speech went in and nothing
@@ -188,6 +301,28 @@ class SidetapLiveApp(App):
             else False
         )
         self._paint_toggles({"bypass": snapshot.bypassed, "mute": muted})
+
+    def _feed_stream(self, stream_id: str, tail: str, produced: int) -> None:
+        """Hand the stream what arrived since the last poll, and nothing else.
+
+        `produced` counts every character ever spoken on that stream; `tail`
+        is the bounded window Metrics keeps. Subtracting one from the other is
+        what makes an append-only pane possible from a pure poll.
+        """
+        seen = self._cursors.get(stream_id, 0)
+        if produced <= seen:
+            return
+        delta = produced - seen
+        if delta > len(tail):
+            # Behind by more than Metrics kept - only reachable if the UI
+            # thread stalled for the best part of a minute. Mark the gap
+            # rather than slice a negative offset, which would silently print
+            # a stretch of the call in the wrong place.
+            new = "\u2026 " + tail
+        else:
+            new = tail[-delta:]
+        self._cursors[stream_id] = produced
+        self.query_one(f"#{stream_id}", TextStream).feed(new)
 
     def _paint_toggles(self, engaged: dict[str, bool]) -> None:
         """Light the footer key of a toggle that is currently on.

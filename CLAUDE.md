@@ -150,7 +150,10 @@ together and neither pump can see the other.
 Textual owns the main thread and **the pipeline never calls into it** — workers
 write to a lock-guarded `Metrics` snapshot that `tui.py` polls at 10 Hz. That
 one-way dependency is what makes `--no-tui` and the headless suite the same
-code path.
+code path. Transcription text is the one thing a poll cannot read as a plain
+value, because the pane appends rather than redraws: `Metrics` counts every
+character ever produced per stream and the TUI keeps its own cursor against
+that count, so the pipeline still never learns whether anyone is watching.
 
 ### Modules
 
@@ -312,6 +315,19 @@ preference and these are not.
   backwards port and journals it as the link that was asked for. Returning
   `None` makes `restore()` and `repair()` report a ref they cannot resolve,
   which is something a user can act on.
+- **The dashboard appends transcription text; it never re-renders it.**
+  `Metrics` keeps a bounded rolling tail, so redrawing it each tick chopped the
+  *front* on every fragment — which re-wraps every line — ten times a second.
+  The words crawled between lines and the panes could not be read, and the work
+  per tick grew with the length of the call rather than with the speech in it,
+  on the thread that shares a GIL with capture and playout. `TextStream` writes
+  only what is new since its cursor, and a settled line is never rewritten.
+  **`RichLog.write()` must be passed an explicit `width`**: left to itself it
+  measures against the Rich console — 80 columns — not its own region, so on
+  any wider terminal it re-wraps each line into a full one plus a ragged
+  remainder. `test_a_long_stretch_settles_into_lines_broken_between_words`
+  guards it, and runs at 120 columns deliberately, because at the default test
+  width of 80 the bug cannot appear.
 - **The TUI polls `session.stop`; the pipeline never calls into it.** The
   SIGINT/SIGTERM handler does nothing but set that flag, so a TUI that does not
   read it means `App.run()` never returns, `shutdown()` never runs, and

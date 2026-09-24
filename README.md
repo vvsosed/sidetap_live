@@ -179,6 +179,18 @@ about three seconds.
 The TUI's `rot` figure shows the count and how many were forced. `rot 6` over
 an hour is expected; `rot 6 (5 forced)` means the join rule needs revisiting.
 
+### The dashboard
+
+One pane per direction, each showing two streams: what was said (muted) above
+what it was translated into (bold), with the session's health and lag beneath.
+
+Text **streams upward** — new words appear at the bottom edge and older lines
+scroll up out of view. A line, once written, is never rewritten, so what you
+have already read stays where it was and the eye can follow the speech. The
+line currently being spoken sits just under the settled text and updates in
+place until it fills, then settles in its turn. Scroll back with the mouse or
+the arrow keys; the full record is in the transcript files either way.
+
 ### Hotkeys
 
 | Key | Action |

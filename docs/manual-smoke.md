@@ -235,6 +235,12 @@ this checklist is for — treat these as unconfirmed until it has been run:
 - **The lag cap now fires when the output buffer opens on a pause.** Not
   reachable in an ordinary call — `LAG_CAP_S` is 30 s — so this stays
   unverified in practice.
+- **The text panes stream instead of redrawing.** Checked against fakes and a
+  headless render only; no real terminal has shown it. Watch during any call
+  that lines settle and then stay put, that the words being spoken now are
+  visible at the bottom of each stream, and that a resize does not leave the
+  older lines ragged enough to matter — RichLog does not re-wrap what it has
+  already written.
 
 ## Things that are known-untested
 
