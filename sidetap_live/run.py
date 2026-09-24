@@ -118,6 +118,21 @@ class Session:
                 "pipewire-pulse"
             )
 
+        # Checked BEFORE the router is engaged, with the other cheap fatal
+        # checks. Reading an environment variable has no side effects, and
+        # failing after engage() means the graph is already rewired - the
+        # exact thing the virtual-mic check above is placed early to avoid.
+        # The value is never logged, echoed or stored beyond the client.
+        api_key = None
+        if self._sessions is None:
+            import os
+
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                raise CaptureError(
+                    "GEMINI_API_KEY is not set. Run: sidetap-live doctor"
+                )
+
         self.router = Router(
             graph=self._graph,
             linker=self._linker,
@@ -134,18 +149,9 @@ class Session:
         self.rates = Rates()
 
         if self._sessions is None:
-            import os
-
             from google import genai
 
-            key = os.environ.get("GEMINI_API_KEY")
-            if not key:
-                # Fail here rather than on the first block of audio: setup()
-                # has not yet engaged the router, so nothing needs undoing.
-                raise CaptureError(
-                    "GEMINI_API_KEY is not set. Run: sidetap-live doctor"
-                )
-            self._sessions = build_factory(genai.Client(api_key=key))
+            self._sessions = build_factory(genai.Client(api_key=api_key))
 
         # One detector per track. webrtcvad adapts to the noise floor across
         # calls, and the two tracks have very different ones - a raw room
@@ -225,6 +231,7 @@ class Session:
                 rates=self.rates,
                 preroll=PreRoll(),
                 on_event=self.transcript.write,
+                on_fatal=self._on_direction_fatal,
                 session_t0=session_t0,
             )
 
@@ -276,6 +283,11 @@ class Session:
         Only when BOTH directions are gone is there nothing left to do.
         """
         self.metrics.set_health(direction, session=Health.FAILED)
+        # Stop that direction's pump here rather than relying on the caller to
+        # have done it: the `all(...)` check below is only meaningful if every
+        # path into this method sets the flag, and until now the only callers
+        # were tests that set it by hand.
+        self.direction_stop[direction].set()
         log.error(
             "%s direction is dead: %s. The call continues one-way; Ctrl-C and "
             "check --%s-lang.",
@@ -626,6 +638,9 @@ def run_session(args, *, graph, launcher, linker, clock, sessions=None,
 
 def _run_headless(session: Session) -> None:
     alarmed = False
+    # Latched per direction so a standing condition is reported once rather
+    # than twice a second for the rest of the call.
+    deaf: dict[Direction, bool] = {d: False for d in Direction}
     while not session.stop.is_set():
         session.stop.wait(0.5)
         snapshot = session.metrics.snapshot()
@@ -636,3 +651,19 @@ def _run_headless(session: Session) -> None:
             alarmed = True
         elif not out.dead_air:
             alarmed = False
+
+        # The TUI has shown this as NO AUDIO ARRIVING from the start; headless
+        # only ever looked at OUT's dead_air. An unlinked capture node
+        # delivers zero bytes rather than silence, so with no gate in the path
+        # we simply stop sending - which looks healthy at every stage
+        # downstream. This watchdog is the only thing that sees it, and under
+        # --no-tui nothing was reporting it at all.
+        for direction, state in snapshot.directions.items():
+            if state.no_audio and not deaf[direction]:
+                log.error(
+                    "NO AUDIO reaching the %s direction - its capture node is "
+                    "delivering nothing; check `wpctl status` and the app is "
+                    "still streaming",
+                    direction.value,
+                )
+            deaf[direction] = state.no_audio

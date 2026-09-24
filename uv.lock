@@ -645,8 +645,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "google-genai", specifier = ">=1.0.0" },
-    { name = "textual", specifier = ">=0.80" },
+    { name = "google-genai", specifier = ">=2.24.0" },
+    { name = "textual", specifier = ">=8.2.8" },
     { name = "webrtcvad-wheels", specifier = ">=2.0.14" },
 ]
 

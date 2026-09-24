@@ -187,9 +187,15 @@ def test_the_cap_drops_at_a_silence_boundary_only():
     playout, _, _ = build(lag_cap_s=0.5)
     loud = SPEECH * 25                                   # 0.5 s, all loud
     playout.submit(loud + QUIET + loud)
-    assert playout.backlog_s() > 0.5
-    # It dropped everything up to the quiet frame, and no further.
-    assert playout.dropped_s == pytest.approx(len(loud) / TTS_BYTES_PER_S)
+    # It cut at the pause, never inside either loud run: exactly the second
+    # run survives. The pause itself is dropped too, because the buffer was
+    # still over the cap once the first run was gone and an opening pause is
+    # inaudible to drop - see test_the_cap_still_trims_when_the_buffer_opens
+    # _on_a_pause, which is the case that behaviour exists for.
+    assert playout.backlog_s() == pytest.approx(len(loud) / TTS_BYTES_PER_S)
+    assert playout.dropped_s == pytest.approx(
+        (len(loud) + len(QUIET)) / TTS_BYTES_PER_S
+    )
 
 
 def test_the_cap_refuses_to_cut_a_word_in_half():
@@ -230,3 +236,58 @@ def test_suppressed_throws_the_queue_away_and_opens_the_duck():
     assert playout.backlog_s() == 0.0
     assert playout.tick() is False
     assert volume.calls[-1] == (7, 1.0)
+
+
+def test_the_cap_still_trims_when_the_buffer_opens_on_a_pause():
+    """`if not cut` treated "the head is already quiet" (offset 0) exactly
+    like "there is no pause anywhere" (None), and returned without dropping a
+    byte.
+
+    The model streams a near-silent 24 kHz output whenever it has nothing to
+    translate, so a quiet head is the common case, not a corner: the one
+    safety valve against a runaway backlog silently never fired.
+    """
+    playout, _, _ = build(lag_cap_s=0.5)
+    playout.submit(QUIET + SPEECH * 50 + QUIET + SPEECH * 5)
+
+    assert playout.dropped_s > 0.0, "the cap never fired on a quiet head"
+    assert playout.backlog_s() <= 0.5
+
+
+def test_one_bad_chunk_does_not_end_playout_for_the_call():
+    """pump() wraps feed() so "one malformed block must not take the
+    direction down for the rest of the call". run() had no equivalent, so a
+    single exception out of tick() ended playout permanently - the duck
+    opened via the finally, but that direction never spoke again, and on OUT
+    there is no raw path for the remote party to fall back to.
+    """
+    import threading
+
+    class SometimesFailingSink(FakeAudioSink):
+        def __init__(self):
+            super().__init__()
+            self.writes = 0
+
+        def write(self, pcm):
+            self.writes += 1
+            if self.writes == 2:
+                raise RuntimeError("transient pw-cat hiccup")
+            super().write(pcm)
+
+    sink = SometimesFailingSink()
+    playout = Playout(Direction.IN, sink)
+    stop = threading.Event()
+
+    thread = threading.Thread(target=playout.run, args=(stop,), daemon=True)
+    thread.start()
+    for _ in range(200):
+        if sink.writes > 5:
+            break
+        threading.Event().wait(0.01)
+    stop.set()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert sink.writes > 5, (
+        f"playout died on the failing chunk after {sink.writes} writes"
+    )

@@ -63,7 +63,15 @@ def seconds_of(value) -> float:
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
-        return float(value.rstrip("s") or 0.0)
+        # Guarded rather than bare: rstrip("s") handles '50s', the shape that
+        # was measured, and throws on anything else - 'PT50S', '1m30s'. This
+        # sits on the GoAway path, so an unhandled ValueError here kills the
+        # session at the one moment the rotation depends on, instead of
+        # costing a forced rotation the way a zero window does.
+        try:
+            return float(value.rstrip("s") or 0.0)
+        except ValueError:
+            pass
     for attr in ("total_seconds", "seconds"):
         got = getattr(value, attr, None)
         if callable(got):
@@ -329,10 +337,21 @@ class GeminiLiveSession:
         # Re-invoking it in an outer loop is what keeps this receiving for
         # the life of the connection instead of silently going quiet after
         # the first turn.
-        while True:
+        while not self._closing.is_set():
+            produced = False
             async for message in session.receive():
+                produced = True
                 for event in parse_message(message):
                     self._inbound.put(event)
+            # An empty turn means the connection is finished, not idle: on a
+            # live connection receive() awaits the next message rather than
+            # returning. Without this the outer loop - which exists to survive
+            # the END of a turn - span on a half-closed socket instead,
+            # measured at millions of re-entries a second, pegging a core for
+            # the rest of the call. Returning ends the session and lets the
+            # interpreter reopen it.
+            if not produced:
+                return
 
 
 def build_factory(client, *, model: str = MODEL):
