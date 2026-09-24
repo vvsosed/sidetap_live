@@ -209,16 +209,13 @@ def resolve(graph: PwGraph, ref: LinkRef) -> tuple[int, int] | None:
     dst = next(
         (p for p in graph.ports_of(dst_node.id, "in") if p.name == ref.dst_port), None
     )
-    if src is None:
-        src = next(
-            (p for p in graph.ports if p.node_id == src_node.id and p.name == ref.src_port),
-            None,
-        )
-    if dst is None:
-        dst = next(
-            (p for p in graph.ports if p.node_id == dst_node.id and p.name == ref.dst_port),
-            None,
-        )
+    # No direction-ignoring retry. There used to be one - if the filtered
+    # lookup missed, it searched every port of the node by name - with nothing
+    # to say when it was meant to fire and no test covering it. What it would
+    # actually do is hand pw-link a port of the wrong direction and journal
+    # the result as though it were the link that was asked for. Returning None
+    # instead makes restore() and repair() report a ref they cannot resolve,
+    # which is the outcome that can be acted on.
     if src is None or dst is None:
         return None
     return (src.id, dst.id)

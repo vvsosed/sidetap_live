@@ -62,12 +62,47 @@ def test_loading_a_corrupt_journal_gives_an_empty_one(tmp_path):
 
 
 def test_resolve_finds_port_ids_by_serial_and_name(routing_graph):
-    node = routing_graph.by_class("Stream/Output/Audio")[0]
-    port = routing_graph.ports_of(node.id, "out")[0]
+    """A real link: an output port on a stream, an input port on a sink.
+
+    This used to name the same out port as BOTH ends, so the dst lookup -
+    ports_of(node, "in") - never matched and the assertion only held because
+    resolve() fell back to searching every port of the node regardless of
+    direction. It was passing on the strength of the very behaviour
+    test_resolve_refuses_a_port_of_the_wrong_direction now forbids.
+    """
+    stream = routing_graph.by_class("Stream/Output/Audio")[0]
+    out_port = routing_graph.ports_of(stream.id, "out")[0]
+    sink = routing_graph.node_by_name(routing_graph.default_sink)
+    in_port = routing_graph.ports_of(sink.id, "in")[0]
+
     ref = LinkRef(
-        src_serial=node.serial, src_port=port.name, dst_serial=node.serial, dst_port=port.name
+        src_serial=stream.serial,
+        src_port=out_port.name,
+        dst_serial=sink.serial,
+        dst_port=in_port.name,
     )
-    assert resolve(routing_graph, ref) == (port.id, port.id)
+    assert resolve(routing_graph, ref) == (out_port.id, in_port.id)
+
+
+def test_resolve_refuses_a_port_of_the_wrong_direction(routing_graph):
+    """Failing loud beats handing pw-link a backwards port.
+
+    resolve() retried a missed lookup across every port of the node ignoring
+    direction. Nothing explained when that was meant to fire and nothing
+    tested it; what it would actually do is quietly produce a link nobody
+    asked for, journalled as though it were the intended one.
+    """
+    sink = routing_graph.node_by_name(routing_graph.default_sink)
+    in_port = routing_graph.ports_of(sink.id, "in")[0]
+
+    # Name the sink's INPUT port as the SOURCE end of the link.
+    ref = LinkRef(
+        src_serial=sink.serial,
+        src_port=in_port.name,
+        dst_serial=sink.serial,
+        dst_port=in_port.name,
+    )
+    assert resolve(routing_graph, ref) is None
 
 
 def test_resolve_returns_none_when_the_node_is_gone(routing_graph):
@@ -192,10 +227,16 @@ def test_restore_is_idempotent(tmp_path, routing_graph):
 def test_repair_replays_a_journal_from_a_dead_session(tmp_path, routing_graph):
     """kill -9 leaves the graph broken and the journal behind."""
     path = tmp_path / "j.json"
-    node = routing_graph.by_class("Stream/Output/Audio")[0]
-    port = routing_graph.ports_of(node.id, "out")[0]
+    # A real link, as the journal would actually hold it: a stream's output
+    # port into the default sink's input port. Naming one out port as both
+    # ends, as this used to, only resolved because resolve() searched ports
+    # ignoring direction.
+    stream = routing_graph.by_class("Stream/Output/Audio")[0]
+    port = routing_graph.ports_of(stream.id, "out")[0]
+    sink = routing_graph.node_by_name(routing_graph.default_sink)
+    in_port = routing_graph.ports_of(sink.id, "in")[0]
     Journal(
-        broken=(LinkRef(node.serial, port.name, node.serial, port.name),), made=()
+        broken=(LinkRef(stream.serial, port.name, sink.serial, in_port.name),), made=()
     ).save(path)
 
     linker = FakeLinker()
@@ -207,7 +248,7 @@ def test_repair_replays_a_journal_from_a_dead_session(tmp_path, routing_graph):
         journal_path=path,
     )
     assert router.repair() is True
-    assert linker.links == [(port.id, port.id)]
+    assert linker.links == [(port.id, in_port.id)]
     assert Journal.load(path) == Journal()
 
 
