@@ -44,7 +44,8 @@ mattered. CI runs `uvx ruff check .` alongside it; the ruleset in
 flags the design is a linter that gets switched off.
 
 `docs/experiments/` records the six measurements the design rests on, in five
-files: the sixth, the `1007` region-subtag post-mortem, is an addendum at the
+files — plus `06-diarization.md`, which records a **negative** result and so
+informs nothing except what not to try again: the sixth, the `1007` region-subtag post-mortem, is an addendum at the
 end of `01-connect.md` rather than a file of its own, because it was found by
 a real call failing rather than by an experiment. **Prefer a number from there
 over a claim from memory.** Four of the six contradicted
@@ -350,6 +351,14 @@ let either program's `doctor --repair` tear down the other's live duck.
   translated back at the other party.
 - **Wayland is irrelevant here** — audio capture needs no portal permission;
   that is a video-capture concern.
+- **The SDK advertises speaker diarization; this model ignores it.**
+  `AudioTranscriptionConfig(diarization=True)` is accepted without complaint
+  and no `speaker_label` ever arrives, on any transcription field — measured
+  over a two-voice clip in `docs/experiments/06-diarization.md`. There is
+  therefore no way to tell apart the participants of a multi-party call, whose
+  audio the messenger has already mixed into one port before we see it. Do not
+  re-add a flag for it without re-running `scripts/exp06_diarization.py`
+  first.
 - **Output billing does not stop during pauses.** The model streams output
   continuously while a session is open, so a call with ordinary conversational
   gaps bills output the whole time. `IDLE_SUSPEND_S` only catches gaps past

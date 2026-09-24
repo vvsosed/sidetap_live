@@ -241,6 +241,10 @@ this checklist is for — treat these as unconfirmed until it has been run:
 Not in scope for this checklist, recorded so nobody assumes otherwise:
 
 - **Personal names.** Experiment 5 covered technical vocabulary only.
+- **Who said what, on a call with more than two people.** Not a gap that
+  testing can close: the model does not do speaker diarization
+  (`docs/experiments/06-diarization.md`) and the messenger mixes the far side
+  into one port before this program sees it.
 - **Your own voice on OUT.** Experiment 5 used a YouTube speaker with a
   comparable accent, not yours. A rerun with your own microphone is a
   five-minute job and the only way to settle it.

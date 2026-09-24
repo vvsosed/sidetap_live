@@ -259,10 +259,14 @@ Real, current limitations — not aspirational TODOs.
   listening to survive a rotation, but the rotated audio carried audible
   defects that the unrotated run did not — roughly triple the mid-speech
   dropout rate, with a cluster of discontinuities local to the seam.
-- **No `--phrase` equivalent.** sidetap boosts recognition of names and jargon
-  through Speech-to-Text phrase hints; this model exposes nothing comparable.
-  Eight technical terms were measured to survive intact and consistently, but
-  **personal names are untested** and entirely at the model's mercy.
+- **No `--phrase` equivalent is wired up.** sidetap boosts recognition of names
+  and jargon through Speech-to-Text phrase hints. `google-genai` 2.24.0 does
+  expose `custom_vocabulary` and `adaptation_phrases` on
+  `AudioTranscriptionConfig`, and nothing here passes either — but note that
+  the `diarization` field on that same object is accepted and silently ignored
+  by this model (`docs/experiments/06-diarization.md`), so the fields existing
+  is not evidence they work. Eight technical terms were measured to survive
+  intact and consistently; **personal names are untested**.
 - **The source language cannot be specified.** Detection was measured clean on
   Slavic-accented English, but using a YouTube speaker rather than the author's
   own voice — so the mechanism is confirmed and the specific case is not.
@@ -280,6 +284,8 @@ Real, current limitations — not aspirational TODOs.
 - `docs/experiments/` — the six measurements the design rests on, in five files
   (the sixth is an addendum to `01-connect.md`). Four of them
   contradicted either Google's documentation or the original design.
+  `06-diarization.md` is a seventh, recording a capability the SDK advertises
+  and this model does not have.
 - `docs/manual-smoke.md` — what only a human with a real call can check.
 - `docs/superpowers/specs/` — the design, and what each decision rejected.
 - `CLAUDE.md` — architecture and the invariants worth knowing before changing
