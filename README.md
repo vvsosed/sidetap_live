@@ -130,9 +130,9 @@ uv run sidetap-live run \
 | `--duck-level` | how loud their original stays under the translation. `0.0` (default) replaces it; `0.2` is interpreter-booth mode |
 | `--no-echo-out` | when you already speak their language, send nothing rather than synthesised audio |
 | `--no-idle-suspend` | keep the session open through long silences (bills continuously) |
-| `--lag-cap` | seconds of un-spoken translation before dropping the oldest at a pause |
+| `--lag-cap` | seconds of un-spoken translation before dropping the oldest at a pause. Must be greater than 0 — at or below, every submitted chunk is over the cap and the translation is dropped to the first pause continuously |
 | `--out` | transcript directory |
-| `--no-tui` | plain console logging, useful over SSH |
+| `--no-tui` | plain console logging, useful over SSH. Reports DEAD AIR and NO AUDIO to the log, so a deaf capture node is visible without the dashboard |
 
 **The source language is not configured, and cannot be.** The model
 auto-detects it; only the target is settable. That is why the flags are

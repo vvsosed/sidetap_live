@@ -208,6 +208,27 @@ which replays the routing journal at `~/.local/state/sidetap_live/`.
 
 ---
 
+## Changes this checklist has not yet been run against
+
+Everything below landed from a code review and is verified only against the
+fakes in `tests/conftest.py`. The suite cannot reach any of it, which is what
+this checklist is for — treat these as unconfirmed until it has been run:
+
+- **Routing defers while the duck has a node but no ports yet.** Check 2 is
+  the one that would catch a regression: the call should be audible through
+  the duck, not silent.
+- **SIGTERM ends the call and restores the graph.** Nothing here covers it.
+  Start a call, `kill <pid>` from another terminal, and confirm `pw-link -l`
+  shows your messenger back on the speakers and no `sidetap_live_duck`.
+- **`b` (bypass) no longer runs `pw-dump`/`pw-link` on the UI thread.** Press
+  it mid-call and confirm the dashboard keeps repainting while it takes effect.
+- **A replacement that dies mid-rotation no longer wedges the direction**, and
+  a replacement that fails to open is retried inside `time_left`. Check 5
+  covers the happy path only; both failure paths need a real nine-minute call.
+- **The lag cap now fires when the output buffer opens on a pause.** Not
+  reachable in an ordinary call — `LAG_CAP_S` is 30 s — so this stays
+  unverified in practice.
+
 ## Things that are known-untested
 
 Not in scope for this checklist, recorded so nobody assumes otherwise:
