@@ -102,3 +102,53 @@ async def test_the_tui_exits_when_the_session_is_stopped_from_outside():
             "the TUI ignored session.stop, so shutdown() and router.restore() "
             "would never run"
         )
+
+
+@pytest.mark.asyncio
+async def test_bypass_does_not_run_graph_work_on_the_ui_thread():
+    """`b` is the escape hatch, reached for when things are already wrong.
+
+    set_bypass reaches _link_real_mic, which takes a pw-dump snapshot
+    (timeout 10 s) and one or two pw-link calls (5 s each). Run inline in the
+    action handler that froze the whole dashboard - no repaint, no other key,
+    not even `q` - for up to ~20 s if PipeWire was slow, which is exactly
+    when it would be slow.
+    """
+    import threading
+
+    started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
+
+    class StubPlayout:
+        suppressed = False
+
+    class SlowSession:
+        def __init__(self):
+            self.metrics = Metrics()
+            self.stop = threading.Event()
+            self.playouts = {d: StubPlayout() for d in Direction}
+
+        def set_bypass(self, value):
+            started.set()
+            release.wait(2.0)          # stands in for a slow pw-dump
+            finished.set()
+
+    session = SlowSession()
+    app = SidetapLiveApp(metrics=session.metrics, session=session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        app.action_bypass()
+        assert not finished.is_set(), "set_bypass ran inline on the UI thread"
+
+        # Yield to the loop so the worker can be scheduled - blocking on a
+        # threading.Event here would stop the very loop that starts it.
+        for _ in range(100):
+            if started.is_set():
+                break
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+
+        assert started.is_set(), "the bypass work never started"
+        release.set()
