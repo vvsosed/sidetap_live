@@ -1,7 +1,15 @@
+import asyncio
+
 import pytest
 
 from sidetap_live.metrics import Health, Metrics
-from sidetap_live.tui import SidetapLiveApp, format_lag, format_rotations, health_marker
+from sidetap_live.tui import (
+    REFRESH_HZ,
+    SidetapLiveApp,
+    format_lag,
+    format_rotations,
+    health_marker,
+)
 from sidetap_live.types import Direction, SessionState
 
 
@@ -80,8 +88,15 @@ async def test_the_tui_exits_when_the_session_is_stopped_from_outside():
         assert app.is_running
 
         session.stop.set()            # what handle_signal does, and all it does
-        await pilot.pause()
-        await pilot.pause()
+
+        # Wait for the refresh timer rather than assuming a fixed number of
+        # frames: it runs at REFRESH_HZ, so two pauses are not guaranteed to
+        # contain a tick and the assertion below would flake under load.
+        for _ in range(50):
+            await pilot.pause()
+            if not app.is_running:
+                break
+            await asyncio.sleep(1 / REFRESH_HZ)
 
         assert not app.is_running, (
             "the TUI ignored session.stop, so shutdown() and router.restore() "
