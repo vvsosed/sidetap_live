@@ -1,11 +1,13 @@
 import argparse
 import dataclasses
+import logging
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from sidetap_live.metrics import Metrics
 from sidetap_live.run import Session
 from sidetap_live.types import Direction, NO_AUDIO_S, TTS_RATE
 from tests.conftest import (
@@ -540,3 +542,44 @@ def test_a_sink_spawned_before_a_failed_setup_is_not_left_running(
     ]
     assert playback, "no pw-cat playback process was spawned"
     assert all(w.terminated for w in playback), "a pw-cat was left orphaned"
+
+
+class _StubHeadlessSession:
+    """Just enough Session for _run_headless."""
+
+    def __init__(self):
+        self.metrics = Metrics()
+        self.alarms = 0
+
+        class OnePass(threading.Event):
+            def wait(self, timeout=None):
+                self.set()
+                return True
+
+        self.stop = OnePass()
+
+    def alarm_dead_air(self) -> None:
+        self.alarms += 1
+
+
+def test_headless_reports_no_audio_on_either_direction(caplog):
+    """_poll_capture_health computes no_audio for both directions every
+    second, and the TUI shows it as NO AUDIO ARRIVING - but _run_headless
+    only ever looked at OUT's dead_air.
+
+    An unlinked capture node delivers zero bytes rather than silence, so
+    under --no-tui (systemd, screen) the remote party's stream dropping
+    mid-call produced nothing in the log for the rest of the call. This is
+    precisely the failure no_audio exists to catch.
+    """
+    from sidetap_live.run import _run_headless
+
+    session = _StubHeadlessSession()
+    session.metrics.set_no_audio(Direction.IN, True)
+
+    with caplog.at_level(logging.ERROR, logger="sidetap_live.run"):
+        _run_headless(session)
+
+    assert any("NO AUDIO" in r.message for r in caplog.records), (
+        "headless never reported that a direction had gone deaf"
+    )
