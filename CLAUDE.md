@@ -35,6 +35,14 @@ credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 env -u GOOGLE_APPLICATION_CREDENTIALS -u GEMINI_API_KEY uv run pytest -q
 ```
 
+`.github/workflows/ci.yml` runs exactly that on every pull request, with both
+variables unset. That is not belt-and-braces: it is the only thing standing
+between this property and a test that quietly starts reaching for real
+credentials, which would pass on your machine and fail nowhere until it
+mattered. CI runs `uvx ruff check .` alongside it; the ruleset in
+`pyproject.toml` is deliberately narrow and says why, because a linter that
+flags the design is a linter that gets switched off.
+
 `docs/experiments/` records the six measurements the design rests on, in five
 files: the sixth, the `1007` region-subtag post-mortem, is an addendum at the
 end of `01-connect.md` rather than a file of its own, because it was found by
@@ -73,8 +81,10 @@ pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
 uv run pytest -q                                    # 351 tests, no audio/network/creds
+uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
+uv run sidetap-live doctor --their-lang ru-RU --my-lang en-US   # probe BOTH languages
 uv run sidetap-live doctor --install                # write the virtual-mic config (once)
 uv run sidetap-live doctor --repair                 # replay the journal after a crash
 uv run sidetap-live run --app zoom --their-lang ru-RU --my-lang en-US
@@ -213,10 +223,24 @@ preference and these are not.
   `activity.py`. This is what lets 351 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
-  records.** `GoAway` opens a replacement, `Closed` sets a flag, a handle is
-  stored — and the pump acts on them when the next block arrives. Transitioning
-  from the receive thread closes a session out from under the loop iterating
-  it, and would need a second lock around the whole machine.
+  records.** `Closed` sets a flag, a handle is stored — and the pump acts on
+  them when the next block arrives. Transitioning from the receive thread
+  closes a session out from under the loop iterating it, and would need a
+  second lock around the whole machine.
+  Two exceptions, both touching only `_pending` and the state, never the
+  session the pump is iterating: `note_goaway` opens the replacement at once,
+  because waiting for the next block would eat into `time_left`; and
+  `_drop_pending` clears a replacement that died before taking over. Without
+  the second, a dead replacement was force-promoted at `OVERLAP_MAX_S` onto a
+  session whose `events()` had already ended — so nothing ever reported it
+  dead again and the direction was silent for the rest of the call.
+- **A session that is neither on air nor warming is retired, and its events
+  are dropped.** `close()` does not discard what a session already queued, so
+  the outgoing session's last chunks arrive after the handover. Dispatching
+  them replays a sentence the listener has already heard — the same artefact
+  discarding the replacement's early output exists to prevent, from the other
+  side. Its `Closed` is dropped too: one we retired on purpose must not read
+  as the live one dying.
 - **`activity.py` observes, it never gates.** Nothing may remove a byte from
   the audio stream. Handing a model that reasons over continuous audio a stream
   with the silence cut out changes what it hears. This is why the module is not
@@ -247,23 +271,55 @@ preference and these are not.
   outgoing output is silent. Serial rotation was measured to produce a **3.12 s
   hole** against the 0.80 s pause it was placed in, because a fresh session
   emits nothing for ~3 s. Closing inside `time_left` is **mandatory** — the
-  server aborts with code 1008 otherwise.
+  server aborts with code 1008 otherwise. **`_open_pending` must stay guarded
+  and the rotation must stay owed.** It runs on the receive thread, whose loop
+  swallows exceptions, so an unguarded refusal there cancels the rotation
+  silently and the session runs past `time_left` into that 1008. `_goaway_at`
+  is what records the debt: it is set on `GoAway` and cleared only by a switch,
+  so `feed()` retries the open on the pump thread until one succeeds.
 - **A failed open falls back to SUSPENDED, not OPENING.** Nothing re-wakes an
   `OPENING` direction and nothing sends from one, so leaving it there makes the
   direction silently dead for the rest of the call, noticed only by the
   dead-air alarm. `SUSPENDED` is both true and recoverable, and
   `REOPEN_BACKOFF_S` paces the retry so a revoked key does not become a
-  rate-limit ban.
+  rate-limit ban. Retrying forever is its own failure, though: a rejected
+  language code fails identically every time, so after `FATAL_OPEN_FAILURES`
+  consecutive failures the direction reports itself dead once through
+  `Session._on_direction_fatal`, which stops that direction's pump and stops
+  the call when both are gone. Retries continue; only the report is latched.
 - **The duck defaults open and fails open.** `DuckControl.close()` flips its
   flag only on a *successful* `wpctl` call, and `Playout.run()`'s `finally`
   opens it unconditionally. A duck stuck **closed** silences the person you are
   talking to and leaves them speaking to nobody, which is worse than this
   program not working at all.
-- **Journal before you touch the graph.** `Router` writes every planned
-  link/unlink to `~/.local/state/sidetap_live/routing-journal.json` atomically
-  *before* calling the linker. A `kill -9` in that window is recoverable with
-  `doctor --repair`; the other order leaves the graph rewired with nothing on
-  disk to repair from.
+- **Journal before you touch the graph, and fsync it.** `Router` writes every
+  planned link/unlink to `~/.local/state/sidetap_live/routing-journal.json`
+  atomically *before* calling the linker. A `kill -9` in that window is
+  recoverable with `doctor --repair`; the other order leaves the graph rewired
+  with nothing on disk to repair from. `os.replace()` alone only covers
+  `kill -9`, because the page cache outlives the process — the temp file is
+  fsynced before the rename and the directory after, so a power loss cannot
+  hand back a reverted journal describing a graph that has already changed.
+- **Defer routing until the duck has ports, not merely a node.** PipeWire
+  announces a Node before its Ports finish registering, and `pw-loopback` is a
+  freshly-forked process when `poll_once()` first runs. `_route_locked` decides
+  the unlink from the speakers and the link into the duck separately, so a
+  snapshot caught in that window cut the call loose and joined it to nothing —
+  and because every unlink *succeeded*, the stream was marked routed and never
+  retried, with nothing logged.
+- **`resolve()` refuses a port of the wrong direction.** It used to retry a
+  missed lookup across every port of the node, which hands `pw-link` a
+  backwards port and journals it as the link that was asked for. Returning
+  `None` makes `restore()` and `repair()` report a ref they cannot resolve,
+  which is something a user can act on.
+- **The TUI polls `session.stop`; the pipeline never calls into it.** The
+  SIGINT/SIGTERM handler does nothing but set that flag, so a TUI that does not
+  read it means `App.run()` never returns, `shutdown()` never runs, and
+  `router.restore()` never runs — leaving the call routed through the duck and
+  silenced. Ctrl-C cannot stand in: Textual clears the terminal's `ISIG` flag
+  while it owns the screen, so no SIGINT is delivered at all. Anything slow a
+  hotkey triggers belongs on a worker thread for the same reason — `b` reaches
+  `pw-dump` and `pw-link`, which froze every key including quit.
 
 ## Graph identity: what is shared with sidetap and what is not
 
