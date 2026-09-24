@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     # claiming 12 after someone changed the constant.
     out.add_argument(
         "--lag-cap",
-        type=float,
+        type=lag_cap,
         default=None,
         metavar="SECONDS",
         help="seconds of un-spoken translation to allow before dropping the "
@@ -212,6 +212,22 @@ def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
         stream.setFormatter(fmt)
         root.addHandler(stream)
     return None, session
+
+
+def lag_cap(value: str) -> float:
+    """Seconds of un-spoken translation to tolerate. Must be positive.
+
+    Bounded rather than free for the same reason --duck-level is. Playout
+    trims while `backlog_s > lag_cap_s`, so at 0 or below that is true as
+    soon as a single byte is pending: it drops to the first pause on every
+    submit and the user hears almost nothing. Someone typing `--lag-cap 0`
+    means "as tight as possible" and would instead get a program that looks
+    broken, with nothing said about why.
+    """
+    seconds = float(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("--lag-cap must be greater than 0")
+    return seconds
 
 
 def duck_level(value: str) -> float:
