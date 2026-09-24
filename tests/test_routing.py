@@ -2,6 +2,7 @@ import dataclasses
 import json
 import logging
 import os
+import threading
 
 import pytest
 
@@ -19,6 +20,7 @@ from sidetap_live.routing import (
     duck_loopback_spec,
     resolve,
 )
+from sidetap_live.tap import GRAPH_ERROR_WARN_AFTER
 from tests.conftest import FakeGraphSource, FakeLinker, FakeLoopbackFactory, load_graph
 
 
@@ -793,3 +795,51 @@ def test_a_duck_with_no_ports_yet_does_not_unlink_the_call_from_the_speakers(
     router.poll_once()
     assert linker.unlinks, "the deferred stream was never routed once the duck was ready"
     assert linker.links, "the deferred stream was never linked into the duck"
+
+
+def test_the_routing_watcher_warns_once_it_keeps_failing(tmp_path, routing_graph, caplog):
+    """AppTap.run() escalates after GRAPH_ERROR_WARN_AFTER consecutive
+    failures, because being blind to new streams for a whole meeting "must
+    not be debug-only" - and routing.py's own header says the Router watcher
+    exists for the same reason. It logged at DEBUG forever instead.
+
+    A persistent failure here means the duck stops picking up new streams, so
+    the remote party's original plays over every translation for the rest of
+    the call, with nothing at default log level to say so.
+    """
+
+    class BrokenGraph:
+        def snapshot(self):
+            raise OSError("pw-dump: command not found")
+
+    router = Router(
+        graph=BrokenGraph(),
+        linker=FakeLinker(),
+        unlinker=FakeLinker(),
+        loopbacks=FakeLoopbackFactory(),
+        journal_path=tmp_path / "j.json",
+    )
+    router._app_pattern = "zoom"
+
+    stop = threading.Event()
+
+    class OneShot(threading.Event):
+        """Lets run() poll exactly GRAPH_ERROR_WARN_AFTER times."""
+
+        def __init__(self):
+            super().__init__()
+            self.waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            if self.waits >= GRAPH_ERROR_WARN_AFTER:
+                self.set()
+            return super().wait(0)
+
+    stop = OneShot()
+    with caplog.at_level(logging.WARNING, logger="sidetap_live.routing"):
+        router.run(stop, interval=0.0)
+
+    assert any("repeatedly" in r.message for r in caplog.records), (
+        "the routing watcher never escalated past DEBUG"
+    )

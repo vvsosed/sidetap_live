@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .graph import PLAYBACK_STREAM, PwGraph
 from .ports import GraphSource, Linker, LinkResult, LoopbackFactory, LoopbackSpec, Unlinker
+from .tap import GRAPH_ERROR_WARN_AFTER
 
 log = logging.getLogger(__name__)
 
@@ -479,11 +480,29 @@ class Router:
 
     def run(self, stop: threading.Event, interval: float = POLL_INTERVAL_S) -> None:
         """Re-scan until stopped. A transient graph read must not kill this."""
+        consecutive_errors = 0
         while not stop.is_set():
             try:
                 self.poll_once()
+                consecutive_errors = 0
             except Exception as exc:
-                log.debug("routing watcher: %s", exc)
+                consecutive_errors += 1
+                if consecutive_errors == GRAPH_ERROR_WARN_AFTER:
+                    # Mirrors AppTap.run(), which this watcher is modelled on
+                    # (see the module header). One blip is unremarkable;
+                    # failing repeatedly means new streams stop being routed
+                    # through the duck, so the remote party's original plays
+                    # over every translation for the rest of the call. That
+                    # must not be debug-only. Warn once, not every poll.
+                    log.warning(
+                        "routing watcher failing repeatedly (%s) - new streams "
+                        "matching %r are no longer being routed through %s",
+                        exc,
+                        self._app_pattern,
+                        DUCK_NODE,
+                    )
+                else:
+                    log.debug("routing watcher: %s", exc)
             stop.wait(interval)
 
     def restore(self) -> None:
