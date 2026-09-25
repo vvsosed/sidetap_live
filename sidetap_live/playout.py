@@ -177,6 +177,10 @@ class Playout:
 
     def submit(self, pcm: bytes) -> None:
         with self._lock:
+            if self.suppressed:
+                # Dropped, not queued: it translates speech from a stretch the
+                # listener chose not to hear, and would play on unsuppressing.
+                return
             self._pending.extend(pcm)
             self._trim_locked()
 
@@ -196,15 +200,15 @@ class Playout:
             return seconds
 
     def set_suppressed(self, value: bool) -> None:
-        """Entering bypass throws the queue away.
+        """Throw the queue away on both edges.
 
-        The conversation during bypass is unmediated, so its translation is
-        stale by the time it could play. The lag cap also never runs while
-        suppressed.
+        Nothing queued before suppressing is wanted afterwards, and anything
+        that slipped in while suppressed translates speech meant for nobody,
+        such as what you said while muted.
         """
-        self.suppressed = value
-        if value:
-            self.flush()
+        with self._lock:
+            self.suppressed = value
+        self.flush()
 
     def _trim_locked(self) -> None:
         """Drop the head of the buffer, but only at a pause in the output.

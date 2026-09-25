@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import logging
+import signal
 import threading
 import time
 from pathlib import Path
@@ -449,6 +450,42 @@ def test_a_failure_in_start_still_gives_the_audio_graph_back(session_args, fake_
     assert session.router_restored is True, "the call was left inside the duck"
 
 
+def test_closing_the_terminal_shuts_down_like_ctrl_c(session_args, fake_ports, monkeypatch):
+    """SIGHUP's default action exits with no `finally`, so nothing is restored.
+
+    The duck loopback runs in its own session and outlives us, leaving the
+    call routed through it. The handlers are put back once the session ends.
+    """
+    from sidetap_live import run as run_module
+
+    signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    installed = {}
+
+    def setup():
+        installed.update({sig: signal.getsignal(sig) for sig in signals})
+        raise RuntimeError("stop after the handlers are in")
+
+    session.setup = setup
+    monkeypatch.setattr(run_module, "Session", lambda *a, **k: session)
+    before = {sig: signal.getsignal(sig) for sig in signals}
+
+    with pytest.raises(RuntimeError, match="stop after the handlers are in"):
+        run_module.run_session(
+            session_args,
+            graph=fake_ports.graph,
+            launcher=fake_ports.launcher,
+            linker=fake_ports.linker,
+            clock=fake_ports.clock,
+        )
+
+    assert callable(installed[signal.SIGHUP]), "SIGHUP still kills the process"
+    installed[signal.SIGHUP](signal.SIGHUP, None)
+    assert session.stop.is_set(), "SIGHUP did not ask the session to stop"
+    after = {sig: signal.getsignal(sig) for sig in signals}
+    assert after == before, "the session's handlers outlived it"
+
+
 def test_bypass_does_not_claim_success_when_the_mic_link_fails(
     session_args, fake_ports, caplog
 ):
@@ -655,6 +692,49 @@ def test_a_dead_direction_names_the_flag_for_its_target_language(
     messages = [r.getMessage() for r in caplog.records if "direction is dead" in r.message]
     assert "--my-lang" in messages[0]
     assert "--their-lang" in messages[1]
+
+
+class _Ticks(threading.Event):
+    """A stop event whose wait() advances the fake clock, for n iterations."""
+
+    def __init__(self, clock, n):
+        super().__init__()
+        self._clock, self._n = clock, n
+
+    def wait(self, timeout=None):
+        self._clock.advance(timeout)
+        self._n -= 1
+        if self._n <= 0:
+            self.set()
+        return self.is_set()
+
+
+def test_a_dead_direction_is_drained_and_not_reported_as_deaf(session_args, fake_ports):
+    """Its pump has stopped, but its capture keeps delivering.
+
+    Undrained, the queue fills: drops are logged for the rest of the call and,
+    once arrivals stop being accepted, the pane shows NO AUDIO ARRIVING on a
+    direction that is already marked failed.
+    """
+    from sidetap_live.types import AudioChunk
+
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        session._on_direction_fatal(Direction.OUT, RuntimeError("bad lang"))
+        track_queue = session.capture.queues[Direction.OUT.track]
+        for _ in range(5):
+            track_queue.put(AudioChunk(track=Direction.OUT.track, pcm=b"", t_start=0.0))
+        deadline = time.monotonic() + 2.0
+        while track_queue._queue.qsize() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert track_queue._queue.qsize() == 0, "the dead direction's queue is not drained"
+
+        session._poll_capture_health(_Ticks(fake_ports.clock, int(NO_AUDIO_S) + 5))
+        state = session.metrics.snapshot().directions[Direction.OUT]
+        assert state.no_audio is False, "a dead direction was reported as deaf"
+    finally:
+        session.shutdown()
 
 
 def test_setup_fails_before_engaging_when_the_api_key_is_missing(

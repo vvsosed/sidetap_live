@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import queue as queue_module
 import signal
 import threading
 import time
@@ -24,6 +25,9 @@ from .types import LAG_CAP_S, NO_AUDIO_S, TTS_RATE, Direction
 log = logging.getLogger(__name__)
 
 SHUTDOWN_JOIN_S = 3.0
+# SIGHUP is closing the terminal or losing SSH. Its default action exits with
+# no `finally`, leaving the call routed through the duck, which outlives us.
+SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 class Session:
@@ -239,6 +243,11 @@ class Session:
         self.metrics.set_health(direction, session=Health.FAILED)
         # Stops this direction's pump; shutdown() sets the rest.
         self.direction_stop[direction].set()
+        # Its capture keeps delivering, so drain it: a full queue would log
+        # drops for the rest of the call and read as NO AUDIO.
+        track_queue = self.capture.queues.get(direction.track) if self.capture else None
+        if track_queue is not None:
+            self._spawn(self._discard, (track_queue,), f"discard-{direction.value}")
         log.error(
             "%s direction is dead: %s. The call continues one-way; Ctrl-C and "
             "check --%s-lang.",
@@ -266,7 +275,8 @@ class Session:
             now = self._clock.monotonic()
             for direction in Direction:
                 track_queue = self.capture.queues.get(direction.track)
-                if track_queue is None:
+                if track_queue is None or self.direction_stop[direction].is_set():
+                    # A stopped direction is already shown as failed.
                     continue
                 self.metrics.set_capture_dropped(direction, track_queue.dropped)
 
@@ -288,6 +298,14 @@ class Session:
         not playing yet.
         """
         return direction is Direction.OUT or self.router.has_routed
+
+    def _discard(self, track_queue) -> None:
+        """Throw away a stopped direction's capture until the session ends."""
+        while not self.stop.is_set():
+            try:
+                track_queue.get(timeout=0.25)
+            except queue_module.Empty:
+                pass
 
     def _spawn(self, target, args, name) -> None:
         thread = threading.Thread(target=target, args=args, name=name, daemon=True)
@@ -487,31 +505,34 @@ def run_session(args, *, graph, launcher, linker, clock, sessions=None,
     def handle_signal(*_):
         session_obj.stop.set()
 
-    # Installed BEFORE setup(), which mutates the graph and takes time.
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
+    # Installed BEFORE setup(), which mutates the graph and takes time, and
+    # put back afterwards so they do not outlive this session.
+    previous = {sig: signal.signal(sig, handle_signal) for sig in SHUTDOWN_SIGNALS}
     try:
-        session_obj.setup()
-    except BaseException:
-        # setup() is not atomic: a failure after engage() would leave the
-        # call routed into the duck with the process gone.
-        session_obj.shutdown()
-        raise
+        try:
+            session_obj.setup()
+        except BaseException:
+            # setup() is not atomic: a failure after engage() would leave the
+            # call routed into the duck with the process gone.
+            session_obj.shutdown()
+            raise
 
-    # start() is guarded too: it runs after engage() and can fail, e.g.
-    # capture.start() timing out waiting for a capture node.
-    try:
-        session_obj.start()
+        # start() is guarded too: it runs after engage() and can fail, e.g.
+        # capture.start() timing out waiting for a capture node.
+        try:
+            session_obj.start()
 
-        if args.no_tui:
-            _run_headless(session_obj)
-        else:
-            from .tui import run_tui
+            if args.no_tui:
+                _run_headless(session_obj)
+            else:
+                from .tui import run_tui
 
-            run_tui(session_obj)
+                run_tui(session_obj)
+        finally:
+            session_obj.shutdown()
     finally:
-        session_obj.shutdown()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
     saved = [
         session_obj.transcript.jsonl_path,

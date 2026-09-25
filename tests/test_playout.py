@@ -239,6 +239,19 @@ def test_suppressed_throws_the_queue_away_and_opens_the_duck():
     assert volume.calls[-1] == (7, 1.0)
 
 
+def test_nothing_translated_while_suppressed_plays_afterwards():
+    """Muting OUT and talking must not replay that speech on unmute."""
+    playout, sink, _ = build()
+    playout.set_suppressed(True)
+    for _ in range(50):
+        playout.submit(SPEECH)
+        playout.tick()
+    assert playout.backlog_s() == 0.0
+
+    playout.set_suppressed(False)
+    assert not any(playout.tick() for _ in range(50)), "muted speech was played"
+
+
 def test_the_cap_still_trims_when_the_buffer_opens_on_a_pause():
     """`if not cut` treated "the head is already quiet" (offset 0) exactly
     like "there is no pause anywhere" (None), and returned without dropping a
