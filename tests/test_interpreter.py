@@ -22,7 +22,7 @@ SPEECH = b"\x00\x40" * (BLOCK_BYTES // 2)
 SILENCE = b"\x00\x00" * (BLOCK_BYTES // 2)
 
 
-def build(*, echo=False, idle_suspend=True, speaking=True):
+def build(*, echo=False, idle_suspend=True, speaking=True, on_fatal=None):
     clock = FakeClock()
     sessions = FakeSessionFactory()
     metrics = Metrics()
@@ -42,6 +42,7 @@ def build(*, echo=False, idle_suspend=True, speaking=True):
         clock=clock,
         rates=Rates(),
         preroll=PreRoll(seconds=1.0),
+        on_fatal=on_fatal,
     )
     return interpreter, sessions, metrics, clock
 
@@ -356,6 +357,71 @@ def test_a_dead_session_while_suspended_is_not_reopened():
     assert len(sessions.sessions) == 1
 
 
+def test_a_session_closed_before_answering_backs_off_instead_of_reconnecting():
+    """The real factory connects in the background, so open() always returns.
+
+    A rejected language code then closes the session ~1 s in, before it has
+    sent anything. Reconnecting at once repeats that about once a second for
+    the rest of the call.
+    """
+    interpreter, sessions, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(Closed(reason="1007 invalid argument"))
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.SUSPENDED
+    assert metrics.snapshot().directions[Direction.IN].session is Health.FAILED
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.sessions) == 1, "reconnected inside the backoff"
+
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.sessions) == 2
+
+
+def test_sessions_refused_after_connect_are_eventually_reported_as_fatal():
+    fatal = []
+    interpreter, sessions, _, clock = build(
+        on_fatal=lambda direction, exc: fatal.append((direction, exc))
+    )
+    for _ in range(FATAL_OPEN_FAILURES):
+        interpreter.feed(block(SPEECH))                  # opens
+        interpreter.note_event(Closed(reason="1007 invalid argument"))
+        interpreter.feed(block(SPEECH))                  # notices the death
+        clock.advance(REOPEN_BACKOFF_S + 0.1)
+
+    assert len(sessions.sessions) == FATAL_OPEN_FAILURES
+    assert len(fatal) == 1
+    assert fatal[0][0] is Direction.IN
+    assert "1007" in str(fatal[0][1])
+
+
+def test_a_session_that_answered_clears_the_failures_and_reopens_at_once():
+    """A session that worked and then dropped is a blip, not a refusal."""
+    fatal = []
+    interpreter, sessions, _, clock = build(
+        on_fatal=lambda direction, exc: fatal.append((direction, exc))
+    )
+    for _ in range(FATAL_OPEN_FAILURES - 1):
+        interpreter.feed(block(SPEECH))
+        interpreter.note_event(Closed(reason="1007 invalid argument"))
+        interpreter.feed(block(SPEECH))
+        clock.advance(REOPEN_BACKOFF_S + 0.1)
+
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=b"\x00" * 100))
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(Closed(reason="network blip"))
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.RUNNING, "backed off after a blip"
+    assert len(sessions.sessions) == FATAL_OPEN_FAILURES + 1
+
+    interpreter.note_event(Closed(reason="1007 invalid argument"))
+    interpreter.feed(block(SPEECH))
+    assert fatal == [], "failures before the healthy session still counted"
+
+
 def test_goaway_arriving_as_an_event_enters_overlapping():
     # NOTE: the plan's Task 21 text names this test "...enters_draining" and
     # asserts SessionState.DRAINING, a state that does not exist - it is the
@@ -578,7 +644,7 @@ def test_an_endlessly_failing_open_is_eventually_reported_as_fatal():
     forever, so a permanently misconfigured --their-lang - the region-subtag
     1007, a revoked key - retried against the API for the whole call instead
     of ever saying so. The direction showed Health.FAILED, but the "both
-    directions are dead, stop the call" net and the "check --their-lang"
+    directions are dead, stop the call" net and the "check --my-lang"
     guidance could never fire.
     """
     fatal = []

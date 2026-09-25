@@ -92,6 +92,9 @@ class DirectionInterpreter:
         self._open_failed_at: float | None = None
         self._open_failures = 0
         self._reported_fatal = False
+        # Whether the session on air has sent any event yet. Written by the
+        # receive thread; a session that dies before it does was refused.
+        self._heard = False
         self._handle: str | None = None
 
         # The replacement session while OVERLAPPING. Fed the same audio as
@@ -126,10 +129,18 @@ class DirectionInterpreter:
                 if self._speech_at is None:
                     self._speech_at = self._clock.monotonic()
 
-        if self._state is not SessionState.SUSPENDED and self._take_dead() is not None:
+        if self._open_failures and self._heard:
+            # The session on air has answered, so the run of failures is over.
+            self._open_failures = 0
+            self._reported_fatal = False
+
+        dead = None
+        if self._state is not SessionState.SUSPENDED:
+            dead = self._take_dead()
+        if dead is not None:
             # _reopen's pre-roll replay already sends this chunk; falling
             # through would send it twice.
-            self._reopen()
+            self._reopen(dead)
             return
 
         if self._state is SessionState.SUSPENDED:
@@ -191,35 +202,19 @@ class DirectionInterpreter:
     def _open(self, *, replay: bool, handle: str | None = None) -> float:
         """Open a session. Returns seconds of pre-roll replayed into it."""
         self._set_state(SessionState.OPENING)
+        self._heard = False
         try:
             self._session = self._sessions.open(
                 self._config.target_lang, echo=self._config.echo, handle=handle
             )
         except Exception as exc:
-            # Fall back to SUSPENDED, not OPENING: nothing re-wakes or sends
-            # from an OPENING direction, so it would be silently dead. The
-            # next speech onset retries, subject to the backoff.
             log.error("%s could not open a session: %s", self.direction.value, exc)
-            self._session = None
-            self._open_failed_at = self._clock.monotonic()
-            self._metrics.set_health(self.direction, session=Health.FAILED)
-            self._set_state(SessionState.SUSPENDED)
-            # A blip clears, but a rejected language code or revoked key fails
-            # the same way every time, so report the direction dead after
-            # FATAL_OPEN_FAILURES. Reported once; the owner decides whether
-            # to stop the direction, and until it does the retries continue.
-            self._open_failures += 1
-            if (
-                self._open_failures >= FATAL_OPEN_FAILURES
-                and not self._reported_fatal
-                and self._on_fatal is not None
-            ):
-                self._reported_fatal = True
-                self._on_fatal(self.direction, exc)
+            self._open_failed(exc)
             return 0.0
+        # The failure count is cleared only once this session answers (see
+        # feed()): the real factory connects in the background, so returning
+        # here proves nothing.
         self._open_failed_at = None
-        self._open_failures = 0
-        self._reported_fatal = False
         with self._lock:
             self._goaway_at = None
             self._dead = None
@@ -238,6 +233,29 @@ class DirectionInterpreter:
         for block in blocks:
             self._send(block)
         return sum(len(b) for b in blocks) / (TARGET_RATE * 2)
+
+    def _open_failed(self, exc: BaseException) -> None:
+        """Fall back to SUSPENDED, back off, and report a direction that
+        keeps failing."""
+        # SUSPENDED, not OPENING: nothing re-wakes or sends from an OPENING
+        # direction, so it would be silently dead. The next speech onset
+        # retries, subject to the backoff.
+        self._session = None
+        self._open_failed_at = self._clock.monotonic()
+        self._metrics.set_health(self.direction, session=Health.FAILED)
+        self._set_state(SessionState.SUSPENDED)
+        # A blip clears, but a rejected language code or revoked key fails
+        # the same way every time, so report the direction dead after
+        # FATAL_OPEN_FAILURES. Reported once; the owner decides whether to
+        # stop the direction, and until it does the retries continue.
+        self._open_failures += 1
+        if (
+            self._open_failures >= FATAL_OPEN_FAILURES
+            and not self._reported_fatal
+            and self._on_fatal is not None
+        ):
+            self._reported_fatal = True
+            self._on_fatal(self.direction, exc)
 
     def _suspend(self) -> None:
         self._close("idle")
@@ -375,6 +393,8 @@ class DirectionInterpreter:
             # after the handover would repeat a sentence. Its Closed is
             # dropped too: retiring it must not look like the live one dying.
             return
+        if not isinstance(event, Closed):
+            self._heard = True
         if isinstance(event, AudioOut):
             self._outgoing_silent = not self._has_speech(event.pcm)
         self._dispatch(event)
@@ -488,17 +508,29 @@ class DirectionInterpreter:
             )
         )
 
-    def _reopen(self) -> None:
+    def _reopen(self, reason: str) -> None:
         """The session died. Prefer a warming replacement over a cold start.
 
         Promoting a replacement that is already listening skips the ~3 s
         warm-up and avoids orphaning it: feed() keeps sending to `_pending`,
         so an orphan would be fed and billed for the rest of the call. The
         handover counts as forced, since it did not wait for an output gap.
+
+        A session that died before sending any event was refused, not
+        dropped: a rejected language code closes it ~1 s in, before the first
+        output (~3 s) or resumption handle (~5 s). That counts as a failed
+        open, with the backoff, rather than an immediate reconnect that would
+        fail the same way about once a second for the rest of the call.
         """
         self._metrics.set_health(self.direction, session=Health.FAILED)
         if self._pending is not None:
             self._switch(forced=True)
             return
         self._close("died")
+        if not self._heard:
+            log.error(
+                "%s session closed before answering: %s", self.direction.value, reason
+            )
+            self._open_failed(RuntimeError(reason))
+            return
         self._open(replay=True, handle=self._handle)

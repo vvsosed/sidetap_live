@@ -244,7 +244,8 @@ class Session:
             "check --%s-lang.",
             direction.value,
             exc,
-            "their" if direction is Direction.IN else "my",
+            # IN translates into your language, OUT into theirs.
+            "my" if direction is Direction.IN else "their",
         )
         if all(event.is_set() for event in self.direction_stop.values()):
             log.error("both directions are dead; stopping")

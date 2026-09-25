@@ -282,7 +282,10 @@ preference and these are not.
   direction silently dead for the rest of the call, noticed only by the
   dead-air alarm. `SUSPENDED` is both true and recoverable, and
   `REOPEN_BACKOFF_S` paces the retry so a revoked key does not become a
-  rate-limit ban. Retrying forever is its own failure, though: a rejected
+  rate-limit ban. A session that closes before sending any event counts as a
+  failed open too: the real factory connects in the background, so `open()`
+  returns even when the server then refuses the session about a second in.
+  Retrying forever is its own failure, though: a rejected
   language code fails identically every time, so after `FATAL_OPEN_FAILURES`
   consecutive failures the direction reports itself dead once through
   `Session._on_direction_fatal`, which stops that direction's pump and stops

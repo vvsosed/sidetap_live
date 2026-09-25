@@ -640,6 +640,23 @@ def test_a_fatal_direction_stops_only_its_own_pump(session_args, fake_ports):
     assert not pumps[Direction.OUT].is_alive(), "shutdown left a pump running"
 
 
+def test_a_dead_direction_names_the_flag_for_its_target_language(
+    session_args, fake_ports, caplog
+):
+    """IN translates into --my-lang and OUT into --their-lang."""
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        with caplog.at_level(logging.ERROR, logger="sidetap_live.run"):
+            session._on_direction_fatal(Direction.IN, RuntimeError("bad lang"))
+            session._on_direction_fatal(Direction.OUT, RuntimeError("bad lang"))
+    finally:
+        session.shutdown()
+    messages = [r.getMessage() for r in caplog.records if "direction is dead" in r.message]
+    assert "--my-lang" in messages[0]
+    assert "--their-lang" in messages[1]
+
+
 def test_setup_fails_before_engaging_when_the_api_key_is_missing(
     session_args, fake_ports, monkeypatch
 ):
