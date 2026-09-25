@@ -5,11 +5,10 @@ headphones; OUT reads the mic and speaks into the virtual mic's sink. Nothing
 here knows which is which beyond its config.
 
 THE INVARIANT: every state transition happens on the pump thread. The receive
-thread only records - GoAway opens the replacement, Closed sets a flag, a
-resumption handle is stored - and the pump acts on them when the next block
-arrives.
-Transitioning from the receive thread would close a session out from under the
-loop iterating it, and would need a second lock around the whole machine.
+thread only records (Closed sets a flag, a handle is stored) and the pump acts
+on the next block. Transitioning from the receive thread would close a session
+under the loop iterating it. Exceptions, touching only `_pending` and the
+state: note_goaway() and _drop_pending().
 """
 
 from __future__ import annotations
@@ -53,9 +52,8 @@ class InterpreterConfig:
     direction: Direction
     target_lang: str
     # IN is False: a remote party already speaking your language produces no
-    # output, no audio flows, the duck opens and you hear them raw. OUT must
-    # be True - your real mic is never linked to the messenger, so no output
-    # means the remote party hears nothing at all.
+    # output, so the duck opens and you hear them raw. OUT must be True: your
+    # real mic is never linked to the messenger, so no output means silence.
     echo: bool
     idle_suspend: bool = True
 
@@ -129,28 +127,23 @@ class DirectionInterpreter:
                     self._speech_at = self._clock.monotonic()
 
         if self._state is not SessionState.SUSPENDED and self._take_dead() is not None:
-            # Same reasoning as the SUSPENDED wake below: _reopen's pre-roll
-            # replay already drains this chunk - it was added to the ring
-            # above, before the dead check ran. Falling through to the send
-            # at the end of feed() would put it on the wire twice.
+            # _reopen's pre-roll replay already sends this chunk; falling
+            # through would send it twice.
             self._reopen()
             return
 
         if self._state is SessionState.SUSPENDED:
             if not self._should_wake(speaking):
                 return
-            # _open's pre-roll replay already drains this chunk - it was
-            # added to the ring above, before the state was checked. Falling
-            # through to the send below would put it on the wire twice.
+            # _open's pre-roll replay already sends this chunk.
             self._open(replay=True)
             return
         elif self._state is SessionState.OVERLAPPING:
             self._switch_if_ready()
         elif self._rotation_due():
             # A GoAway arrived but the replacement could not be opened. Retry
-            # here, on the pump thread, rather than leaving the direction to
-            # run past time_left into a 1008. Ordered before _should_suspend so
-            # an owed rotation is never traded for an idle suspend.
+            # rather than run past time_left into a 1008. Checked before
+            # _should_suspend so an owed rotation always wins.
             self._open_pending()
         elif self._should_suspend():
             self._suspend()
@@ -159,11 +152,8 @@ class DirectionInterpreter:
         self._check_dead_air()
         self._send(chunk.pcm)
         if self._pending is not None:
-            # Through _send_to, not a bare send: the replacement is a second
-            # live session being fed the same audio, and Google bills it.
-            # Sending directly meant the estimate understated every rotation,
-            # which is the one stretch of the call where the input cost
-            # genuinely doubles.
+            # Through _send_to so the cost estimate counts it: the
+            # replacement is billed too.
             self._send_to(self._pending, chunk.pcm)
 
     def pump(self, chunks, stop: threading.Event) -> None:
@@ -176,18 +166,12 @@ class DirectionInterpreter:
             try:
                 self.feed(chunk)
             except Exception:
-                # One malformed block must not take the direction down for the
-                # rest of the call.
+                # One bad block must not take the direction down.
                 log.exception("interpreter pump error (%s)", self.direction.value)
         self._close("shutdown")
 
     def _backing_off(self) -> bool:
-        """True while a recent failed open should not be retried yet.
-
-        Without this, every speech block retries - ten attempts a second at
-        an API that just refused us, which is how a revoked key becomes a
-        rate-limit ban.
-        """
+        """True while a recent failed open should not be retried yet."""
         if self._open_failed_at is None:
             return False
         return self._clock.monotonic() - self._open_failed_at < REOPEN_BACKOFF_S
@@ -196,7 +180,7 @@ class DirectionInterpreter:
         if self._backing_off():
             return False
         # With no detector there is no onset to wait for, so open at once and
-        # hold the session for the whole call - the documented degraded mode.
+        # hold the session for the whole call.
         return speaking or not self._activity.available
 
     def _should_suspend(self) -> bool:
@@ -212,23 +196,17 @@ class DirectionInterpreter:
                 self._config.target_lang, echo=self._config.echo, handle=handle
             )
         except Exception as exc:
-            # Leaving the state at OPENING would be a lie and a trap: nothing
-            # re-wakes an OPENING direction and nothing sends from one, so the
-            # direction goes silently dead for the rest of the call and only
-            # the dead-air alarm ever notices. Fall back to SUSPENDED, which
-            # is both true and recoverable - the next speech onset retries,
-            # subject to the backoff below.
+            # Fall back to SUSPENDED, not OPENING: nothing re-wakes or sends
+            # from an OPENING direction, so it would be silently dead. The
+            # next speech onset retries, subject to the backoff.
             log.error("%s could not open a session: %s", self.direction.value, exc)
             self._session = None
             self._open_failed_at = self._clock.monotonic()
             self._metrics.set_health(self.direction, session=Health.FAILED)
             self._set_state(SessionState.SUSPENDED)
-            # A blip clears; a rejected language code or a revoked key fails
-            # the same way every time. Without this ceiling the direction
-            # retried for the whole call and nothing but a health marker ever
-            # said so - Session._on_direction_fatal, and the "both directions
-            # are dead" stop behind it, had no production caller at all.
-            # Reported once: the retries continue, but the report does not.
+            # A blip clears, but a rejected language code or revoked key fails
+            # the same way every time, so report the direction dead after
+            # FATAL_OPEN_FAILURES. Reported once; the retries continue.
             self._open_failures += 1
             if (
                 self._open_failures >= FATAL_OPEN_FAILURES
@@ -295,10 +273,9 @@ class DirectionInterpreter:
     def note_goaway(self, event: GoAway) -> None:
         """The connection will end. Open the replacement NOW.
 
-        Not after a pause, not on a timer: a fresh session needs ~3s before
-        it emits anything, so it has to start listening immediately or the
-        switch reintroduces the hole. Closing the outgoing session inside
-        time_left is mandatory - the server aborts with 1008 otherwise.
+        A fresh session needs ~3 s before it emits anything, so it must start
+        listening immediately. The outgoing session must close inside
+        time_left or the server aborts with 1008.
         """
         if self._state is not SessionState.RUNNING:
             return
@@ -318,17 +295,10 @@ class DirectionInterpreter:
                 self._config.target_lang, echo=self._config.echo, handle=None
             )
         except Exception as exc:
-            # _open() has guarded its connect from the start; this one did not,
-            # and it runs on the receive thread, whose loop logs and swallows.
-            # So a transient refusal at the nine-minute mark left _pending None
-            # with the state still RUNNING - and note_goaway() early-returns on
-            # anything but RUNNING, so nothing ever tried again. The session
-            # then overran GoAway's time_left and the server aborted it with
-            # 1008, mid-conversation, every time this happened.
-            #
-            # _goaway_at is deliberately left set: it is what tells feed() a
-            # rotation is still owed, so the next block retries, paced by
-            # REOPEN_BACKOFF_S exactly as a failed first open is.
+            # Guarded because this can run on the receive thread, whose loop
+            # swallows exceptions and would cancel the rotation silently.
+            # _goaway_at stays set so feed() still owes the rotation and
+            # retries, paced by REOPEN_BACKOFF_S.
             log.error(
                 "%s could not open a replacement session: %s",
                 self.direction.value,
@@ -372,9 +342,8 @@ class DirectionInterpreter:
     # ---------- the receive thread ----------
 
     def _receive(self, session) -> None:
-        """Drain one session's events. Records only - never transitions,
-        except `note_goaway` which must open the replacement at once (see
-        its docstring)."""
+        """Drain one session's events. Records only, except `note_goaway`,
+        which must open the replacement at once."""
         for event in session.events():
             try:
                 self.note_event_from(session, event)
@@ -388,11 +357,9 @@ class DirectionInterpreter:
     def note_event_from(self, session, event) -> None:
         """Handle one event, attributed to its session.
 
-        While OVERLAPPING, two sessions produce at once. The replacement's
-        audio is DISCARDED - its first seconds translate audio the outgoing
-        session has already spoken, so playing it would repeat a sentence.
-        What it is used for is readiness: any energy-bearing chunk from it
-        means it is warm and the switch may proceed.
+        While OVERLAPPING, the replacement's audio is DISCARDED: its first
+        seconds translate audio the outgoing session already spoke. Any
+        energy-bearing chunk from it means it is warm and may take over.
         """
         if self._pending is not None and session is self._pending:
             if isinstance(event, AudioOut) and self._has_speech(event.pcm):
@@ -403,15 +370,9 @@ class DirectionInterpreter:
                 self._drop_pending(event.reason)
             return
         if session is not None and session is not self._session:
-            # A session that is neither on air nor warming is retired, and
-            # close() still lets its receive thread drain whatever it had
-            # already queued. Those events used to fall through to _dispatch,
-            # so audio the outgoing session produced before the handover was
-            # played AFTER the replacement took over - repeating a sentence,
-            # which is the artefact discarding the replacement's early output
-            # exists to prevent, arriving from the other side. Its Closed is
-            # dropped here too, deliberately: a session we retired on purpose
-            # must not look like the live one dying.
+            # A retired session still drains what it had queued. Playing it
+            # after the handover would repeat a sentence. Its Closed is
+            # dropped too: retiring it must not look like the live one dying.
             return
         if isinstance(event, AudioOut):
             self._outgoing_silent = not self._has_speech(event.pcm)
@@ -420,19 +381,11 @@ class DirectionInterpreter:
     def _drop_pending(self, reason: str) -> None:
         """The replacement died before it could take over.
 
-        Everything but AudioOut and ResumptionHandle used to fall through the
-        bare `return` above, so this event was discarded. The replacement then
-        never warmed, OVERLAP_MAX_S expired, and _switch_if_ready promoted a
-        corpse - after which nothing recovered, because that session's events()
-        had already ended and Closed never arrived again. The direction went
-        silent for the rest of the call, and on OUT there is no raw path to
-        fall back to, so the remote party simply heard nothing.
-
-        _goaway_at is left set so the pump thread still owes a rotation and
-        opens a fresh replacement, paced by REOPEN_BACKOFF_S. Dropping back to
-        RUNNING is safe to do from the receive thread for the same reason
-        note_goaway's promotion is: it touches only _pending and the state,
-        never the session the pump is iterating.
+        Otherwise OVERLAP_MAX_S would promote a dead session whose events()
+        has ended, and the direction would stay silent for the rest of the
+        call. _goaway_at stays set so the pump opens a fresh replacement,
+        paced by REOPEN_BACKOFF_S. Safe on the receive thread: it touches
+        only _pending and the state.
         """
         log.warning(
             "%s replacement session died before taking over (%s); "
@@ -447,44 +400,36 @@ class DirectionInterpreter:
             self._set_state(SessionState.RUNNING)
 
     def note_handle(self, handle: str) -> None:
-        """Remember the latest resumption handle for `_reopen` (Task 21)."""
+        """Remember the latest resumption handle for `_reopen`."""
         self._handle = handle
 
     @staticmethod
     def _has_speech(pcm: bytes) -> bool:
-        """Energy, not byte presence.
+        """Energy, not byte presence: the model streams output continuously,
+        so byte presence would never read as silent.
 
-        The model streams output continuously whether or not it is
-        translating - measured at 0.04% of frames above threshold when idle
-        against 75.5% when translating. Byte presence would mean the outgoing
-        session never reads as silent and every rotation hits the bound.
-
-        Uses playout.has_speech, NOT `find_silence_boundary(...) is None`.
-        The latter reports where the first quiet frame is, and a 250 ms chunk
-        of clear speech routinely contains one inside a word - so inverting it
-        would call ordinary speech silent and switch sessions mid-word on
-        every rotation.
+        Not `find_silence_boundary(...) is None`, which finds the first quiet
+        frame; speech often has one inside a word, so that would switch
+        sessions mid-word.
         """
         from .playout import has_speech
 
         return has_speech(pcm)
 
-    # ---------- Task 21: audio out, transcript, offset, dead session ----------
+    # ---------- audio out, transcript, offset, dead session ----------
 
     def _dispatch(self, event) -> None:
         """Handle one event from the session currently on air.
 
-        Events from a warming replacement never reach here - note_event_from
-        filters them out, because its first seconds translate audio this
-        session has already spoken and playing them would repeat a sentence.
+        A warming replacement's events never reach here; note_event_from
+        filters them.
         """
         match event:
             case AudioOut(pcm=pcm):
                 self._playout.submit(pcm)
                 self._metrics.set_backlog_s(self.direction, self._playout.backlog_s())
-                # submit() may have trimmed at a silence boundary, so read the
-                # drop total back here rather than letting Playout reach into
-                # Metrics - the dependency runs one way only.
+                # submit() may have trimmed, so read the drop total back here
+                # rather than letting Playout depend on Metrics.
                 self._metrics.set_dropped_s(self.direction, self._playout.dropped_s)
                 self._metrics.add_cost(self._rates.output_usd(output_seconds(len(pcm))))
                 self._note_spoke()
@@ -495,7 +440,7 @@ class DirectionInterpreter:
                 self._metrics.append_text(self.direction, target=text)
                 self._emit("target", text)
             case GoAway():
-                # Must stay. note_goaway is reachable only from here.
+                # The only path to note_goaway.
                 self.note_goaway(event)
             case ResumptionHandle(handle=handle):
                 self.note_handle(handle)
@@ -508,9 +453,8 @@ class DirectionInterpreter:
     def _note_spoke(self) -> None:
         """First audio since speech started fixes this stretch's offset.
 
-        Clearing _speech_at is what makes the metric measure the STRETCH
-        rather than every chunk: the second and later chunks of the same
-        utterance find it already None and leave the figure alone.
+        Clearing _speech_at makes later chunks of the same stretch leave the
+        figure alone.
         """
         with self._lock:
             started, self._speech_at = self._speech_at, None
@@ -523,10 +467,8 @@ class DirectionInterpreter:
     def _check_dead_air(self) -> None:
         """Speech went in and nothing has come out.
 
-        Matters most on OUT: IN degrades gracefully now, because no audio out
-        opens the duck and the user hears the unmediated call. On OUT there is
-        no raw path to fall through to - the remote party hears nothing and
-        has no way to know.
+        Matters most on OUT: on IN no output opens the duck and the user
+        hears the call raw, but on OUT the remote party hears nothing.
         """
         with self._lock:
             started = self._speech_at
@@ -548,18 +490,10 @@ class DirectionInterpreter:
     def _reopen(self) -> None:
         """The session died. Prefer a warming replacement over a cold start.
 
-        If an overlap was in progress there is already a session listening,
-        and promoting it beats opening a third one twice over: it skips the
-        ~3 s warm-up a fresh session needs before it emits anything, and it
-        stops the replacement being orphaned. Orphaning is the real hazard -
-        feed() keeps sending to `_pending` for as long as it is set, so a
-        replacement left behind is fed, billed and never closed for the rest
-        of the call, with its receive thread still running.
-
-        The dead session is closed either way; close() on an already-dead
-        session is harmless. The handover is counted as forced, because it
-        did not wait for a gap in the outgoing output - there was none to
-        wait for.
+        Promoting a replacement that is already listening skips the ~3 s
+        warm-up and avoids orphaning it: feed() keeps sending to `_pending`,
+        so an orphan would be fed and billed for the rest of the call. The
+        handover counts as forced, since it did not wait for an output gap.
         """
         self._metrics.set_health(self.direction, session=Health.FAILED)
         if self._pending is not None:

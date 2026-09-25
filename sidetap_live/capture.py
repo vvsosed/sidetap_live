@@ -67,9 +67,8 @@ def plan_recorders(graph: PwGraph, config: CaptureConfig) -> list[RecorderSpec]:
                 )
             )
         else:
-            # Whole-sink capture: stream.capture.sink against the monitor, the
-            # Linux equivalent of WASAPI loopback. Everything playing lands in
-            # the recogniser, notification chimes included.
+            # Whole-sink capture via stream.capture.sink: everything playing
+            # is captured, notification chimes included.
             node = (
                 graph.find(config.remote, SINK)
                 if config.remote
@@ -97,18 +96,15 @@ def plan_recorders(graph: PwGraph, config: CaptureConfig) -> list[RecorderSpec]:
 class DroppingQueue:
     """Bounded queue that drops and counts rather than blocking the producer.
 
-    Blocking here would stall the stdout pump and eventually pw-record itself.
-    Audio is lost either way when the engine cannot keep up; this way the
-    pipeline survives and says so.
+    Blocking would stall the stdout pump and then pw-record. Audio is lost
+    either way when the consumer falls behind; this way it is counted.
     """
 
     def __init__(self, maxsize: int = QUEUE_BLOCKS):
         self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
         self.dropped = 0
-        # Arrivals, not just losses. A track that has gone quiet because its
-        # capture node was unlinked delivers zero bytes, not silence, so
-        # nothing downstream can tell it apart from nobody talking - this
-        # counter is the only place that difference is visible.
+        # Arrivals, not just losses: an unlinked capture node delivers zero
+        # bytes rather than silence, and only this counter shows it.
         self.accepted = 0
 
     def put(self, item) -> bool:
@@ -222,9 +218,8 @@ class PipeWireCapture:
         self.stop.set()
         for recorder in self.recorders.values():
             recorder.stop()
-        # One shared budget rather than a fresh timeout per thread: joining
-        # three threads at 2 s each would stall Ctrl-C for six seconds. Real
-        # time, not the injected clock - these are real threads.
+        # One shared budget, not a timeout per thread, so shutdown stays
+        # bounded. Real time, not the injected clock: these are real threads.
         deadline = time.monotonic() + SHUTDOWN_TIMEOUT_S
         for thread in self._threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))

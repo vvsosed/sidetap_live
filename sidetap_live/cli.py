@@ -35,10 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     devices = sub.add_parser(
         "devices", help="list sinks, sources and apps currently playing audio"
     )
-    # Every subcommand takes -v, including this one: main()'s catch-all uses
-    # it to decide between one clean line and a real traceback, and `devices`
-    # is the first command a user runs, so it is where an unexpected error is
-    # most likely to need debugging.
+    # Every subcommand takes -v: main()'s catch-all uses it to choose between
+    # one clean line and a real traceback.
     devices.add_argument("-v", "--verbose", action="store_true")
 
     doctor = sub.add_parser("doctor", help="check the environment before a call")
@@ -51,9 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--no-api-check", action="store_true", help="skip opening a live session"
     )
-    # Passed to the live-session probe, which opens one session per language
-    # named. Without them it probes "en" only, which tells you the key works
-    # and nothing about the languages you are about to interpret between.
+    # The live-session probe opens one session per language named; without
+    # them it probes "en" only, which proves the key and not the languages.
     doctor.add_argument(
         "--their-lang", metavar="BCP47", help="open a live session for this language too"
     )
@@ -96,11 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     out = run.add_argument_group("output")
     out.add_argument("--out", type=Path, default=Path("transcripts"))
-    # default=None, not LAG_CAP_S: it lets run.py tell "the user did not pass
-    # this" from "the user passed 12", so the constant stays the single source
-    # of the value rather than being shadowed by a copy here. The help text is
-    # derived from it for the same reason - written out by hand it would go on
-    # claiming 12 after someone changed the constant.
+    # default=None, not LAG_CAP_S, so run.py can tell "unset" from a value
+    # and the constant stays the single source of the default. The help text
+    # derives from it for the same reason.
     out.add_argument(
         "--lag-cap",
         type=lag_cap,
@@ -151,9 +146,8 @@ LOG_PATH = FALLBACK_LOG_PATH
 def session_name() -> str:
     """The stem shared by a session's .log, .jsonl and .md.
 
-    One name for all three so a run's artifacts sort together and a log line
-    can be lined up against the utterance it explains. Sub-second resolution
-    because two runs started in the same second would otherwise collide.
+    One name so a run's files sort together and a log line can be matched
+    to the utterance it explains. Sub-second, so runs cannot collide.
     """
     return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
@@ -161,26 +155,17 @@ def session_name() -> str:
 def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
     """stderr, unless Textual is about to take the terminal away.
 
-    This is not a tidiness question. Textual paints over the whole screen, so
-    with a stderr handler every log line is destroyed as it is written - and
-    that includes "this direction is now dead", the one line that explains why
-    nothing is being translated. A real run failed exactly this way: both
-    directions died on a 403 at the first block, the panes went red, and the
-    reason existed nowhere the user could reach it.
+    Textual paints over the whole screen, so under the TUI stderr would
+    destroy every log line, including the one explaining why a direction
+    died.
 
-    Either way a `run` also writes a log file next to its transcript, named
-    after the same session, so a finished call leaves one set of files that
-    explain each other. Returns that path and the session name.
+    A `run` also writes a log file next to its transcript, named after the
+    same session. Returns that path and the session name.
     """
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     root = logging.getLogger()
-    # -v raises this program's verbosity, not the whole process's. Setting the
-    # root logger to DEBUG turns on debug output for every library in it:
-    # urllib3 narrating each OAuth token fetch, asyncio announcing its
-    # selector, grpc. This is the log a user reads precisely because the TUI
-    # has hidden everything else, and burying sidetap_live's own lines in
-    # third-party chatter defeats the point of writing it. Third-party
-    # WARNING and above still come through, because those can matter.
+    # -v raises this package's verbosity only, so third-party debug chatter
+    # does not bury our lines. Third-party warnings still come through.
     root.setLevel(logging.WARNING)
     logging.getLogger("sidetap_live").setLevel(level)
     for handler in list(root.handlers):
@@ -192,9 +177,7 @@ def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
         root.addHandler(stream)
         return None, None
 
-    # Textual paints over the whole screen, so a stderr handler under the TUI
-    # writes into a terminal that is being overwritten. Without the TUI it is
-    # still wanted: the file is the durable copy, stderr is the live one.
+    # Without the TUI, stderr is the live copy and the file the durable one.
     if getattr(args, "no_tui", False):
         stream = logging.StreamHandler(sys.stderr)
         stream.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
@@ -222,12 +205,8 @@ def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
 def lag_cap(value: str) -> float:
     """Seconds of un-spoken translation to tolerate. Must be positive.
 
-    Bounded rather than free for the same reason --duck-level is. Playout
-    trims while `backlog_s > lag_cap_s`, so at 0 or below that is true as
-    soon as a single byte is pending: it drops to the first pause on every
-    submit and the user hears almost nothing. Someone typing `--lag-cap 0`
-    means "as tight as possible" and would instead get a program that looks
-    broken, with nothing said about why.
+    At 0 or below Playout would trim on every submit and the user would hear
+    almost nothing.
     """
     seconds = float(value)
     if seconds <= 0:
@@ -238,9 +217,7 @@ def lag_cap(value: str) -> float:
 def duck_level(value: str) -> float:
     """0.0 replaces the original entirely; 0.2 is interpreter-booth mode.
 
-    Bounded rather than free: above 1.0 wpctl would AMPLIFY the original over
-    the translation, which is the opposite of ducking and sounds like the
-    program is broken rather than misconfigured.
+    Above 1.0 wpctl would AMPLIFY the original over the translation.
     """
     level = float(value)
     if not 0.0 <= level <= 1.0:
@@ -318,16 +295,14 @@ def _doctor(args, graph: GraphSource, launcher, linker, clock) -> int:
     api_key_check = check_api_key()
     checks.append(api_key_check)
     checks.append(check_activity())
-    # Gated on api_key_check.ok as well as --no-api-check: without a key,
-    # os.environ["GEMINI_API_KEY"] below would raise a bare KeyError instead
-    # of the report that already explains what is missing.
+    # Gated on the key check too, or os.environ[...] below raises KeyError
+    # instead of printing the report.
     if not args.no_api_check and api_key_check.ok:
         from google import genai
 
         from .live import build_factory
 
-        # Probe what the user actually named, in order, de-duplicated -
-        # falling back to "en" when they named nothing.
+        # The languages the user named, in order, de-duplicated; else "en".
         languages = tuple(
             dict.fromkeys(
                 lang for lang in (args.their_lang, args.my_lang) if lang
@@ -386,8 +361,7 @@ def main(
         # Ctrl-C before the handler is installed, e.g. during auth.
         return 130
     except json.JSONDecodeError as exc:
-        # Not a RuntimeError, so the clause below would miss it and the user
-        # would get a traceback instead of one clean line.
+        # Not a RuntimeError, so the clause below would miss it.
         print(
             f"Could not parse pw-dump output ({exc}). Is PipeWire running? "
             "Check with: pw-dump | head",
@@ -398,10 +372,8 @@ def main(
         print(str(exc), file=sys.stderr)
         return 1
     except Exception as exc:
-        # Everything the outside world throws: Google auth and gRPC, a dead
-        # pw-dump, a full disk. None subclass RuntimeError, so an allowlist
-        # misses exactly the failures a first run hits. -v re-raises so a real
-        # traceback is one flag away.
+        # Everything else the outside world throws (auth, a dead pw-dump, a
+        # full disk) gets one clean line; -v re-raises for a traceback.
         if getattr(args, "verbose", False):
             raise
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)

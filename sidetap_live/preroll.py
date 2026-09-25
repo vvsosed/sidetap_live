@@ -1,14 +1,8 @@
 """A bounded ring of the most recent capture.
 
-Feeds exactly two paths, both of them the non-ideal ones:
-
-  - waking a SUSPENDED session, where the speech onset that woke it happened
-    before there was a session to send it to;
-  - crossing a seam where GoAway's window ran out before a pause arrived, so
-    the rotation landed mid-speech.
-
-The happy path - rotating inside a pause - drains nothing, because nothing
-was being said. That is the whole point of rotating there.
+Replayed into a freshly opened session, so the speech that woke a SUSPENDED
+direction, or that a dead session never translated, is not lost. Rotation
+needs none: the replacement is fed live audio while the outgoing one talks.
 """
 
 from __future__ import annotations

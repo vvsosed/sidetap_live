@@ -1,19 +1,12 @@
 """Durable transcript: append-only JSONL of events, Markdown at close.
 
-Deliberately NOT source/target pairs. inputAudioTranscription and
-outputAudioTranscription arrive as two independently-drifting streams, so a
-pairing would be this program's invention rather than an observation. The
-Markdown interleaves them by time instead, which is honest about what is
-actually known.
+Not source/target pairs: the two transcriptions drift independently, so a
+pairing would be invented. The Markdown interleaves them by time instead.
 
-Three Markdown files are rendered from the same events at close: the
-interleaved one, `.original.md` (every source fragment - what was actually
-said) and `.translated.md` (every target fragment - what each side heard).
-All three are grouped into paragraphs ONCE and then filtered, so their blocks
-share boundaries and timestamps and can be read side by side.
-
-sidetap emits the same schema with engine "cascade" (see that repository's
-transcript.py), which is what makes the two comparable.
+Three Markdown files are rendered at close: the interleaved one,
+`.original.md` (what was said) and `.translated.md` (what each side heard).
+All are grouped into paragraphs once and then filtered, so their blocks share
+boundaries and timestamps and can be read side by side.
 """
 
 from __future__ import annotations
@@ -49,30 +42,21 @@ def event_to_dict(event: TranscriptEvent) -> dict:
 
 
 # A paragraph ends after this much speech, at the first sentence boundary.
-#
-# MEASURED against a real call: the source and target streams alternate almost
-# exactly 1:1 (101 fragments each), roughly one per second per stream, and the
-# longest gap inside a single stream was 1.95 s. So grouping by "consecutive
-# events of the same kind" produces a heading per fragment and a transcript of
-# two-word lines, and a pause-based break never fires at all.
+# Fragments arrive about once a second per stream, alternating, with no long
+# gaps, so neither grouping by kind nor breaking at pauses works.
 PARAGRAPH_SPAN_S = 18.0
 # Hard cap, for a speaker who never reaches a sentence boundary.
 PARAGRAPH_MAX_S = 45.0
 SENTENCE_END = ".!?…。！？"
 # How far past a paragraph boundary the target may run to finish its sentence.
-#
-# The translation trails its source by about a quarter of a second, so a small
-# tolerance keeps sentences whole at no cost. Beyond it, alignment wins: on a
-# real call the target's sentence ends fell at 5.6, 6.3 and then 38.3 s, so an
-# unbounded search cut a paragraph 13 s late and swallowed the next block's
-# content - which reads as a mistranslation and is not one.
+# The translation trails its source only slightly, so this keeps sentences
+# whole; beyond it alignment wins, since a block that swallows the next one's
+# content reads as a mistranslation.
 TARGET_SENTENCE_TOLERANCE_S = 3.0
 
 
-# Fragments that end in a period without ending a sentence. Kept short and
-# lowercase-matched: the cost of missing one is a paragraph cut slightly
-# early, which is what happened for all of them before, so this only has to
-# catch the common cases to be worth having.
+# Fragments that end in a period without ending a sentence. Matched
+# lowercase. Only the common cases: missing one just cuts a paragraph early.
 ABBREVIATIONS = (
     "т.д.", "т.п.", "т.е.", "др.", "г.", "гг.", "рис.", "см.",
     "e.g.", "i.e.", "etc.", "vs.", "mr.", "mrs.", "ms.", "dr.", "st.",
@@ -93,11 +77,8 @@ def _ends_sentence(text: str) -> bool:
 def _cut_target(fragments: list[TranscriptEvent], after: float) -> int:
     """How many target fragments belong to a paragraph ending at `after`.
 
-    Cuts at the first sentence end at or after that time, so the translation
-    keeps whole sentences while staying aligned with its source - but only
-    within TARGET_SENTENCE_TOLERANCE_S. Past that, alignment wins and the cut
-    lands mid-sentence, because a block that silently absorbs the next one's
-    content reads as a mistranslation.
+    Cuts at the first sentence end at or after that time, within
+    TARGET_SENTENCE_TOLERANCE_S; past that, mid-sentence.
     """
     fallback = None
     acc = ""
@@ -117,20 +98,12 @@ def _cut_target(fragments: list[TranscriptEvent], after: float) -> int:
 def _paragraphs(events: list[TranscriptEvent]) -> list[tuple[float, Direction, str, str]]:
     """Group fragments into paragraphs, cutting BOTH streams at the same point.
 
-    The source decides where a paragraph ends - it is the record of what was
-    actually said - and the target is cut at its first sentence end at or after
-    that time.
+    The source decides where a paragraph ends, since it records what was
+    said; the target is cut at its first sentence end after that. Cutting
+    the streams independently would print blocks covering different spans.
 
-    Cutting each stream independently is what produced mismatched blocks.
-    Measured on a real call, the source reached its first sentence end at
-    25.0 s and the target at 5.6 s, so a source paragraph covered 20 s while
-    the target paragraph printed beside it covered 33 s and ran on into the
-    next block's content - which reads as a mistranslation and is not one.
-
-    Exact pairing stays impossible: the model emits no turn boundary and the
-    streams drift. These are aligned TIME WINDOWS, not sentence pairs, and the
-    translation still trails its source by the model's own lag - measured at
-    roughly a quarter of a second.
+    These are aligned TIME WINDOWS, not sentence pairs: the model emits no
+    turn boundary and the streams drift.
     """
     out: list[tuple[float, Direction, str, str]] = []
     for direction in sorted({e.direction for e in events}, key=lambda d: d.value):
@@ -178,15 +151,9 @@ def _render(
 ) -> str:
     """One rendering, filtered to the streams asked for.
 
-    **The filter runs AFTER _paragraphs, never before**, and that is the whole
-    of it. _paragraphs cuts both streams at the same boundary and the SOURCE
-    decides where it falls; handed a target-only list it takes its `else`
-    branch, makes the boundary the last fragment of the call, and renders an
-    entire hour as one paragraph.
-
-    Grouping once is also what makes the split files worth having together:
-    the same blocks, at the same timestamps, in the same order, so
-    `.original.md` and `.translated.md` line up when read side by side.
+    **The filter runs AFTER _paragraphs, never before.** The source decides
+    the boundaries, so a target-only list would render as one paragraph.
+    Grouping once also keeps the split files' blocks aligned.
     """
     lines = [f"# {title} {session}", "", f"_engine: {ENGINE} ({MODEL})_", ""]
     for t, direction, kind, text in _paragraphs(events):
@@ -203,10 +170,7 @@ def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
     """Chronological, both directions and both streams interleaved.
 
     Fragments are joined into paragraphs because the model emits no turn
-    boundary - experiment 4 saw `finished=True` never fire across a whole run -
-    so transcription arrives a few words at a time. The JSONL keeps every
-    fragment exactly as it arrived; this is a presentation choice and belongs
-    here, where it loses nothing.
+    boundary. The JSONL keeps every fragment as it arrived.
     """
     return _render(session, events, title="Interpretation transcript")
 
@@ -214,8 +178,8 @@ def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
 def render_original(session: str, events: list[TranscriptEvent]) -> str:
     """What was actually said - both directions, so both languages.
 
-    The arrow marker is dropped: every block here is a source, so marking each
-    one says nothing and costs the alignment with the translated file.
+    No arrow marker, which would say nothing here and break the alignment
+    with the translated file.
     """
     return _render(
         session, events, title="Original transcript",
@@ -235,14 +199,13 @@ def render_translated(session: str, events: list[TranscriptEvent]) -> str:
 class EventTranscript:
     def __init__(self, outdir: Path, session: str | None = None):
         outdir.mkdir(parents=True, exist_ok=True)
-        # Sub-second resolution: whole seconds meant two runs started within
-        # the same second appended into one file.
+        # Sub-second resolution, so runs started in the same second do not
+        # share a file.
         self.session = session or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         self.jsonl_path = outdir / f"{self.session}.jsonl"
         self.md_path = outdir / f"{self.session}.md"
         # `.original.` / `.translated.` rather than a suffix swap, so all four
-        # of a run's files sort together under one stem. session_name() is
-        # "%Y%m%d-%H%M%S-%f" and carries no dots of its own.
+        # files sort together under one stem.
         self.original_path = outdir / f"{self.session}.original.md"
         self.translated_path = outdir / f"{self.session}.translated.md"
         self._lock = threading.Lock()
@@ -268,24 +231,16 @@ class EventTranscript:
     def write(self, event: TranscriptEvent) -> None:
         with self._lock:
             if self._closed:
-                # Session.shutdown() joins workers on a shared deadline and
-                # then restores the graph whether or not they stopped. A
-                # daemon thread writing here would raise ValueError and print
-                # a traceback over the TUI.
+                # A worker may outlive shutdown's join deadline; writing to
+                # the closed file would print a traceback over the TUI.
                 log.debug("transcript write after close, ignored: %r", event)
                 return
             self._events.append(event)
             self._write_line(event_to_dict(event))
 
     def _write_atomic(self, path: Path, text: str) -> None:
-        """Atomic, for the same reason Journal.save() is.
-
-        A bare write_text() can leave a truncated file if interrupted, and
-        this runs inside Session.shutdown(), which is exactly where a crash or
-        a second Ctrl-C lands. The .jsonl survives either way - it is flushed
-        per line - but nothing regenerates a .md from it, so a torn write
-        loses the readable half of the record outright.
-        """
+        """Atomic, because this runs during shutdown, where an interruption
+        is likely, and nothing regenerates a .md from the .jsonl."""
         tmp = path.with_name(path.name + ".tmp")
         try:
             tmp.write_text(text, encoding="utf-8")
@@ -300,8 +255,7 @@ class EventTranscript:
                 return self.md_path
             self._closed = True
             self._jsonl.close()
-            # Interleaved first: it is the primary record, so if the disk
-            # fills part-way through it is the one that survives.
+            # Interleaved first: it is the primary record.
             self._write_atomic(
                 self.md_path, render_markdown(self.session, self._events)
             )

@@ -1,8 +1,6 @@
-"""Turn `pw-dump` output into data.
+"""Turn `pw-dump` output into a PwGraph.
 
-Pure on purpose: this module takes a string and returns a PwGraph. Running
-pw-dump is adapters.py's job, which is what lets every test here work off a
-fixture with no PipeWire session.
+Pure: running pw-dump is adapters.py's job, so tests work off fixtures.
 """
 
 from __future__ import annotations

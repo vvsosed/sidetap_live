@@ -44,19 +44,13 @@ class Session:
         self._launcher = launcher
         self._linker = linker
         self._clock = clock
-        # The one port that reaches the network. Injected like every other,
-        # and built lazily in setup() rather than here so that constructing a
-        # Session in a test never needs an API key.
+        # The one port that reaches the network. Built lazily in setup(), so
+        # constructing a Session in a test needs no API key.
         self._sessions = sessions
-        # Injected like every other port, and built here so that a test never
-        # constructs one by accident: WpctlVolumeControl shells out to wpctl
-        # against the developer's own machine.
+        # Injectable, because WpctlVolumeControl shells out to the real wpctl.
         self._volume = volume or WpctlVolumeControl()
-        # Overridable for the same reason doctor.py's install_virtmic_config
-        # takes a path: Router's real default lives under the developer's own
-        # home directory, and every test that touches a Router - including
-        # this one - must not write there. Production leaves this at
-        # routing.JOURNAL_PATH so `doctor --repair` still knows where to look.
+        # Overridable so tests do not write to the real home directory.
+        # Production uses routing.JOURNAL_PATH, where `doctor --repair` looks.
         self._journal_path = journal_path if journal_path is not None else JOURNAL_PATH
         # Shared with the log file so a run's three artifacts sort together.
         self._session_name = session_name
@@ -78,19 +72,13 @@ class Session:
         # the same links down.
         self._lifecycle_lock = threading.RLock()
         self._bypassed = False
-        # Mute is tracked here, not read back off the OUT playout, because
-        # bypass suppresses that same playout. Derive the user's intent from
-        # the flag it was set on and there is no way to tell "muted" from
-        # "bypassed" when both end in suppressed=True - which is how leaving
-        # bypass used to silently unmute.
+        # Tracked here, not read off the OUT playout, because bypass
+        # suppresses the same playout and the two must not be confused.
         self._muted_out = False
         self._real_mic_links: list[tuple[int, int]] = []
-        # None until setup() gets far enough to create them. setup() can
-        # raise before any of these exist - the virtual-mic check runs
-        # BEFORE Router is even constructed, on purpose, so that a fatal
-        # check never has anything to undo - and shutdown() has to survive
-        # being called in that state rather than raising an AttributeError
-        # that would bury the original failure.
+        # None until setup() creates them. setup() can fail before any exist,
+        # and shutdown() must survive that rather than bury the original
+        # error under an AttributeError.
         self.router = None
         self.transcript = None
         self.capture = None
@@ -98,19 +86,13 @@ class Session:
     def setup(self) -> None:
         args = self._args
 
-        # BEFORE the router touches anything. This check is a pure snapshot
-        # read, and engage() is the first irreversible act of the session: it
-        # rewires the app into the duck and spawns a loopback. Checking after
-        # would mean the one machine this fires on - a first run, before
-        # `doctor --install` - gets its call audio rewired and then an
-        # exception, with setup() half-done and nobody left to restore it.
+        # BEFORE the router touches anything: engage() is the first
+        # irreversible act, and a fatal check should leave nothing to undo.
         snapshot = self._graph.snapshot()
         virtmic = snapshot.node_by_name(VIRTMIC_SINK)
         if virtmic is None:
-            # NOT a fallback. pw-cat with no --target autoconnects to the
-            # default sink, so the outbound translation would come out of the
-            # user's own speakers while the remote party heard silence - and
-            # nothing would say so. Fail here instead.
+            # No fallback: pw-cat with no --target plays to the default sink,
+            # so the remote party would silently hear nothing.
             raise CaptureError(
                 f"{VIRTMIC_SINK} does not exist, so the translation sent to "
                 "the other party has nowhere to go. Run: sidetap-live doctor "
@@ -118,11 +100,8 @@ class Session:
                 "pipewire-pulse"
             )
 
-        # Checked BEFORE the router is engaged, with the other cheap fatal
-        # checks. Reading an environment variable has no side effects, and
-        # failing after engage() means the graph is already rewired - the
-        # exact thing the virtual-mic check above is placed early to avoid.
-        # The value is never logged, echoed or stored beyond the client.
+        # Also checked before engage(). The value is never logged, echoed or
+        # stored beyond the client.
         api_key = None
         if self._sessions is None:
             import os
@@ -144,8 +123,7 @@ class Session:
         self.router.engage(app_pattern=args.app)
 
         self.transcript = EventTranscript(args.out, session=self._session_name)
-        # Built once and shared by both interpreters: one estimate for the
-        # whole call, not two independent ones.
+        # Shared by both interpreters: one estimate for the whole call.
         self.rates = Rates()
 
         if self._sessions is None:
@@ -153,36 +131,28 @@ class Session:
 
             self._sessions = build_factory(genai.Client(api_key=api_key))
 
-        # One detector per track. webrtcvad adapts to the noise floor across
-        # calls, and the two tracks have very different ones - a raw room
-        # microphone against audio already compressed and noise-suppressed by
-        # the far end - so sharing one would let each spoil the other.
+        # One detector per track: webrtcvad adapts to the noise floor, and a
+        # room microphone and processed call audio have very different ones.
         self.activity = {
             d: SpeechActivity(webrtc_detector(), self._clock) for d in Direction
         }
         self.overlap = OverlapWatch(self.activity, self._clock)
 
-        # Where each direction's audio is PLAYED. `snapshot` and `virtmic`
-        # both come from the ported pre-check above, which is unchanged.
-        # OUT must never fall back to None - pw-cat with no target
-        # autoconnects to the default sink, so the outbound translation would
-        # come out of your own speakers while the remote party heard silence,
-        # with nothing saying so.
+        # Where each direction's audio is PLAYED. OUT must never be None:
+        # pw-cat would play to your own speakers instead.
         default_sink = snapshot.node_by_name(snapshot.default_sink or "")
         sink_targets = {
             Direction.IN: default_sink.serial if default_sink else None,
             Direction.OUT: virtmic.serial,
         }
-        # Which language each direction translates INTO. Crossed on purpose:
-        # what reaches your ears is in your language, what reaches theirs is
-        # in theirs.
+        # Which language each direction translates INTO: what reaches your
+        # ears is in your language, what reaches theirs is in theirs.
         lang_targets = {
             Direction.IN: args.my_lang,
             Direction.OUT: args.their_lang,
         }
-        # One origin for both directions. Taken inside the loop, the two
-        # tracks would be stamped against origins milliseconds apart, and an
-        # interleaved transcript exists so the two streams line up.
+        # One time origin for both directions, so the interleaved transcript
+        # lines up.
         session_t0 = self._clock.monotonic()
 
         for direction in Direction:
@@ -190,9 +160,7 @@ class Session:
                 self._launcher, target=sink_targets[direction], rate=TTS_RATE
             )
             self.sinks[direction] = sink
-            # Only the IN direction ducks. OUT's audio goes to the virtual
-            # mic, where there is no original to duck - the remote party
-            # never hears your real voice at all.
+            # Only IN ducks: the virtual mic carries no original to duck.
             duck = (
                 DuckControl(
                     self._volume,
@@ -202,12 +170,8 @@ class Session:
                 if direction is Direction.IN
                 else None
             )
-            # args.lag_cap is None unless the user passed --lag-cap, so that
-            # "unset" stays distinguishable from "passed exactly 30". Resolve
-            # it HERE: Playout compares against it on every submit, and None
-            # raises TypeError on the first translated audio of the call -
-            # which no test in this task would catch, because none of them
-            # submit audio.
+            # args.lag_cap is None when --lag-cap is unset; Playout needs a
+            # number.
             lag_cap = args.lag_cap if args.lag_cap is not None else LAG_CAP_S
             playout = Playout(direction, sink, duck=duck, lag_cap_s=lag_cap)
             self.playouts[direction] = playout
@@ -216,10 +180,7 @@ class Session:
                 InterpreterConfig(
                     direction=direction,
                     target_lang=lang_targets[direction],
-                    # False on IN so that a remote party already speaking your
-                    # language produces no output, no audio flows, the duck
-                    # opens and you hear them raw. True on OUT because there
-                    # is no raw path there to fall through to.
+                    # See InterpreterConfig.echo.
                     echo=args.echo_out if direction is Direction.OUT else False,
                     idle_suspend=args.idle_suspend,
                 ),
@@ -238,9 +199,8 @@ class Session:
         self.capture = PipeWireCapture(
             CaptureConfig(
                 mic=args.mic,
-                # No --remote flag exists on this CLI: `--app` is required, so
-                # plan_recorders() always takes the app-tap branch for the
-                # REMOTE track and never reads this field.
+                # Unused: `--app` is required, so the REMOTE track always
+                # uses the app tap.
                 remote=None,
                 app=args.app,
                 latency=args.latency,
@@ -253,9 +213,7 @@ class Session:
 
     def start(self) -> None:
         self.capture.start()
-        # The routing watcher, for the same reason AppTap has one: a stream
-        # that restarts mid-call would otherwise be autoconnected straight to
-        # the speakers, unducked and unjournalled.
+        # A stream that restarts mid-call must be routed through the duck.
         self._spawn(self.router.run, (self.stop,), "routing-watch")
         self._spawn(self._poll_capture_health, (self.stop,), "capture-health")
 
@@ -274,19 +232,12 @@ class Session:
     def _on_direction_fatal(self, direction: Direction, exc: BaseException) -> None:
         """One direction died of a configuration error.
 
-        Mark it failed and keep the call up. The existing fail-safes cover
-        the user: a dead IN direction still leaves the remote party audible,
-        because the duck only closes while speech is being written; a dead OUT
-        direction trips DeadAirWatch/DEAD_AIR_S. So they are told loudly
-        rather than having the call dropped out from under them.
-
-        Only when BOTH directions are gone is there nothing left to do.
+        Mark it failed and keep the call up: a dead IN leaves the remote
+        party audible, because the duck only closes during speech, and a dead
+        OUT trips the dead-air alarm. Stop only when BOTH are gone.
         """
         self.metrics.set_health(direction, session=Health.FAILED)
-        # Stop that direction's pump here rather than relying on the caller to
-        # have done it: the `all(...)` check below is only meaningful if every
-        # path into this method sets the flag, and until now the only callers
-        # were tests that set it by hand.
+        # Set here, so the `all(...)` check below sees every dead direction.
         self.direction_stop[direction].set()
         log.error(
             "%s direction is dead: %s. The call continues one-way; Ctrl-C and "
@@ -302,16 +253,12 @@ class Session:
     def _poll_capture_health(self, stop: threading.Event) -> None:
         """Two capture failures, both invisible from anywhere else.
 
-        Drops: DroppingQueue only logs. meetscribe's known bug was exactly
-        that - a network outage overflowed this queue, the drops were logged,
-        and the output carried no marker, so a lost stretch read as nobody
-        talking.
+        Drops: DroppingQueue only logs, so a lost stretch would read as
+        nobody talking.
 
-        No audio at all: an unlinked PipeWire capture node delivers ZERO BYTES
-        rather than silence. There is no gate to gate on it, so the model
-        sits idle waiting, and every pane stays green while that direction is
-        deaf. The arrival counter failing to advance is the only evidence
-        anywhere in the process that this has happened.
+        No audio at all: an unlinked capture node delivers zero bytes rather
+        than silence, and every pane stays green. Only the arrival counter
+        failing to advance shows it.
         """
         seen = {d: (0, self._clock.monotonic()) for d in Direction}
         while not stop.is_set():
@@ -328,21 +275,16 @@ class Session:
                     self.metrics.set_no_audio(direction, False)
                 elif self._armed(direction) and now - since > NO_AUDIO_S:
                     self.metrics.set_no_audio(direction, True)
-            # Sampled here rather than per block because it is a property of
-            # the two tracks together, and neither direction's pump can see
-            # the other.
+            # Here, not per block: neither direction's pump sees both tracks.
             self.metrics.set_overlap_pct(self.overlap.sample())
             stop.wait(1.0)
 
     def _armed(self, direction: Direction) -> bool:
         """Should silence on this track count as a fault yet?
 
-        The microphone is always capturing, so OUT going quiet is always a
-        fault. IN only becomes meaningful once the router has actually rewired
-        a stream: before that the application simply is not playing anything,
-        which is the ordinary state of having started sidetap-live before the
-        call. Alarming on that would train the user to ignore the one warning
-        that matters.
+        The microphone always captures, so OUT going quiet is a fault. IN
+        counts only once a stream is routed; before that the app is simply
+        not playing yet.
         """
         return direction is Direction.OUT or self.router.has_routed
 
@@ -354,10 +296,9 @@ class Session:
     def set_bypass(self, value: bool) -> None:
         """Three things at once, or it does not work.
 
-        Un-duck, link the real microphone through, and suppress playout on both
-        directions. Without the third, translated speech talks over the
-        unmediated conversation bypass exists to step out of. The interpreters
-        keep running so the transcript stays continuous.
+        Un-duck, link the real microphone through, and suppress playout on
+        both directions so translated speech does not talk over the raw
+        conversation. The interpreters keep running for the transcript.
         """
         with self._lifecycle_lock:
             self._set_bypass_locked(value)
@@ -365,23 +306,15 @@ class Session:
     def _set_bypass_locked(self, value: bool) -> None:
         self._apply_suppression_locked(value)
         if value:
-            # Directly, not by setting a flag for tick() to notice. Bypass is
-            # what the user reaches for when the interpretation is making the
-            # call worse, and a playout thread whose sink has died never ticks
-            # again - which would leave the duck shut and turn the one escape
-            # hatch into permanent silence.
+            # Directly, not via tick(): a playout whose sink died may never
+            # tick again, and bypass must still open the duck.
             for playout in self.playouts.values():
                 if playout.duck is not None:
                     playout.duck.open()
         self.metrics.set_bypassed(value)
-        # Set BEFORE the linking, not after. _link_real_mic can raise partway
-        # through - pw-link vanishing from PATH, a snapshot failing - and a
-        # pair already linked then stays live while _bypassed reads False, so
-        # shutdown's "drop bypass first" step skips it and the user's raw
-        # microphone stays wired into the virtual mic forever. Nothing
-        # journals that link, so doctor --repair cannot find it either.
-        # Claiming bypass slightly too early only costs a cleanup pass that
-        # finds nothing; claiming it too late costs the leak.
+        # Set BEFORE linking: _link_real_mic can raise partway, and shutdown
+        # must still unlink what landed. Nothing journals these links. Too
+        # early costs an empty cleanup pass; too late leaks the raw mic.
         if value:
             self._bypassed = True
         try:
@@ -394,16 +327,12 @@ class Session:
         """Stop sending your translated voice, without leaving the call.
 
         The interpreters keep running; only the OUT playout is suppressed.
-        Pressed while bypassed this changes what you come back to, not what
-        bypass is doing right now - bypass already suppresses OUT, and
-        un-suppressing it there would put translated speech over the
-        unmediated conversation bypass exists to step out of.
+        Pressed while bypassed, this changes what you come back to, not what
+        bypass is doing now.
         """
         with self._lifecycle_lock:
-            # Flag and metric written together, before the part that acts on
-            # them, for the reason _set_bypass_locked writes its own metric
-            # early: the two must not be able to disagree about what the user
-            # asked for, or the lit key and the next keypress diverge.
+            # Flag and metric written together, so the lit key and the next
+            # keypress agree.
             self._muted_out = value
             self.metrics.set_muted_out(value)
             self._apply_suppression_locked(self._bypassed)
@@ -411,15 +340,11 @@ class Session:
     def _apply_suppression_locked(self, bypassed: bool) -> None:
         """OUT is suppressed if EITHER control says so; IN only by bypass.
 
-        Takes `bypassed` as an argument rather than reading self._bypassed,
-        because _set_bypass_locked deliberately writes that field AFTER this
-        runs (see its comment on the ordering) - reading it here would apply
-        the previous value on the way into bypass.
+        Takes `bypassed` as an argument because _set_bypass_locked updates
+        self._bypassed after calling this.
 
-        Guarded on an actual change because set_suppressed() flushes, and
-        flush() cuts the utterance in progress short. Re-asserting a state
-        that already holds - pressing `m` twice while bypassed, say - would
-        chop a sentence for no reason.
+        Acts only on a change, because set_suppressed() flushes and would cut
+        the utterance in progress short.
         """
         for direction, want in (
             (Direction.IN, bypassed),
@@ -432,13 +357,9 @@ class Session:
     def _link_real_mic(self, connected: bool) -> None:
         """Wire the user's real microphone straight into the virtual mic.
 
-        The unlink path replays what was actually linked rather than
-        recomputing it from a fresh snapshot. The default source can change
-        mid-call - plugging in a headset does it - and recomputing would then
-        unlink a pair that was never linked while leaving the real one in
-        place. That leak outlives the process, because the virtual mic is a
-        permanent node, and nothing records it in the journal, so
-        `doctor --repair` cannot find it either.
+        Unlinking replays what was actually linked rather than recomputing
+        it, because the default source can change mid-call. A leaked link
+        outlives the process, and the journal does not record it.
         """
         if not connected:
             for out_id, in_id in self._real_mic_links:
@@ -462,25 +383,15 @@ class Session:
         for index, out_port in enumerate(outputs):
             if not inputs:
                 break
-            # Same index-pairing limit as routing.engage(): correct for
-            # stereo and mono only. See that comment for why.
+            # Same index-pairing limit as routing: mono and stereo only.
             in_port = inputs[min(index, len(inputs) - 1)]
             pair = (out_port.id, in_port.id)
-            # Recorded BEFORE the attempt, and withdrawn only on a definite
-            # failure. _real_mic_links is what shutdown replays to tear these
-            # down, and the two mistakes it can make are not symmetric:
-            # unlinking something that was never linked is a no-op the adapter
-            # already classifies, while failing to unlink something live wires
-            # the user's raw microphone into the virtual mic for good. So if
-            # anything raises between the link landing and this being written
-            # down - a Ctrl-C is enough - the conservative record is the one
-            # that survives.
+            # Recorded BEFORE the attempt and withdrawn only on a definite
+            # failure: unlinking a pair never linked is harmless, but missing
+            # a live one leaves the raw mic wired in for good.
             self._real_mic_links.append(pair)
-            # The result is checked, exactly as routing._route_locked checks
-            # it. A discarded LinkResult matters more here than in the router:
-            # bypass has already suppressed both playouts, so a silently failed
-            # link means the remote party hears absolute silence while the
-            # interface reports bypass as fully engaged.
+            # Checked, because with playout suppressed a failed link means
+            # the remote party hears silence.
             if self._linker.link(*pair) is LinkResult.FAILED:
                 self._real_mic_links.remove(pair)
                 failed = True
@@ -494,21 +405,13 @@ class Session:
     def alarm_dead_air(self) -> None:
         """Straight to the sink, bypassing the queue.
 
-        An alarm that waited behind the backlog it is warning about would
-        arrive after the moment it mattered.
+        An alarm queued behind the backlog it warns about would arrive late.
         """
         self.sinks[Direction.IN].write(earcon())
 
     def _join_workers(self) -> None:
-        """ONE shared deadline, not one per thread.
-
-        There are six of these by the time everything is wired up (plus
-        whatever receive threads a session currently has open). A fresh
-        timeout each would let shutdown take that many times as long before
-        `router.restore()` runs - and restore is what gives the user their
-        call audio back. capture.py makes the same argument for its own three
-        threads; this is the same reasoning at a larger scale.
-        """
+        """ONE shared deadline, not one per thread, so `router.restore()`,
+        which gives the user their call audio back, is not delayed."""
         deadline = time.monotonic() + SHUTDOWN_JOIN_S
         for thread in self._threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -529,12 +432,9 @@ class Session:
             event.set()
         with self._lifecycle_lock:
             if self._bypassed or self._real_mic_links:
-                # Quitting while bypassed must not leave the real microphone
-                # wired into the virtual mic. It is not in the journal, the
-                # virtual mic outlives the process, and the next call would
-                # carry the user's raw voice alongside every translation.
-                # _real_mic_links is checked too, because a set_bypass that
-                # raised partway can leave live links behind either flag.
+                # Do not leave the real microphone wired into the virtual
+                # mic, which outlives the process. _real_mic_links is checked
+                # too, since a failed set_bypass can leave links behind.
                 try:
                     self._link_real_mic(False)
                 except Exception:
@@ -548,16 +448,11 @@ class Session:
                 self.capture.shutdown()
             self._join_workers()
         except Exception:
-            # Whatever went wrong, the graph still has to go back. A
-            # half-restored graph leaves the user with no call audio and
-            # nothing on screen explaining why.
+            # Whatever went wrong, the graph still has to go back.
             log.exception("error during shutdown; restoring the graph anyway")
         finally:
             if self.router is not None:
-                # None only when setup() failed before Router was even
-                # constructed - the virtual-mic check, deliberately the first
-                # thing setup() does, fails before anything is mutated, so
-                # there is nothing here to restore.
+                # None only if setup() failed before mutating anything.
                 try:
                     self.router.restore()
                     self.router_restored = True
@@ -566,22 +461,16 @@ class Session:
                         "could not restore the audio graph. Run: sidetap-live "
                         "doctor --repair"
                     )
-            # Directly, not via the playout threads' own finally: those
-            # threads only exist once start() has succeeded, so a setup() that
-            # failed after spawning a sink leaves pw-cat running. The launcher
-            # uses start_new_session=True, so an orphan survives this process
-            # entirely and accumulates on every failed launch.
+            # Directly, not via the playout threads: they exist only after
+            # start(), and an orphaned pw-cat survives this process.
             for sink in self.sinks.values():
                 try:
                     sink.close()
                 except Exception:
                     log.debug("could not close a playback sink", exc_info=True)
             if self.transcript is not None:
-                # Wrapped like every other step above it. The router has
-                # already been restored by this point, so an exception here -
-                # a full disk, a removed path - used to propagate out of
-                # shutdown() and out of run_session()'s finally, past the
-                # "Saved:" summary, making a clean exit look like a crash.
+                # Wrapped so a full disk does not make a clean exit look like
+                # a crash.
                 try:
                     self.transcript.close()
                 except Exception:
@@ -597,31 +486,20 @@ def run_session(args, *, graph, launcher, linker, clock, sessions=None,
     def handle_signal(*_):
         session_obj.stop.set()
 
-    # Installed BEFORE setup(), because setup() is where the graph is mutated
-    # and it is not instant. A Ctrl-C in that window would otherwise raise
-    # straight out of run_session with the app already rewired into the duck.
+    # Installed BEFORE setup(), which mutates the graph and takes time.
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     try:
         session_obj.setup()
     except BaseException:
-        # setup() is not atomic - engage() lands well before the last sink is
-        # spawned. Anything failing after it (a dead pw-cat, KeyboardInterrupt,
-        # a missing API key) would otherwise leave the user's call audio
-        # routed into a duck node with the process gone. repair() on the next
-        # run fixes it, but "sidetap-live broke my audio and exited" is not a
-        # first-run experience worth shipping.
+        # setup() is not atomic: a failure after engage() would leave the
+        # call routed into the duck with the process gone.
         session_obj.shutdown()
         raise
 
-    # start() is inside the SAME guard as setup(), not after it. It runs
-    # strictly after engage() has already rewired the graph, and it does real
-    # fallible work before any thread exists: capture.start() can time out
-    # waiting for a capture node. Every one of those used to raise straight
-    # out of run_session with the call routed into the duck and no process
-    # left to undo it - the same failure setup()'s own guard exists to
-    # prevent, stopping one call too early.
+    # start() is guarded too: it runs after engage() and can fail, e.g.
+    # capture.start() timing out waiting for a capture node.
     try:
         session_obj.start()
 
@@ -665,12 +543,7 @@ def _run_headless(session: Session) -> None:
         elif not out.dead_air:
             alarmed = False
 
-        # The TUI has shown this as NO AUDIO ARRIVING from the start; headless
-        # only ever looked at OUT's dead_air. An unlinked capture node
-        # delivers zero bytes rather than silence, so with no gate in the path
-        # we simply stop sending - which looks healthy at every stage
-        # downstream. This watchdog is the only thing that sees it, and under
-        # --no-tui nothing was reporting it at all.
+        # The headless counterpart of the TUI's NO AUDIO ARRIVING.
         for direction, state in snapshot.directions.items():
             if state.no_audio and not deaf[direction]:
                 log.error(

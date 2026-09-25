@@ -1,8 +1,7 @@
 """Live pipeline state, written by worker threads and read by the UI.
 
-The dependency runs one way only: pipeline threads write here, the TUI polls
-snapshot(). Nothing in the pipeline imports the UI, which is what lets
---no-tui and the headless test suite be the same code path.
+The dependency runs one way: pipeline threads write here and the TUI polls
+snapshot(), so --no-tui and the headless tests share one code path.
 """
 
 from __future__ import annotations
@@ -14,13 +13,9 @@ from enum import Enum
 
 from .types import Direction, SessionState
 
-# Characters of live transcription kept per stream for the dashboard.
-#
-# The model emits no turn boundary - experiment 4 saw `finished=True` never
-# fire across a whole run - so text arrives as fragments of a few words, about
-# twice a second. Replacing on each one leaves the pane showing two words;
-# accumulating without a bound leaves it showing an hour. A rolling tail is
-# what a live display actually wants, and the transcript keeps the full record.
+# Characters of live transcription kept per stream for the dashboard. The
+# model emits no turn boundary, only fragments of a few words, so the pane
+# shows a rolling tail; the transcript keeps the full record.
 LIVE_TEXT_CHARS = 240
 
 
@@ -37,15 +32,12 @@ class DirectionState:
     source: str = ""
     target: str = ""
 
-    # The headline number. Translated audio queued but not yet played.
-    # Whether this stays bounded under continuous speech is the result this
-    # project exists to measure.
+    # The headline number: translated audio queued but not yet played.
     backlog_s: float = 0.0
     # Speech onset to the first output chunk of that stretch.
     offset_s: float = 0.0
 
-    # Seconds of translated audio the lag cap threw away, not a count of
-    # utterances: there are no utterances here to count.
+    # Seconds of translated audio the lag cap threw away.
     dropped_s: float = 0.0
     capture_dropped: int = 0
     dead_air: bool = False
@@ -64,14 +56,12 @@ class Snapshot:
     directions: dict[Direction, DirectionState]
     cost_usd: float = 0.0
     bypassed: bool = False
-    # Mute is a separate control from bypass even though both suppress the
-    # OUT playout. The TUI needs to know which the user asked for: pressed
-    # while bypassed, mute changes what you come back to, not what bypass is
-    # doing now. Reading playout.suppressed instead would conflate them.
+    # Separate from bypass, though both suppress OUT playout: mute pressed
+    # while bypassed changes what you come back to, so the TUI must know which
+    # the user asked for.
     muted_out: bool = False
-    # Session-wide, not per-direction: it is a property of the two tracks
-    # together. Fraction of wall clock where BOTH carry speech at once -
-    # the most direct measure of whether the humans stopped taking turns.
+    # Session-wide: percentage of wall clock where BOTH tracks carry speech.
+    # None when it cannot be measured.
     overlap_pct: float | None = 0.0
 
 
@@ -88,13 +78,8 @@ class Metrics:
                     target: str | None = None) -> None:
         """Add a transcription fragment, keeping a rolling tail.
 
-        APPEND, not set. The model sends no turn boundary, so each event is a
-        few words; setting would leave the dashboard showing the last two. The
-        tail is bounded because this is a live pane, not a log - the full text
-        is in the transcript.
-
-        Fragments arrive carrying their own leading space (" жили",
-        " всегда там"), so they join with no separator.
+        Append, not set: each event is only a few words. Fragments carry
+        their own leading space, so they join with no separator.
         """
         with self._lock:
             state = self._states[direction]
@@ -110,11 +95,8 @@ class Metrics:
     def set_dropped_s(self, direction: Direction, seconds: float) -> None:
         """Seconds of translated audio the lag cap threw away, cumulative.
 
-        Distinct from `capture_dropped`, which counts blocks the CAPTURE queue
-        discarded. The two overflow for unrelated reasons - this one when the
-        model generates faster than realtime for long enough, that one when
-        nothing is draining the queue - and a user who cannot tell them apart
-        cannot act on either.
+        Distinct from `capture_dropped`: this overflows when the model
+        outpaces realtime, that one when nothing drains the capture queue.
         """
         with self._lock:
             self._states[direction].dropped_s = seconds
@@ -131,10 +113,8 @@ class Metrics:
                      replayed_s: float) -> None:
         """One session handed over to its replacement.
 
-        `forced` means no pause arrived before GoAway's time_left ran out, so
-        the seam landed mid-speech and `replayed_s` of pre-roll was pushed
-        into the new session. The clean/forced split is what says whether the
-        pause assumption in the spec survived contact.
+        `forced` means the switch did not wait for a gap in the outgoing
+        output. `replayed_s` is pre-roll pushed into the new session.
         """
         with self._lock:
             state = self._states[direction]
@@ -150,11 +130,9 @@ class Metrics:
     def set_no_audio(self, direction: Direction, value: bool) -> None:
         """No audio at all is reaching this direction's capture queue.
 
-        Separate from dead_air, which means an utterance finished and nothing
-        came out the other end. This one is upstream of everything: the track
-        itself has gone silent, and because an unlinked PipeWire capture
-        delivers zero bytes rather than silence, every stage downstream looks
-        healthy while doing nothing.
+        Separate from dead_air (speech in, nothing out). An unlinked capture
+        node delivers zero bytes, not silence, so every stage downstream
+        looks healthy.
         """
         with self._lock:
             self._states[direction].no_audio = value
@@ -162,12 +140,8 @@ class Metrics:
     def set_capture_dropped(self, direction: Direction, count: int) -> None:
         """Blocks the CAPTURE queue discarded, as an absolute count.
 
-        Distinct from `dropped_s`, which counts seconds of translated audio
-        the lag cap discarded on the playout side. These two queues overflow
-        for unrelated reasons - this one fills when a network outage stops
-        the recogniser draining it - and meetscribe's documented bug was
-        exactly this one going unreported, so a lost stretch read as nobody
-        talking.
+        Distinct from `dropped_s` (playout side). Reported so that lost
+        capture does not read as nobody talking.
         """
         with self._lock:
             self._states[direction].capture_dropped = count

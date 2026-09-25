@@ -20,11 +20,9 @@ PW_RECORD = "pw-record"
 def format_properties(props: dict[str, str]) -> str:
     """Render the --properties argument.
 
-    PipeWire parses this as JSON-ish. Every value must stay quoted: an
-    unquoted space inside a value splits the property and it is dropped
-    without any error message. Callers must also ensure no key or value
-    contains a double quote - nothing here escapes them, and the result
-    would be malformed in the same silent way.
+    Every value stays quoted: an unquoted space splits the property and
+    PipeWire drops it silently. Nothing escapes double quotes, so callers
+    must not pass keys or values containing one.
     """
     body = " ".join(f'{key}="{value}"' for key, value in props.items())
     return "{ " + body + " }"
@@ -68,8 +66,8 @@ def build_argv(
 def read_blocks(stream: BinaryIO, block_bytes: int = BLOCK_BYTES) -> Iterator[bytes]:
     """Yield fixed-size blocks, reassembling short reads.
 
-    A partial block at end of stream is dropped: consumers are entitled to
-    assume every chunk is exactly one block.
+    A partial block at end of stream is dropped, so every chunk is exactly
+    one block.
     """
     while True:
         buf = stream.read(block_bytes)

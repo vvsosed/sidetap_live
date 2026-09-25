@@ -1,13 +1,10 @@
 """A running spend estimate, computed from audio we actually moved.
 
-sidetap infers spend from character counts against prices that render
-dynamically on Google's pages. Here the quantity is exact - this process sends
-and receives every byte it is billed for - so only the RATE can drift. Still an
-estimate to catch a runaway session rather than an invoice, but a much
-narrower one.
+The quantity is exact, since this process moves every billed byte; only the
+rate can drift. Meant to catch a runaway session, not to be an invoice.
 
-Rates as of docs/experiments, for gemini-3.5-live-translate-preview:
-audio in $3.50/M tokens, audio out $21.00/M tokens, 25 tokens per second.
+Rates for gemini-3.5-live-translate-preview: audio in $3.50/M tokens, audio
+out $21.00/M tokens, 25 tokens per second.
 """
 
 from __future__ import annotations
