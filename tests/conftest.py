@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import queue
 import threading
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from sidetap_live.graph import PwGraph, parse_graph
+from sidetap_live.graph import PLAYBACK_STREAM, SINK, PwGraph, PwLink, parse_graph
 from sidetap_live.ports import LinkResult, LoopbackSpec
 from sidetap_live.types import TARGET_RATE
 
@@ -19,6 +20,72 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def load_graph(name: str) -> PwGraph:
     return parse_graph((FIXTURES / name).read_text())
+
+
+def playing_on(graph: PwGraph, sink_name: str | None, app: str = "zoom") -> PwGraph:
+    """The same graph with the app's stream linked to another sink, or none.
+
+    Channels pair by index, as WirePlumber links them. The stream's links to
+    anything that is not a sink are kept.
+    """
+    stream = graph.find(app, PLAYBACK_STREAM)
+    by_id = {n.id: n for n in graph.nodes}
+    kept = tuple(
+        link
+        for link in graph.links
+        if link.output_node_id != stream.id
+        or getattr(by_id.get(link.input_node_id), "media_class", None) != SINK
+    )
+    if sink_name is None:
+        return dataclasses.replace(graph, links=kept)
+    sink = graph.node_by_name(sink_name)
+    inputs = graph.ports_of(sink.id, "in")
+    next_id = max((link.id for link in graph.links), default=900) + 1
+    added = tuple(
+        PwLink(next_id + i, stream.id, out.id, sink.id, inputs[min(i, len(inputs) - 1)].id)
+        for i, out in enumerate(graph.ports_of(stream.id, "out"))
+    )
+    return dataclasses.replace(graph, links=kept + added)
+
+
+class LiveLinks:
+    """GraphSource, Linker and Unlinker over ONE set of links.
+
+    pw-dump and pw-link talk to the same daemon, so a link made or removed is
+    in the next snapshot. Unlinking an absent link fails, as `pw-link -d` does
+    ("No such file or directory"); linking a present one is ALREADY_LINKED.
+    """
+
+    def __init__(self, graph: PwGraph, fail_links: int = 0):
+        self._graph = graph
+        self.pairs: set[tuple[int, int]] = {
+            (link.output_port_id, link.input_port_id) for link in graph.links
+        }
+        # The next this many link() calls fail, as a pw-link timeout would.
+        self.fail_links = fail_links
+
+    def snapshot(self) -> PwGraph:
+        node_of = {p.id: p.node_id for p in self._graph.ports}
+        links = tuple(
+            PwLink(9000 + i, node_of[src], src, node_of[dst], dst)
+            for i, (src, dst) in enumerate(sorted(self.pairs))
+        )
+        return dataclasses.replace(self._graph, links=links)
+
+    def link(self, src_port: int, dst_port: int) -> LinkResult:
+        if self.fail_links:
+            self.fail_links -= 1
+            return LinkResult.FAILED
+        if (src_port, dst_port) in self.pairs:
+            return LinkResult.ALREADY_LINKED
+        self.pairs.add((src_port, dst_port))
+        return LinkResult.LINKED
+
+    def unlink(self, src_port: int, dst_port: int) -> LinkResult:
+        if (src_port, dst_port) not in self.pairs:
+            return LinkResult.FAILED
+        self.pairs.discard((src_port, dst_port))
+        return LinkResult.LINKED
 
 
 class ChunkedBytesIO(io.BytesIO):

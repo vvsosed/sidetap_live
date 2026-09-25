@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from sidetap_live.graph import PLAYBACK_STREAM, SINK, SOURCE, parse_graph
+from sidetap_live.graph import PLAYBACK_STREAM, SINK, SOURCE, PwGraph, parse_graph
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -124,6 +124,33 @@ def test_parses_a_real_pw_dump():
     # The reason --app works at all: an application's audio stream is a node
     # with this media.class, and it only exists while the app is playing.
     assert graph.by_class(PLAYBACK_STREAM), "expected an application stream"
+
+
+def test_parses_links_from_a_real_pw_dump():
+    """The endpoints are top-level fields of a Link's info, not props.
+
+    Real, not hand-written, for the reason above: routing moves exactly the
+    links this returns, and restore() recreates them.
+    """
+    graph = parse_graph((FIXTURES / "pw_dump_real.json").read_text())
+    firefox = graph.find("firefox", PLAYBACK_STREAM)
+    sink = graph.node_by_name(graph.default_sink)
+    ports = {p.id: p.name for p in graph.ports}
+
+    links = graph.links_from(firefox.id)
+
+    assert {link.id for link in graph.links} == {88, 93}
+    assert all(link.input_node_id == sink.id for link in links)
+    assert sorted((ports[link.output_port_id], ports[link.input_port_id]) for link in links) == [
+        ("output_FL", "playback_FL"),
+        ("output_FR", "playback_FR"),
+    ]
+
+
+def test_links_default_to_empty():
+    """A PwGraph built without links, as most tests build one, has none."""
+    assert parse_graph("[]").links == ()
+    assert PwGraph().links == ()
 
 
 def test_the_real_fixture_carries_no_identifying_data():

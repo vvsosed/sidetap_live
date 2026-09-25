@@ -6,6 +6,7 @@ import threading
 
 import pytest
 
+from sidetap_live.graph import PLAYBACK_STREAM, PwLink, PwNode, PwPort
 from sidetap_live.ports import LinkResult
 from sidetap_live.routing import (
     DUCK_NODE,
@@ -17,11 +18,20 @@ from sidetap_live.routing import (
     Journal,
     LinkRef,
     Router,
+    call_sink,
     duck_loopback_spec,
     resolve,
+    sink_links,
 )
 from sidetap_live.tap import GRAPH_ERROR_WARN_AFTER
-from tests.conftest import FakeGraphSource, FakeLinker, FakeLoopbackFactory
+from tests.conftest import (
+    FakeGraphSource,
+    FakeLinker,
+    FakeLoopbackFactory,
+    LiveLinks,
+    load_graph,
+    playing_on,
+)
 
 
 def test_the_duck_loopback_presents_a_sink_we_can_route_into():
@@ -407,7 +417,7 @@ def test_ports_are_ordered_by_name_so_index_pairing_is_stable(routing_graph):
 
 
 def test_engage_leaves_sidetaps_own_sinks_alone(tmp_path, routing_graph):
-    """Only the default sink is unlinked, never every sink in the graph."""
+    """Only the links the call actually has are unlinked, never every sink."""
     linker = FakeLinker()
     router = Router(
         graph=FakeGraphSource(routing_graph),
@@ -910,3 +920,279 @@ def test_the_journal_is_flushed_to_disk_before_the_rename(tmp_path, monkeypatch)
         f"saw {len(synced)}"
     )
     assert Journal.load(path).broken[0].src_port == "a"
+
+
+# --- Routing moves the links that exist, on the device the call uses -----
+
+HEADSET = "alsa_output.usb-headset"
+
+
+def test_restore_recreates_the_links_that_existed_and_no_others(tmp_path, routing_graph):
+    """Zoom on a USB headset while the system default is the speakers.
+
+    Routing assumed every stream played to the default sink, so it journalled
+    zoom->speakers links that never existed and restore() created them: after
+    the program quit, the call played from the headset AND the speakers.
+    """
+    live = LiveLinks(playing_on(routing_graph, HEADSET))
+    before = set(live.pairs)
+    router = Router(
+        graph=live,
+        linker=live,
+        unlinker=live,
+        loopbacks=FakeLoopbackFactory(),
+        journal_path=tmp_path / "j.json",
+    )
+    router.engage(app_pattern="zoom")
+    router.restore()
+
+    assert live.pairs == before, (
+        f"restore() created {sorted(live.pairs - before)} and lost "
+        f"{sorted(before - live.pairs)}"
+    )
+
+
+def _zoom_out_ports(graph):
+    stream = graph.find("zoom", PLAYBACK_STREAM)
+    return {p.id for p in graph.ports_of(stream.id, "out")}
+
+
+def _in_ports(graph, name):
+    return {p.id for p in graph.ports_of(graph.node_by_name(name).id, "in")}
+
+
+def _live_router(tmp_path, live, loopbacks=None):
+    return Router(
+        graph=live,
+        linker=live,
+        unlinker=live,
+        loopbacks=loopbacks or FakeLoopbackFactory(),
+        journal_path=tmp_path / "j.json",
+    )
+
+
+@pytest.mark.parametrize("sink_name", ["alsa_output.default", HEADSET])
+def test_the_call_moves_into_the_duck_and_back_exactly(
+    tmp_path, routing_graph, sink_name, caplog
+):
+    """The default sink and any other device take the same path."""
+    live = LiveLinks(playing_on(routing_graph, sink_name))
+    before = set(live.pairs)
+    zoom = _zoom_out_ports(routing_graph)
+    router = _live_router(tmp_path, live)
+
+    with caplog.at_level(logging.WARNING, logger="sidetap_live.routing"):
+        router.engage(app_pattern="zoom")
+
+    assert router.has_routed
+    targets = {dst for src, dst in live.pairs if src in zoom}
+    assert targets == _in_ports(routing_graph, DUCK_NODE), (
+        "zoom should play only into the duck while engaged"
+    )
+    # An unlink of a link that does not exist fails, and was retried and
+    # warned about every poll for the rest of the call.
+    assert not caplog.records, [r.getMessage() for r in caplog.records]
+
+    router.restore()
+    assert live.pairs == before
+
+
+def test_the_duck_plays_on_the_device_the_call_plays_on(tmp_path, routing_graph):
+    """Otherwise the original AND the translation play on the speakers,
+    which leak into the microphone, while the headset keeps the original."""
+    loopbacks = FakeLoopbackFactory()
+    router = _live_router(tmp_path, LiveLinks(playing_on(routing_graph, HEADSET)), loopbacks)
+
+    router.engage(app_pattern="zoom")
+
+    assert dict(loopbacks.specs[0].playback_props)["target.object"] == HEADSET
+    assert router.target_sink.serial == routing_graph.node_by_name(HEADSET).serial
+
+
+def test_the_duck_plays_on_the_default_sink_before_the_call_plays(tmp_path, routing_graph):
+    loopbacks = FakeLoopbackFactory()
+    router = _live_router(tmp_path, LiveLinks(playing_on(routing_graph, None)), loopbacks)
+
+    router.engage(app_pattern="zoom")
+
+    assert dict(loopbacks.specs[0].playback_props)["target.object"] == "alsa_output.default"
+    assert router.target_sink.name == routing_graph.default_sink
+
+
+def test_a_stream_on_another_device_than_the_duck_is_left_untouched(
+    tmp_path, routing_graph, caplog
+):
+    """Moving it would take the call off the device the user listens on.
+
+    The duck was set up on the speakers before the call started; Zoom then
+    plays to the headset. Left alone, the original stays audible there, which
+    is the safe failure; one ERROR says how to fix it, and fixing it mid-call
+    gets the stream routed with no restart.
+    """
+    path = tmp_path / "j.json"
+    on_headset = playing_on(routing_graph, HEADSET)
+    linker = FakeLinker()
+    router = Router(
+        graph=FakeGraphSource(
+            playing_on(routing_graph, None),  # engage(): nothing playing yet
+            on_headset,
+            on_headset,
+            routing_graph,  # the user moved Zoom to the speakers
+        ),
+        linker=linker,
+        unlinker=linker,
+        loopbacks=FakeLoopbackFactory(),
+        journal_path=path,
+    )
+    router.engage(app_pattern="zoom")
+
+    with caplog.at_level(logging.ERROR, logger="sidetap_live.routing"):
+        assert router.poll_once() == 0
+        assert router.poll_once() == 0
+
+    assert linker.links == [] and linker.unlinks == [], "a mismatched stream was touched"
+    assert Journal.load(path).is_empty(), "a mismatched stream was journalled"
+    assert router.has_routed is False
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, f"expected one ERROR, not one per poll: {errors}"
+    assert "USB Headset" in errors[0] and "Speakers" in errors[0]
+
+    assert router.poll_once() == 1, "a stream moved to the duck's device was not routed"
+
+
+def test_a_stream_not_yet_linked_to_any_device_is_not_routed(tmp_path, routing_graph):
+    """Nothing to journal means nothing to restore, and linking it into the
+    duck would leave it in the duck AND wherever WirePlumber links it next."""
+    linker = FakeLinker()
+    router = Router(
+        graph=FakeGraphSource(playing_on(routing_graph, None), routing_graph),
+        linker=linker,
+        unlinker=linker,
+        loopbacks=FakeLoopbackFactory(),
+        journal_path=tmp_path / "j.json",
+    )
+    router.engage(app_pattern="zoom")
+
+    assert linker.links == [] and linker.unlinks == []
+    assert router.has_routed is False
+
+    assert router.poll_once() == 1, "the stream was not routed once it was linked"
+
+
+def test_a_stream_without_ports_is_not_marked_routed_with_another(tmp_path, routing_graph):
+    """A second Zoom stream announced before its ports, in the same poll that
+    routes the first, must still be routed once its ports appear."""
+    second = PwNode(
+        id=90,
+        serial=1500,
+        name="ZOOM VoiceEngine",
+        description="ZOOM VoiceEngine",
+        media_class=PLAYBACK_STREAM,
+        app_name="zoom",
+        app_binary="zoom",
+    )
+    announced = dataclasses.replace(routing_graph, nodes=routing_graph.nodes + (second,))
+    with_ports = dataclasses.replace(
+        announced,
+        ports=announced.ports
+        + (PwPort(901, 90, "output_FL", "out"), PwPort(902, 90, "output_FR", "out")),
+        links=announced.links
+        + (PwLink(951, 90, 901, 40, 401), PwLink(952, 90, 902, 40, 402)),
+    )
+    linker = FakeLinker()
+    router = Router(
+        graph=FakeGraphSource(announced, with_ports),
+        linker=linker,
+        unlinker=linker,
+        loopbacks=FakeLoopbackFactory(),
+        journal_path=tmp_path / "j.json",
+    )
+    router.engage(app_pattern="zoom")
+
+    assert router.poll_once() == 1
+    assert {901, 902} <= {src for src, _ in linker.links}
+
+
+def test_the_tap_into_our_capture_node_is_never_moved(tmp_path, routing_graph):
+    """The tap is how IN hears the call. It is a link from the same stream,
+    but into a capture stream, not a device."""
+    capture = PwNode(
+        id=96,
+        serial=1600,
+        name="sidetap_live.remote.abcd1234",
+        description="",
+        media_class="Stream/Input/Audio",
+    )
+    tapped = dataclasses.replace(
+        routing_graph,
+        nodes=routing_graph.nodes + (capture,),
+        ports=routing_graph.ports + (PwPort(961, 96, "input_MONO", "in"),),
+        links=routing_graph.links
+        + (PwLink(971, 55, 551, 96, 961), PwLink(972, 55, 552, 96, 961)),
+    )
+    live = LiveLinks(tapped)
+    before = set(live.pairs)
+    router = _live_router(tmp_path, live)
+
+    router.engage(app_pattern="zoom")
+
+    assert router.has_routed
+    assert {(551, 961), (552, 961)} <= live.pairs, "the tap was unlinked"
+    journal = Journal.load(tmp_path / "j.json")
+    assert all(r.dst_serial != 1600 for r in journal.broken + journal.made)
+    router.restore()
+    assert live.pairs == before
+
+
+def test_a_stream_unlinked_but_not_yet_in_the_duck_is_retried(tmp_path, routing_graph):
+    """After the unlink lands and the link into the duck fails, the stream
+    shows no device link at all. That must still read as ours to finish, not
+    as a stream WirePlumber has yet to link, or the call stays silent."""
+    live = LiveLinks(routing_graph, fail_links=2)
+    before = set(live.pairs)
+    zoom = _zoom_out_ports(routing_graph)
+    router = _live_router(tmp_path, live)
+
+    router.engage(app_pattern="zoom")
+    assert not {dst for src, dst in live.pairs if src in zoom}, "zoom should be unlinked"
+    assert router.has_routed is False
+
+    assert router.poll_once() == 1
+    assert {dst for src, dst in live.pairs if src in zoom} == _in_ports(
+        routing_graph, DUCK_NODE
+    )
+
+    router.restore()
+    assert live.pairs == before
+
+
+def test_the_virtual_mic_is_never_taken_for_the_calls_device(tmp_path, routing_graph):
+    """A messenger whose speaker is set to the virtual mic's sink.
+
+    Following it there would send the IN translation, and the ducked original,
+    to the remote party while the user hears nothing.
+    """
+    loopbacks = FakeLoopbackFactory()
+    live = LiveLinks(playing_on(routing_graph, VIRTMIC_SINK))
+    before = set(live.pairs)
+    router = _live_router(tmp_path, live, loopbacks)
+
+    router.engage(app_pattern="zoom")
+
+    assert router.target_sink.name == routing_graph.default_sink
+    assert dict(loopbacks.specs[0].playback_props)["target.object"] != VIRTMIC_SINK
+    assert live.pairs == before, "a stream playing into the virtual mic was moved"
+
+
+def test_sink_links_reads_a_real_pw_dump():
+    """Hand-written fixtures share routing's assumptions; a real dump does not."""
+    graph = load_graph("pw_dump_real.json")
+    firefox = graph.find("firefox", PLAYBACK_STREAM)
+
+    links = sink_links(graph, firefox)
+
+    assert [(o.name, i.name, s.name) for o, i, s in links] == [
+        ("output_FL", "playback_FL", graph.default_sink),
+        ("output_FR", "playback_FR", graph.default_sink),
+    ]
+    assert call_sink(graph, "firefox").name == graph.default_sink

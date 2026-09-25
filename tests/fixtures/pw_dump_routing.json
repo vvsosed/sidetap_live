@@ -7,6 +7,14 @@
   {"id": 402, "type": "PipeWire:Interface:Port",
    "info": {"props": {"node.id": 40, "port.name": "playback_FR", "port.direction": "in"}}},
 
+  {"id": 45, "type": "PipeWire:Interface:Node",
+   "info": {"props": {"media.class": "Audio/Sink", "object.serial": 1005,
+     "node.name": "alsa_output.usb-headset", "node.description": "USB Headset"}}},
+  {"id": 451, "type": "PipeWire:Interface:Port",
+   "info": {"props": {"node.id": 45, "port.name": "playback_FL", "port.direction": "in"}}},
+  {"id": 452, "type": "PipeWire:Interface:Port",
+   "info": {"props": {"node.id": 45, "port.name": "playback_FR", "port.direction": "in"}}},
+
   {"id": 42, "type": "PipeWire:Interface:Node",
    "info": {"props": {"media.class": "Audio/Source", "object.serial": 1002,
      "node.name": "alsa_input.default", "node.description": "USB Microphone"}}},
@@ -22,6 +30,12 @@
    "info": {"props": {"node.id": 55, "port.name": "output_FL", "port.direction": "out"}}},
   {"id": 552, "type": "PipeWire:Interface:Port",
    "info": {"props": {"node.id": 55, "port.name": "output_FR", "port.direction": "out"}}},
+  {"id": 91, "type": "PipeWire:Interface:Link",
+   "info": {"output-node-id": 55, "output-port-id": 551,
+     "input-node-id": 40, "input-port-id": 401, "state": "active"}},
+  {"id": 92, "type": "PipeWire:Interface:Link",
+   "info": {"output-node-id": 55, "output-port-id": 552,
+     "input-node-id": 40, "input-port-id": 402, "state": "active"}},
 
   {"id": 70, "type": "PipeWire:Interface:Node",
    "info": {"props": {"media.class": "Audio/Sink", "object.serial": 1300,

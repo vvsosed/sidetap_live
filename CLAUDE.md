@@ -126,6 +126,13 @@ Both directions are the same `DirectionInterpreter`, instantiated twice.
        (your real mic is never linked here, except while bypassed)
 ```
 
+**IN lands on the device the call already plays on**, not on the system
+default: "headphones" above is `Router.target_sink`, which `engage()` reads
+off the messenger's existing link (the default sink only if nothing plays
+yet). The messenger's links to it are moved into the duck, the duck plays back
+into it, and the IN translation plays there too. See *Move only the links that
+exist* below.
+
 **The echo asymmetry is a consequence of the duck policy, not a preference.**
 On IN, `echo=False` means a remote party already speaking your language
 produces no output, so the duck opens and you hear them raw — the degenerate
@@ -319,13 +326,33 @@ preference and these are not.
   `kill -9`, because the page cache outlives the process — the temp file is
   fsynced before the rename and the directory after, so a power loss cannot
   hand back a reverted journal describing a graph that has already changed.
+- **Move only the links that exist, and only on the duck's device.**
+  `_route_locked` journals and unlinks exactly the links `pw-dump` shows from
+  a matching stream to an `Audio/Sink` other than the duck or
+  `sidetap_tts_sink` (`sink_links()`), never links inferred from the default
+  sink, because `restore()` recreates whatever was journalled. Assuming the
+  default sink broke a call on a USB headset while the default was the
+  speakers: the original stayed unducked in the headset, the duck played a
+  second copy and the translation on the speakers (into the mic), and after
+  exit the call played from both. So: links to anything nobody listens to —
+  the tap into `sidetap_live.remote.<uuid>`, the duck, the virtual mic's sink
+  — are never moved. A stream with no ports or no sink link yet is skipped
+  and **not** marked routed, so the next poll retries it; once its move has
+  begun (`_claimed`), no sink link means we removed it, so a failed link into
+  the duck is still retried. A stream on a different sink than
+  `Router.target_sink` is left completely untouched, with one ERROR per
+  stream and device: moving it would take the call off the device the user
+  is listening on, and an unducked original is the safe failure. `engage()`
+  picks `target_sink` as the sink a matching stream already plays on (the
+  default only when nothing plays yet), and `Session.setup()` points the IN
+  `PwCatSink` at the same node.
 - **Defer routing until the duck has ports, not merely a node.** PipeWire
   announces a Node before its Ports finish registering, and `pw-loopback` is a
   freshly-forked process when `poll_once()` first runs. `_route_locked` decides
-  the unlink from the speakers and the link into the duck separately, so a
-  snapshot caught in that window cut the call loose and joined it to nothing —
-  and because every unlink *succeeded*, the stream was marked routed and never
-  retried, with nothing logged.
+  the unlink from the call's device and the link into the duck separately, so
+  a snapshot caught in that window cut the call loose and joined it to
+  nothing — and because every unlink *succeeded*, the stream was marked routed
+  and never retried, with nothing logged.
 - **`resolve()` refuses a port of the wrong direction.** It used to retry a
   missed lookup across every port of the node, which hands `pw-link` a
   backwards port and journals it as the link that was asked for. Returning

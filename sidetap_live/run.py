@@ -142,11 +142,13 @@ class Session:
         }
         self.overlap = OverlapWatch(self.activity, self._clock)
 
-        # Where each direction's audio is PLAYED. OUT must never be None:
-        # pw-cat would play to your own speakers instead.
-        default_sink = snapshot.node_by_name(snapshot.default_sink or "")
+        # Where each direction's audio is PLAYED. IN plays where the duck
+        # does: the device the call plays on, chosen by engage() from the
+        # snapshot it routes from. OUT must never be None: pw-cat would play
+        # to your own speakers instead.
+        call_sink = self.router.target_sink
         sink_targets = {
-            Direction.IN: default_sink.serial if default_sink else None,
+            Direction.IN: call_sink.serial if call_sink else None,
             Direction.OUT: virtmic.serial,
         }
         # Which language each direction translates INTO: what reaches your

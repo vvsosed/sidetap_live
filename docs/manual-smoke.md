@@ -203,7 +203,8 @@ wpctl status
 ```
 
 No `sidetap_live_duck` node should remain. The messenger's stream should be
-back on your speakers directly.
+back on the device it was playing on, directly, and on nothing else — `pw-link
+-l` shows no link to a device it was not using before.
 
 If a duck survived, something went wrong in `Router.restore()` — recover with:
 
@@ -224,9 +225,21 @@ this checklist is for — treat these as unconfirmed until it has been run:
 - **Routing defers while the duck has a node but no ports yet.** Check 2 is
   the one that would catch a regression: the call should be audible through
   the duck, not silent.
+- **Routing follows the device the call plays on.** Set the messenger's
+  speaker to a device that is *not* the system default (a USB or Bluetooth
+  headset), join the call, then start sidetap-live. Both the translation and
+  the ducked original should be in the headset and nothing on the speakers;
+  `pw-link -l` should show the messenger linked only into `sidetap_live_duck`
+  and the capture tap, and `sidetap_live_duck_out` into the headset. Watch for
+  a minute: if WirePlumber re-links the messenger to the headset behind the
+  duck's back, the original returns unducked, and nothing offline can model
+  that. After `Ctrl-C`, check 12. Then the mismatch case: start sidetap-live
+  *before* the call with the speakers as default and join with the messenger
+  on the headset. Expect one ERROR naming both devices, the original audible
+  and unducked in the headset, and the messenger's links unchanged.
 - **SIGTERM ends the call and restores the graph.** Nothing here covers it.
   Start a call, `kill <pid>` from another terminal, and confirm `pw-link -l`
-  shows your messenger back on the speakers and no `sidetap_live_duck`.
+  shows your messenger back on its own device and no `sidetap_live_duck`.
 - **`b` (bypass) no longer runs `pw-dump`/`pw-link` on the UI thread.** Press
   it mid-call and confirm the dashboard keeps repainting while it takes effect.
 - **A replacement that dies mid-rotation no longer wedges the direction**, and

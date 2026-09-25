@@ -47,11 +47,27 @@ class PwPort:
 
 
 @dataclass(frozen=True)
+class PwLink:
+    """A link from an output port to an input port, by id.
+
+    Ids only, because a link is looked up afresh in each snapshot and never
+    stored; anything durable is named by serial and port name instead.
+    """
+
+    id: int
+    output_node_id: int
+    output_port_id: int
+    input_node_id: int
+    input_port_id: int
+
+
+@dataclass(frozen=True)
 class PwGraph:
     nodes: tuple[PwNode, ...] = ()
     ports: tuple[PwPort, ...] = ()
     default_sink: str | None = None
     default_source: str | None = None
+    links: tuple[PwLink, ...] = ()
 
     def by_class(self, media_class: str) -> tuple[PwNode, ...]:
         return tuple(n for n in self.nodes if n.media_class == media_class)
@@ -70,10 +86,14 @@ class PwGraph:
         )
         return tuple(sorted(matching, key=lambda p: p.name))
 
+    def links_from(self, node_id: int) -> tuple[PwLink, ...]:
+        return tuple(link for link in self.links if link.output_node_id == node_id)
+
 
 def parse_graph(dump_text: str) -> PwGraph:
     nodes: list[PwNode] = []
     ports: list[PwPort] = []
+    links: list[PwLink] = []
     default_sink: str | None = None
     default_source: str | None = None
 
@@ -84,7 +104,7 @@ def parse_graph(dump_text: str) -> PwGraph:
         if obj_type.endswith("Interface:Node"):
             media_class = props.get("media.class")
             if not media_class:
-                continue  # links, filters and other plumbing we do not care about
+                continue  # drivers, filters and other plumbing we do not care about
             serial = props.get("object.serial")
             if serial is None:
                 serial = obj["id"]
@@ -118,6 +138,19 @@ def parse_graph(dump_text: str) -> PwGraph:
                 )
             )
 
+        elif obj_type.endswith("Interface:Link"):
+            # The endpoints are top-level fields of info, not props.
+            info = obj.get("info") or {}
+            links.append(
+                PwLink(
+                    id=obj["id"],
+                    output_node_id=info.get("output-node-id", -1),
+                    output_port_id=info.get("output-port-id", -1),
+                    input_node_id=info.get("input-node-id", -1),
+                    input_port_id=info.get("input-port-id", -1),
+                )
+            )
+
         elif obj_type.endswith("Interface:Metadata"):
             if (obj.get("props") or {}).get("metadata.name") != "default":
                 continue
@@ -129,4 +162,4 @@ def parse_graph(dump_text: str) -> PwGraph:
                 elif entry.get("key") == "default.audio.source":
                     default_source = name
 
-    return PwGraph(tuple(nodes), tuple(ports), default_sink, default_source)
+    return PwGraph(tuple(nodes), tuple(ports), default_sink, default_source, tuple(links))

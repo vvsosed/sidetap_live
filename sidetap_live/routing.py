@@ -1,8 +1,12 @@
 """Own the duck path, and be able to give the graph back.
 
-Engaging unlinks the application from your speakers and routes it through a
-loopback whose volume playout controls, so restoration is a correctness
-requirement: without it a crash leaves the user with no call audio.
+Engaging moves the application's links to its output device into a loopback
+whose volume playout controls, and the loopback plays into that same device.
+Restoration is a correctness requirement: without it a crash leaves the user
+with no call audio.
+
+Only links read from the graph are moved, never ones inferred from the default
+sink, because restore() recreates exactly what was journalled.
 
 Every change is journalled to disk BEFORE it is made, so a kill -9 between the
 two is recoverable. Entries name nodes by object.serial and ports by name,
@@ -18,7 +22,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from .graph import PLAYBACK_STREAM, PwGraph
+from .graph import PLAYBACK_STREAM, SINK, PwGraph, PwNode, PwPort
 from .ports import GraphSource, Linker, LinkResult, LoopbackFactory, LoopbackSpec, Unlinker
 from .tap import GRAPH_ERROR_WARN_AFTER
 
@@ -202,8 +206,47 @@ def resolve(graph: PwGraph, ref: LinkRef) -> tuple[int, int] | None:
     return (src.id, dst.id)
 
 
+def sink_links(graph: PwGraph, stream: PwNode) -> tuple[tuple[PwPort, PwPort, PwNode], ...]:
+    """(stream port, sink port, sink) for each link from `stream` to an output device.
+
+    An output device is an Audio/Sink someone listens to, so not the duck or
+    the virtual mic's sink: the IN translation follows the call's device and
+    must never land in either. Links to anything else, such as the tap into
+    our capture node, are not playback and are never moved.
+    """
+    outputs = {p.id: p for p in graph.ports_of(stream.id, "out")}
+    inputs = {p.id: p for p in graph.ports if p.direction == "in"}
+    nodes = {n.id: n for n in graph.nodes}
+    found = []
+    for link in graph.links_from(stream.id):
+        out_port = outputs.get(link.output_port_id)
+        in_port = inputs.get(link.input_port_id)
+        sink = nodes.get(link.input_node_id)
+        if out_port is None or in_port is None or sink is None:
+            continue
+        if sink.media_class == SINK and sink.name not in (DUCK_NODE, VIRTMIC_SINK):
+            found.append((out_port, in_port, sink))
+    return tuple(sorted(found, key=lambda f: (f[0].name, f[1].name)))
+
+
+def call_sink(graph: PwGraph, app_pattern: str) -> PwNode | None:
+    """The output device a matching stream already plays on, if any."""
+    for stream in graph.by_class(PLAYBACK_STREAM):
+        if stream.matches(app_pattern):
+            for _, _, sink in sink_links(graph, stream):
+                return sink
+    return None
+
+
+def _device(node: PwNode | None) -> str:
+    # The description is what a messenger's speaker menu shows.
+    if node is None:
+        return "the default output"
+    return repr(node.description or node.name)
+
+
 def duck_loopback_spec(target_sink: str) -> LoopbackSpec:
-    """A sink we own, playing into the real speakers at a volume we control."""
+    """A sink we own, playing into the call's device at a volume we control."""
     return LoopbackSpec(
         capture_props=(
             ("node.name", DUCK_NODE),
@@ -237,7 +280,17 @@ class Router:
         # Serials already routed through the duck. Serial, not id, because ids
         # are recycled.
         self._routed: set[int] = set()
+        # Serials whose move has begun. For these, no sink link means we
+        # removed it, not that WirePlumber has yet to link the stream, so a
+        # failed link into the duck is still retried.
+        self._claimed: set[int] = set()
+        # Stream serial -> the sink serials last reported for it, so a stream
+        # on the wrong device is reported once, not every poll.
+        self._elsewhere: dict[int, frozenset[int]] = {}
         self._app_pattern: str | None = None
+        # The device the duck plays into, and the IN translation with it.
+        # Set by engage().
+        self.target_sink: PwNode | None = None
         # Held across whole method bodies of _route_locked()/restore()/
         # repair(), so the watcher's poll cannot re-break a link restore()
         # just fixed. These run rarely, so contention does not matter.
@@ -269,14 +322,20 @@ class Router:
                 )
             self._app_pattern = app_pattern
             # One snapshot, taken BEFORE the loopback is spawned: it supplies
-            # the default sink for target.object. It is reused rather than
-            # re-read, because the freshly forked loopback may not have
-            # registered yet; engage() then finds no duck and the next
-            # poll_once() completes the routing. Never guess at duck ports
-            # and journal a link that was not made.
+            # the duck's target.object. It is reused rather than re-read,
+            # because the freshly forked loopback may not have registered
+            # yet; engage() then finds no duck and the next poll_once()
+            # completes the routing. Never guess at duck ports and journal a
+            # link that was not made.
             snapshot = self._graph.snapshot()
-            default_sink = snapshot.node_by_name(snapshot.default_sink or "")
-            target_sink_name = default_sink.name if default_sink else ""
+            # The device the call already plays on, so the duck and the
+            # translation reach the ears the original was reaching. The
+            # default sink only when nothing is playing yet; a stream that
+            # then appears elsewhere is reported, not moved.
+            self.target_sink = call_sink(snapshot, app_pattern) or snapshot.node_by_name(
+                snapshot.default_sink or ""
+            )
+            target_sink_name = self.target_sink.name if self.target_sink else ""
 
             self._loopback = self._loopbacks.create(duck_loopback_spec(target_sink_name))
 
@@ -311,14 +370,12 @@ class Router:
         duck_inputs = snapshot.ports_of(duck.id, "in")
         # Defer until the duck has ports, not just a node: PipeWire announces
         # a node before its ports. Otherwise the unlink below would cut the
-        # call from the speakers and join it to nothing, and since every
-        # unlink succeeded the stream would be marked routed and never retried.
+        # call from its device and join it to nothing, and since every unlink
+        # succeeded the stream would be marked routed and never retried.
         if not duck_inputs:
             return 0
 
-        default_sink = snapshot.node_by_name(snapshot.default_sink or "")
-        sink_inputs = snapshot.ports_of(default_sink.id, "in") if default_sink else ()
-
+        target = self.target_sink
         broken: list[LinkRef] = []
         made: list[LinkRef] = []
         candidates: set[int] = set()
@@ -328,30 +385,46 @@ class Router:
                 continue
             if stream.serial in self._routed:
                 continue
-            for index, out_port in enumerate(snapshot.ports_of(stream.id, "out")):
-                # Only the DEFAULT sink, paired by index as WirePlumber links
-                # them (FL->FL, FR->FR); journalling links that never existed
-                # would make restore() create them.
+            outputs = snapshot.ports_of(stream.id, "out")
+            if not outputs:
+                # Ports not registered yet: nothing can move, so it is not done.
+                continue
+            # The links that exist, not ones inferred from the default sink:
+            # restore() recreates exactly what is journalled.
+            current = sink_links(snapshot, stream)
+            if not current and stream.serial not in self._claimed:
+                # Not linked to a device yet. Moving it now would leave
+                # nothing to restore and it would join the duck AND whatever
+                # WirePlumber links it to next; retry on the next poll.
+                continue
+            elsewhere = {
+                sink.serial: sink
+                for _, _, sink in current
+                if target is None or sink.serial != target.serial
+            }
+            if elsewhere:
+                # The duck plays on another device, so moving this stream
+                # would take the call off the device the user is listening
+                # on. Left untouched and audible instead.
+                self._report_elsewhere(stream, tuple(elsewhere.values()))
+                continue
+            for out_port, in_port, sink in current:
+                broken.append(
+                    LinkRef(stream.serial, out_port.name, sink.serial, in_port.name)
+                )
+            for index, out_port in enumerate(outputs):
+                # Into the duck paired by index, as WirePlumber links
+                # (FL->FL, FR->FR).
                 #
                 # LIMIT: ports_of() sorts by name, which matches channel
                 # order only for mono and stereo. A 5.1 sink would cross
                 # channels; fixing that needs audio.channel on PwPort.
-                if sink_inputs and default_sink is not None:
-                    in_port = sink_inputs[min(index, len(sink_inputs) - 1)]
-                    broken.append(
-                        LinkRef(
-                            stream.serial, out_port.name, default_sink.serial, in_port.name
-                        )
-                    )
-                if duck_inputs:
-                    in_port = duck_inputs[min(index, len(duck_inputs) - 1)]
-                    made.append(
-                        LinkRef(stream.serial, out_port.name, duck.serial, in_port.name)
-                    )
+                in_port = duck_inputs[min(index, len(duck_inputs) - 1)]
+                made.append(LinkRef(stream.serial, out_port.name, duck.serial, in_port.name))
             candidates.add(stream.serial)
             log.info("routing %s (serial=%s) through the duck", stream.label, stream.serial)
 
-        if not broken and not made:
+        if not candidates:
             return 0
 
         # Durable BEFORE the graph is touched.
@@ -369,6 +442,7 @@ class Router:
                 broken=journal.broken + new_broken,
                 made=journal.made + new_made,
             ).save(self._journal_path)
+        self._claimed |= candidates
 
         # A FAILED apply is not done: leaving the serial out of self._routed
         # makes the next poll retry it. Otherwise a failed link into the duck
@@ -402,6 +476,27 @@ class Router:
                 len(made),
             )
         return len(succeeded)
+
+    def _report_elsewhere(self, stream: PwNode, sinks: tuple[PwNode, ...]) -> None:
+        """ERROR once per stream and device: only the user can fix it.
+
+        The stream is re-checked every poll regardless, so moving the app to
+        the duck's device gets it routed with no restart.
+        """
+        key = frozenset(sink.serial for sink in sinks)
+        if self._elsewhere.get(stream.serial) == key:
+            return
+        self._elsewhere[stream.serial] = key
+        target = _device(self.target_sink)
+        log.error(
+            "%s plays to %s but the interpreter was set up on %s, so it is "
+            "left untouched and will not be ducked. Set its speaker to %s, or "
+            "restart sidetap-live during the call.",
+            stream.label,
+            ", ".join(_device(sink) for sink in sinks),
+            target,
+            target,
+        )
 
     def run(self, stop: threading.Event, interval: float = POLL_INTERVAL_S) -> None:
         """Re-scan until stopped. A transient graph read must not kill this."""

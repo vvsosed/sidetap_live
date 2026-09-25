@@ -18,6 +18,8 @@ from tests.conftest import (
     FakeLinker,
     FakeSessionFactory,
     FakeVolumeControl,
+    LiveLinks,
+    playing_on,
 )
 
 
@@ -755,6 +757,68 @@ def test_setup_fails_before_engaging_when_the_api_key_is_missing(
         session.setup()
 
     assert session.router is None, "the graph was engaged before a fatal check"
+
+
+def _argv_of(launcher, process):
+    return launcher.writer_calls[launcher.writers.index(process)]
+
+
+def _loopback_argv(launcher):
+    return next(argv for argv in launcher.writer_calls if "pw-loopback" in argv[0])
+
+
+def test_the_translation_and_the_duck_play_where_the_call_plays(
+    session_args, fake_ports, routing_graph
+):
+    """Zoom on a USB headset while the default is the speakers.
+
+    On the speakers, the translation and the ducked original would leak into
+    the microphone while the headset kept playing the original, unducked.
+    """
+    headset = routing_graph.node_by_name("alsa_output.usb-headset")
+    fake_ports.graph = FakeGraphSource(playing_on(routing_graph, headset.name))
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        launcher = fake_ports.launcher
+        in_argv = _argv_of(launcher, session.sinks[Direction.IN]._process)
+        out_argv = _argv_of(launcher, session.sinks[Direction.OUT]._process)
+        assert in_argv[in_argv.index("--target") + 1] == str(headset.serial)
+        assert f'target.object="{headset.name}"' in " ".join(_loopback_argv(launcher))
+        # The virtual mic is not the call's device; OUT must not follow it.
+        virtmic = routing_graph.node_by_name("sidetap_tts_sink")
+        assert out_argv[out_argv.index("--target") + 1] == str(virtmic.serial)
+    finally:
+        session.shutdown()
+
+
+def test_the_translation_plays_on_the_default_sink_before_the_call_plays(
+    session_args, fake_ports, routing_graph
+):
+    fake_ports.graph = FakeGraphSource(playing_on(routing_graph, None))
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        in_argv = _argv_of(fake_ports.launcher, session.sinks[Direction.IN]._process)
+        speakers = routing_graph.node_by_name(routing_graph.default_sink)
+        assert in_argv[in_argv.index("--target") + 1] == str(speakers.serial)
+    finally:
+        session.shutdown()
+
+
+def test_a_call_on_another_device_gets_exactly_its_links_back(
+    session_args, fake_ports, routing_graph
+):
+    """After quitting, the call plays where it did before, and nowhere else."""
+    live = LiveLinks(playing_on(routing_graph, "alsa_output.usb-headset"))
+    before = set(live.pairs)
+    session = build_session(
+        session_args, fake_ports, sessions=FakeSessionFactory(), graph=live, linker=live
+    )
+    session.setup()
+    assert live.pairs != before, "setup should have routed the call into the duck"
+    session.shutdown()
+    assert live.pairs == before
 
 
 def test_a_failing_transcript_close_does_not_swallow_a_clean_shutdown(
