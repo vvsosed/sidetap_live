@@ -1,6 +1,6 @@
 # Manual smoke checklist
 
-The automated suite is 351 tests that run with no audio hardware, no network
+The automated suite is 414 tests that run with no audio hardware, no network
 and no credentials. That property is why it is worth having — and it is also
 exactly why it cannot answer anything below.
 
