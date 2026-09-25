@@ -219,8 +219,8 @@ preference and these are not.
   never closes: the original plays under every translation for the whole call,
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
-  `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 351 tests import the package with no
+  `google.genai` in `live.py`, `cli.py` and `run.py`; `websockets` in
+  `live.py`; `webrtcvad` in `activity.py`. This is what lets 351 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -282,15 +282,30 @@ preference and these are not.
   direction silently dead for the rest of the call, noticed only by the
   dead-air alarm. `SUSPENDED` is both true and recoverable, and
   `REOPEN_BACKOFF_S` paces the retry so a revoked key does not become a
-  rate-limit ban. A session that closes before sending any event counts as a
-  failed open too: the real factory connects in the background, so `open()`
-  returns even when the server then refuses the session about a second in.
-  Retrying forever is its own failure, though: a rejected
-  language code fails identically every time, so after `FATAL_OPEN_FAILURES`
-  consecutive failures the direction reports itself dead once through
-  `Session._on_direction_fatal`, which stops that direction's pump and stops
-  the call when both are gone. The interpreter itself would keep retrying;
-  only the report is latched, and stopping is `Session`'s decision.
+  rate-limit ban. A session that closes before sending any event is a failed
+  open too, and backs off the same way: the real factory connects in the
+  background, so `open()` returns even when the server then refuses the
+  session about a second in. Retrying forever is its own failure, though: a
+  rejected language code fails identically every time, so after
+  `FATAL_OPEN_FAILURES` failures with no answering session between them the
+  direction reports itself dead once through `Session._on_direction_fatal`,
+  which stops that direction's pump and stops the call when both are gone.
+  The interpreter itself would keep retrying; only the report is latched, and
+  stopping is `Session`'s decision.
+  **Only a refusal counts towards that limit** (and an `open()` that raises).
+  While the network is down every reconnect also dies before answering, so
+  counting those reports the direction dead ~10 s into a Wi-Fi drop, and it is
+  never reopened when the network returns: on OUT the remote party hears
+  silence for the rest of the call. `live.is_refusal` decides, from the
+  exception while `_thread_main` still holds it, and `Closed.refused` carries
+  the answer: a 1007 or 1008 close, or a 4xx handshake other than 408/429, is
+  a refusal. Everything else — DNS, `OSError`, timeouts, 1006, 1011, 5xx, a
+  clean end, and any exception type it does not recognise — is transient,
+  backs off and retries without limit, because misreading an outage as a
+  refusal costs the call while the reverse only costs retries. 1008 is safe
+  to count although the server also sends it to a session that overran
+  `GoAway`'s `time_left`: that session has sent the `GoAway` first, and
+  `refused` is only consulted for one that never sent anything.
 - **The duck defaults open and fails open.** `DuckControl.close()` flips its
   flag only on a *successful* `wpctl` call, and `Playout.run()`'s `finally`
   opens it unconditionally. A duck stuck **closed** silences the person you are

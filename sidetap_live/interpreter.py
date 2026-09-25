@@ -93,7 +93,7 @@ class DirectionInterpreter:
         self._open_failures = 0
         self._reported_fatal = False
         # Whether the session on air has sent any event yet. Written by the
-        # receive thread; a session that dies before it does was refused.
+        # receive thread; a session that dies before it does never opened.
         self._heard = False
         self._handle: str | None = None
 
@@ -107,7 +107,7 @@ class DirectionInterpreter:
         # Written by the receive thread, read by the pump thread.
         self._lock = threading.Lock()
         self._goaway_at: float | None = None
-        self._dead: str | None = None
+        self._dead: Closed | None = None
         self._speech_at: float | None = None
 
     @property
@@ -234,9 +234,9 @@ class DirectionInterpreter:
             self._send(block)
         return sum(len(b) for b in blocks) / (TARGET_RATE * 2)
 
-    def _open_failed(self, exc: BaseException) -> None:
-        """Fall back to SUSPENDED, back off, and report a direction that
-        keeps failing."""
+    def _back_off(self) -> None:
+        """Fall back to SUSPENDED and hold the next open off for
+        REOPEN_BACKOFF_S."""
         # SUSPENDED, not OPENING: nothing re-wakes or sends from an OPENING
         # direction, so it would be silently dead. The next speech onset
         # retries, subject to the backoff.
@@ -244,10 +244,14 @@ class DirectionInterpreter:
         self._open_failed_at = self._clock.monotonic()
         self._metrics.set_health(self.direction, session=Health.FAILED)
         self._set_state(SessionState.SUSPENDED)
-        # A blip clears, but a rejected language code or revoked key fails
-        # the same way every time, so report the direction dead after
-        # FATAL_OPEN_FAILURES. Reported once; the owner decides whether to
-        # stop the direction, and until it does the retries continue.
+
+    def _open_failed(self, exc: BaseException) -> None:
+        """Back off, and report a direction whose opens keep failing."""
+        self._back_off()
+        # A rejected language code or revoked key fails the same way every
+        # time, so report the direction dead after FATAL_OPEN_FAILURES.
+        # Reported once; the owner decides whether to stop the direction,
+        # and until it does the retries continue.
         self._open_failures += 1
         if (
             self._open_failures >= FATAL_OPEN_FAILURES
@@ -282,10 +286,10 @@ class DirectionInterpreter:
         self._state = state
         self._metrics.set_session_state(self.direction, state)
 
-    def _take_dead(self) -> str | None:
+    def _take_dead(self) -> Closed | None:
         with self._lock:
-            reason, self._dead = self._dead, None
-            return reason
+            closed, self._dead = self._dead, None
+            return closed
 
     # ---------- rotation: make before break ----------
 
@@ -465,9 +469,9 @@ class DirectionInterpreter:
                 self.note_goaway(event)
             case ResumptionHandle(handle=handle):
                 self.note_handle(handle)
-            case Closed(reason=reason):
+            case Closed():
                 with self._lock:
-                    self._dead = reason
+                    self._dead = event
             case _:
                 log.debug("ignoring %r", event)
 
@@ -508,7 +512,7 @@ class DirectionInterpreter:
             )
         )
 
-    def _reopen(self, reason: str) -> None:
+    def _reopen(self, closed: Closed) -> None:
         """The session died. Prefer a warming replacement over a cold start.
 
         Promoting a replacement that is already listening skips the ~3 s
@@ -516,11 +520,13 @@ class DirectionInterpreter:
         so an orphan would be fed and billed for the rest of the call. The
         handover counts as forced, since it did not wait for an output gap.
 
-        A session that died before sending any event was refused, not
-        dropped: a rejected language code closes it ~1 s in, before the first
-        output (~3 s) or resumption handle (~5 s). That counts as a failed
-        open, with the backoff, rather than an immediate reconnect that would
-        fail the same way about once a second for the rest of the call.
+        A session that died before sending any event never opened: a
+        rejected language code closes it ~1 s in, before the first output
+        (~3 s) or resumption handle (~5 s), and so does every reconnect while
+        the network is down. Both back off rather than reconnect at once and
+        fail again as fast as the failures arrive. Only a refusal counts
+        towards FATAL_OPEN_FAILURES: an outage can clear at any time, and a
+        direction reported dead is stopped for the rest of the call.
         """
         self._metrics.set_health(self.direction, session=Health.FAILED)
         if self._pending is not None:
@@ -528,9 +534,17 @@ class DirectionInterpreter:
             return
         self._close("died")
         if not self._heard:
-            log.error(
-                "%s session closed before answering: %s", self.direction.value, reason
-            )
-            self._open_failed(RuntimeError(reason))
+            if closed.refused:
+                log.error(
+                    "%s session refused: %s", self.direction.value, closed.reason
+                )
+                self._open_failed(RuntimeError(closed.reason))
+            else:
+                log.warning(
+                    "%s session closed before answering, retrying: %s",
+                    self.direction.value,
+                    closed.reason,
+                )
+                self._back_off()
             return
         self._open(replay=True, handle=self._handle)

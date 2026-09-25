@@ -357,16 +357,17 @@ def test_a_dead_session_while_suspended_is_not_reopened():
     assert len(sessions.sessions) == 1
 
 
-def test_a_session_closed_before_answering_backs_off_instead_of_reconnecting():
+@pytest.mark.parametrize("refused", [True, False], ids=["refused", "transient"])
+def test_a_session_closed_before_answering_backs_off_instead_of_reconnecting(refused):
     """The real factory connects in the background, so open() always returns.
 
     A rejected language code then closes the session ~1 s in, before it has
-    sent anything. Reconnecting at once repeats that about once a second for
-    the rest of the call.
+    sent anything, and a network outage closes it sooner. Reconnecting at
+    once repeats that as fast as the failures arrive.
     """
     interpreter, sessions, metrics, clock = build()
     interpreter.feed(block(SPEECH))
-    interpreter.note_event(Closed(reason="1007 invalid argument"))
+    interpreter.note_event(Closed(reason="1007 invalid argument", refused=refused))
     interpreter.feed(block(SPEECH))
 
     assert interpreter.state is SessionState.SUSPENDED
@@ -386,7 +387,7 @@ def test_sessions_refused_after_connect_are_eventually_reported_as_fatal():
     )
     for _ in range(FATAL_OPEN_FAILURES):
         interpreter.feed(block(SPEECH))                  # opens
-        interpreter.note_event(Closed(reason="1007 invalid argument"))
+        interpreter.note_event(Closed(reason="1007 invalid argument", refused=True))
         interpreter.feed(block(SPEECH))                  # notices the death
         clock.advance(REOPEN_BACKOFF_S + 0.1)
 
@@ -404,7 +405,7 @@ def test_a_session_that_answered_clears_the_failures_and_reopens_at_once():
     )
     for _ in range(FATAL_OPEN_FAILURES - 1):
         interpreter.feed(block(SPEECH))
-        interpreter.note_event(Closed(reason="1007 invalid argument"))
+        interpreter.note_event(Closed(reason="1007 invalid argument", refused=True))
         interpreter.feed(block(SPEECH))
         clock.advance(REOPEN_BACKOFF_S + 0.1)
 
@@ -417,9 +418,79 @@ def test_a_session_that_answered_clears_the_failures_and_reopens_at_once():
     assert interpreter.state is SessionState.RUNNING, "backed off after a blip"
     assert len(sessions.sessions) == FATAL_OPEN_FAILURES + 1
 
-    interpreter.note_event(Closed(reason="1007 invalid argument"))
+    interpreter.note_event(Closed(reason="1007 invalid argument", refused=True))
     interpreter.feed(block(SPEECH))
     assert fatal == [], "failures before the healthy session still counted"
+
+
+def test_a_network_outage_never_reports_the_direction_dead_and_it_recovers():
+    """While the network is down every reconnect dies before answering, just
+    like a refusal.
+
+    Counting those would report the direction dead ~10 s into a Wi-Fi drop,
+    and Session stops a dead direction's pump for good: on OUT the remote
+    party would hear silence for the rest of the call.
+    """
+    fatal = []
+    interpreter, sessions, metrics, clock = build(
+        on_fatal=lambda direction, exc: fatal.append((direction, exc))
+    )
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=LOUD))
+    interpreter.note_event(Closed(reason="1006 None. Abnormal closure."))
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.sessions) == 2, "a session that answered is reopened at once"
+
+    for _ in range(3 * FATAL_OPEN_FAILURES):
+        interpreter.note_event(
+            Closed(reason="[Errno -3] Temporary failure in name resolution")
+        )
+        interpreter.feed(block(SPEECH))
+        assert interpreter.state is SessionState.SUSPENDED
+        assert metrics.snapshot().directions[Direction.IN].session is Health.FAILED
+
+        opened = len(sessions.sessions)
+        clock.advance(REOPEN_BACKOFF_S / 2)
+        interpreter.feed(block(SPEECH))
+        assert len(sessions.sessions) == opened, "reconnected inside the backoff"
+        clock.advance(REOPEN_BACKOFF_S / 2 + 0.1)
+        interpreter.feed(block(SPEECH))
+        assert len(sessions.sessions) == opened + 1, "stopped retrying"
+
+    assert fatal == [], "a network outage was reported as a dead direction"
+
+    # The network is back and this session answers.
+    interpreter.note_event(AudioOut(pcm=LOUD))
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+    assert metrics.snapshot().directions[Direction.IN].session is Health.OK
+    assert interpreter._playout.backlog_s() > 0
+    live = sessions.sessions[-1]
+    sent = len(live.sent)
+    interpreter.feed(block(SPEECH))
+    assert len(live.sent) == sent + BLOCK_BYTES
+
+
+def test_transient_failures_between_refusals_neither_count_nor_hide_them():
+    """A flaky network must not mask a rejected language code, nor stand in
+    for one."""
+    fatal = []
+    interpreter, _, _, clock = build(
+        on_fatal=lambda direction, exc: fatal.append((direction, exc))
+    )
+    for _ in range(FATAL_OPEN_FAILURES):
+        for closed in (
+            Closed(reason="timed out during opening handshake"),
+            Closed(reason="1007 None. Request contains an invalid argument.", refused=True),
+        ):
+            interpreter.feed(block(SPEECH))
+            interpreter.note_event(closed)
+            interpreter.feed(block(SPEECH))
+            clock.advance(REOPEN_BACKOFF_S + 0.1)
+
+    assert [str(exc) for _, exc in fatal] == [
+        "1007 None. Request contains an invalid argument."
+    ]
 
 
 def test_goaway_arriving_as_an_event_enters_overlapping():

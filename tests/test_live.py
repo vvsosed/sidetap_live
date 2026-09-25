@@ -1,4 +1,5 @@
 import asyncio
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -299,3 +300,130 @@ async def test_the_receive_loop_does_not_spin_when_the_stream_ends():
     session.close()
 
     assert entries < 1000, f"receive() was re-entered {entries:,} times in 1s"
+
+
+# ---------- refusal vs transient ----------
+
+
+def sdk_close(code: int, reason: str = ""):
+    """What the SDK raises for a close read by receive() or during setup:
+    APIError.raise_error(code, reason), so ClientError/ServerError for a
+    4xx/5xx and plain APIError for a websocket close code."""
+    from google.genai import errors
+
+    try:
+        errors.APIError.raise_error(code, reason, None)
+    except errors.APIError as exc:
+        return exc
+    raise AssertionError("raise_error did not raise")
+
+
+def send_after_close(code: int | None, reason: str = ""):
+    """What send_realtime_input raises: websockets' own error, unwrapped."""
+    from websockets.exceptions import ConnectionClosedError
+    from websockets.frames import Close
+
+    return ConnectionClosedError(None if code is None else Close(code, reason), None)
+
+
+def handshake_rejected(status: int):
+    """What connect() raises for a non-101 upgrade response, unwrapped."""
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    return InvalidStatus(Response(status, "", Headers()))
+
+
+REFUSALS = {
+    "close 1007": lambda: sdk_close(1007, "Request contains an invalid argument."),
+    "close 1008": lambda: sdk_close(1008, "Operation is not implemented, or supported."),
+    "send after close 1007": lambda: send_after_close(1007, "invalid argument"),
+    "ClientError 403": lambda: sdk_close(403, "PERMISSION_DENIED"),
+    "handshake 400": lambda: handshake_rejected(400),
+    "handshake 401": lambda: handshake_rejected(401),
+    "handshake 403": lambda: handshake_rejected(403),
+    "handshake 404": lambda: handshake_rejected(404),
+}
+
+TRANSIENT = {
+    "close 1000": lambda: sdk_close(1000),
+    "close 1001": lambda: sdk_close(1001),
+    "close 1006 no close frame": lambda: sdk_close(1006, "Abnormal closure."),
+    "close 1011": lambda: sdk_close(1011, "Internal error encountered."),
+    "ServerError 503": lambda: sdk_close(503, "UNAVAILABLE"),
+    "send with no close frame": lambda: send_after_close(None),
+    "send after close 1011": lambda: send_after_close(1011, "keepalive ping timeout"),
+    "handshake 408": lambda: handshake_rejected(408),
+    "handshake 429": lambda: handshake_rejected(429),
+    "handshake 500": lambda: handshake_rejected(500),
+    "handshake 503": lambda: handshake_rejected(503),
+    "dns": lambda: socket.gaierror(-3, "Temporary failure in name resolution"),
+    "connection refused": lambda: ConnectionRefusedError(111, "Connection refused"),
+    "connection reset": lambda: ConnectionResetError(104, "Connection reset by peer"),
+    "network unreachable": lambda: OSError(101, "Network is unreachable"),
+    "handshake timeout": lambda: TimeoutError("timed out during opening handshake"),
+    # The type decides, never the text.
+    "unknown type": lambda: RuntimeError("1007 None. Request contains an invalid argument."),
+}
+
+
+@pytest.mark.parametrize("make", REFUSALS.values(), ids=REFUSALS.keys())
+def test_a_rejected_configuration_or_credential_is_a_refusal(make):
+    from sidetap_live.live import is_refusal
+
+    assert is_refusal(make()) is True
+
+
+@pytest.mark.parametrize("make", TRANSIENT.values(), ids=TRANSIENT.keys())
+def test_network_and_server_trouble_is_transient(make):
+    """A refusal is reported fatal after a few attempts and its direction
+    stopped, so anything not known to be one must read as transient."""
+    from sidetap_live.live import is_refusal
+
+    assert is_refusal(make()) is False
+
+
+def closed_by(error, *, at: str):
+    """Run a real GeminiLiveSession whose connect, or whose receive() once
+    connected, raises `error`; return the events it reports."""
+    import contextlib
+
+    from sidetap_live.live import GeminiLiveSession
+
+    class _Session:
+        async def send_realtime_input(self, **_):
+            await asyncio.sleep(0.01)
+
+        async def receive(self):
+            raise error
+            yield  # pragma: no cover - makes this an async generator
+
+    @contextlib.asynccontextmanager
+    async def connect(**_):
+        if at == "connect":
+            raise error
+        yield _Session()
+
+    return list(GeminiLiveSession(connect=connect, config=None, model="m").events())
+
+
+@pytest.mark.parametrize(
+    "make,at,refused",
+    [
+        (lambda: handshake_rejected(401), "connect", True),
+        (lambda: handshake_rejected(403), "connect", True),
+        (lambda: sdk_close(1007, "Request contains an invalid argument."), "receive", True),
+        (lambda: socket.gaierror(-3, "Temporary failure in name resolution"), "connect", False),
+        (lambda: OSError(101, "Network is unreachable"), "connect", False),
+        (lambda: sdk_close(1006, "Abnormal closure."), "receive", False),
+    ],
+    ids=["401", "403", "1007", "gaierror", "OSError", "1006"],
+)
+def test_a_failed_session_says_whether_it_was_refused(make, at, refused):
+    """The interpreter counts only a refusal towards reporting a direction
+    dead, so the flag is set where the exception is still in hand."""
+    from sidetap_live.types import Closed
+
+    error = make()
+    assert closed_by(error, at=at) == [Closed(reason=str(error), refused=refused)]

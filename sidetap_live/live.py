@@ -40,6 +40,17 @@ CLOSE_TIMEOUT_S = 3.0
 # _closing. Bounded, because an indefinite get cannot be interrupted.
 QUEUE_POLL_S = 0.1
 
+# Close codes with which the server rejects the request itself: 1007 invalid
+# argument (how a region-qualified language code is refused) and 1008 policy
+# violation. 1008 also ends a session that overran GoAway's time_left, but
+# that session has already sent the GoAway, and `refused` is consulted only
+# for a session that closed before sending anything.
+REFUSAL_CLOSE_CODES = frozenset({1007, 1008})
+
+# Handshake statuses in the 4xx range that mean "not now" rather than "not
+# this configuration".
+RETRYABLE_4XX = frozenset({408, 429})
+
 _SENTINEL = object()
 
 
@@ -104,6 +115,37 @@ def parse_message(message) -> list[SessionEvent]:
             events.append(ResumptionHandle(handle=handle))
 
     return events
+
+
+def is_refusal(exc: BaseException) -> bool:
+    """Pure: True if the server rejected this configuration or credential,
+    so an identical retry fails the same way.
+
+    The SDK raises APIError for a close it reads, during setup or in
+    receive() (1006 when no close frame came), while the send side's
+    ConnectionClosed and a rejected handshake's InvalidStatus reach us
+    unwrapped. Anything else, including a
+    type not recognised here, is transient: a refusal misread as transient is
+    retried with the direction marked FAILED, but an outage misread as a
+    refusal stops the direction for the rest of the call.
+    """
+    from google.genai import errors
+    from websockets.exceptions import ConnectionClosed, InvalidStatus
+
+    if isinstance(exc, errors.APIError):
+        code = exc.code
+    elif isinstance(exc, ConnectionClosed):
+        # Only a close frame from the server is its verdict.
+        code = exc.rcvd.code if exc.rcvd is not None else None
+    elif isinstance(exc, InvalidStatus):
+        code = exc.response.status_code
+    else:
+        return False
+    if not isinstance(code, int):
+        return False
+    if code in REFUSAL_CLOSE_CODES:
+        return True
+    return 400 <= code < 500 and code not in RETRYABLE_4XX
 
 
 def normalise_language(code: str) -> str:
@@ -204,8 +246,15 @@ class GeminiLiveSession:
         try:
             asyncio.run(self._main())
         except Exception as exc:
-            log.exception("live session ended abnormally")
-            self._inbound.put(Closed(reason=str(exc)))
+            refused = is_refusal(exc)
+            # The type is logged because an unrecognised one is treated as
+            # transient, and the type is what a new rule would match on.
+            log.exception(
+                "live session ended abnormally (%s, %s)",
+                type(exc).__name__,
+                "refused" if refused else "transient",
+            )
+            self._inbound.put(Closed(reason=str(exc), refused=refused))
         else:
             self._inbound.put(Closed(reason="ended"))
         finally:

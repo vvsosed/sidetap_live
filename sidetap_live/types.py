@@ -44,10 +44,11 @@ OVERLAP_MAX_S = 15.0
 # to respect a rate limiter, short enough that a network blip costs one phrase.
 REOPEN_BACKOFF_S = 2.0
 
-# Consecutive failed opens after which a direction is reported dead. Retrying
-# suits a network blip, but a rejected language code or revoked key fails the
-# same way every time and the user must be told. At REOPEN_BACKOFF_S apart this
-# gives a transient failure about ten seconds to clear.
+# Failed opens, with no answering session between them, after which a
+# direction is reported dead. A rejected language code or revoked key fails the
+# same way every time and the user must be told. Only a refusal, or an open()
+# that raises, counts: network and server trouble can clear at any time, and a
+# direction reported dead is stopped for the rest of the call.
 FATAL_OPEN_FAILURES = 5
 
 # Silence after which a session is closed entirely. Reopening costs a cold
@@ -162,9 +163,15 @@ class ResumptionHandle:
 
 @dataclass(frozen=True)
 class Closed:
-    """The session ended. `reason` is for the log and the health flag."""
+    """The session ended. `reason` is for the log and the health flag.
+
+    `refused` means the server rejected this configuration or credential, so
+    an identical retry fails the same way. False covers network and server
+    trouble that can clear, and a clean end.
+    """
 
     reason: str
+    refused: bool = False
 
 
 SessionEvent = (
