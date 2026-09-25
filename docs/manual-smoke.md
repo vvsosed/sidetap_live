@@ -25,9 +25,9 @@ uv run sidetap-live doctor
 ```
 
 Every check `OK`, or at worst `WARN` on `speech activity`. A `WARN` there means
-`webrtcvad` is missing: session rotation can no longer wait for a gap in the
-output and idle-suspend never fires. The program still works; it costs more and
-rotates worse.
+`webrtcvad` is missing: idle-suspend never fires and the dead-air alarm stays
+quiet. The program still works; it costs more and says less when OUT goes
+silent.
 
 **`FAIL live session` is the one that matters most** — it means the key, the
 model or the network is wrong, and it fails here in a second rather than two

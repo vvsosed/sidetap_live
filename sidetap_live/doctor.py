@@ -145,7 +145,7 @@ def check_activity(detector=None) -> Check:
     """Can we detect speech?
 
     Not fatal, since nothing is gated: without a detector sessions open at
-    once and idle-suspend never fires.
+    once, idle-suspend never fires, and speech-in-nothing-out goes unnoticed.
     """
     if detector is None:
         from .activity import webrtc_detector
@@ -155,8 +155,8 @@ def check_activity(detector=None) -> Check:
         return Check(
             "speech activity",
             True,
-            "webrtcvad unavailable - every session rotation will be forced "
-            "and idle-suspend is disabled. Run: uv sync",
+            "webrtcvad unavailable - idle-suspend and the dead-air alarm are "
+            "disabled. Run: uv sync",
             warn=True,
         )
     return Check("speech activity", True, "webrtcvad available")

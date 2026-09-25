@@ -12,8 +12,8 @@ def always(value: bool):
 
 
 def test_no_detector_never_reports_a_pause():
-    """Without a detector, rotation falls back to a timer and idle-suspend
-    never fires - rather than firing constantly on a detector saying nothing."""
+    """Without a detector, idle-suspend never fires - rather than firing
+    constantly on a detector saying nothing."""
     activity = SpeechActivity(None, FakeClock())
     assert activity.available is False
     assert activity.observe(SILENCE) is False

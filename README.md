@@ -29,7 +29,7 @@ every application PipeWire can see.
   not on Vertex AI. So there is no `--project`, no ADC, and **no region
   pinning**: whatever latency Google's edge gives you is the latency you get.
 - `webrtcvad-wheels`, installed by `uv sync`. Without it the program still
-  runs, but every session rotation is forced and idle-suspend never fires — a
+  runs, but idle-suspend never fires and the dead-air alarm stays quiet — a
   warning from `doctor`, not a failure.
 
 Install PipeWire's CLI utilities if they aren't already present:

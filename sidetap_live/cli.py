@@ -62,10 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser(
         "run",
         help="start interpreting",
-        epilog="Note: there is no --phrase flag. sidetap boosts recognition "
-        "of names and jargon through Speech-to-Text phrase hints; this "
-        "single speech-to-speech model exposes no equivalent, so names are "
-        "at the model's mercy.",
+        epilog="Note: there is no --phrase flag. The model accepts no phrase "
+        "hints, so names and jargon cannot be boosted and may be mistranslated.",
     )
 
     sources = run.add_argument_group("audio sources")

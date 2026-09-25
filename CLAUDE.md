@@ -286,7 +286,8 @@ preference and these are not.
   language code fails identically every time, so after `FATAL_OPEN_FAILURES`
   consecutive failures the direction reports itself dead once through
   `Session._on_direction_fatal`, which stops that direction's pump and stops
-  the call when both are gone. Retries continue; only the report is latched.
+  the call when both are gone. The interpreter itself would keep retrying;
+  only the report is latched, and stopping is `Session`'s decision.
 - **The duck defaults open and fails open.** `DuckControl.close()` flips its
   flag only on a *successful* `wpctl` call, and `Playout.run()`'s `finally`
   opens it unconditionally. A duck stuck **closed** silences the person you are

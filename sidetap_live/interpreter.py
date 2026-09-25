@@ -206,7 +206,8 @@ class DirectionInterpreter:
             self._set_state(SessionState.SUSPENDED)
             # A blip clears, but a rejected language code or revoked key fails
             # the same way every time, so report the direction dead after
-            # FATAL_OPEN_FAILURES. Reported once; the retries continue.
+            # FATAL_OPEN_FAILURES. Reported once; the owner decides whether
+            # to stop the direction, and until it does the retries continue.
             self._open_failures += 1
             if (
                 self._open_failures >= FATAL_OPEN_FAILURES

@@ -40,8 +40,8 @@ def webrtc_detector(aggressiveness: int = 2) -> SpeechDetector | None:
         import webrtcvad
     except ImportError:
         log.warning(
-            "webrtcvad not installed - session rotation falls back to a timer "
-            "and idle-suspend is disabled. Run: uv sync"
+            "webrtcvad not installed - idle-suspend and the dead-air alarm are "
+            "disabled, and offset and overlap are not measured. Run: uv sync"
         )
         return None
 

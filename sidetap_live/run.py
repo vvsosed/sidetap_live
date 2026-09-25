@@ -58,8 +58,8 @@ class Session:
         self.metrics = Metrics()
         # Session-wide: set by Ctrl-C, or once every direction has died.
         self.stop = threading.Event()
-        # Per-direction: reserved for a fatal error that should not drop a
-        # live call the other direction is still interpreting.
+        # Per-direction: each interpreter pump runs until its own event is
+        # set, so a fatal error stops one direction without dropping the call.
         self.direction_stop = {d: threading.Event() for d in Direction}
         self.playouts: dict[Direction, Playout] = {}
         self.sinks: dict[Direction, PwCatSink] = {}
@@ -220,7 +220,7 @@ class Session:
         for direction, interpreter in self.interpreters.items():
             self._spawn(
                 interpreter.pump,
-                (self.capture.queues[direction.track], self.stop),
+                (self.capture.queues[direction.track], self.direction_stop[direction]),
                 f"pump-{direction.value}",
             )
             self._spawn(
@@ -232,12 +232,12 @@ class Session:
     def _on_direction_fatal(self, direction: Direction, exc: BaseException) -> None:
         """One direction died of a configuration error.
 
-        Mark it failed and keep the call up: a dead IN leaves the remote
-        party audible, because the duck only closes during speech, and a dead
-        OUT trips the dead-air alarm. Stop only when BOTH are gone.
+        Stop that direction but keep the call up: a dead IN leaves the remote
+        party audible, because the duck only closes during speech. A dead OUT
+        is shown as failed and logged. Stop the call only when BOTH are gone.
         """
         self.metrics.set_health(direction, session=Health.FAILED)
-        # Set here, so the `all(...)` check below sees every dead direction.
+        # Stops this direction's pump; shutdown() sets the rest.
         self.direction_stop[direction].set()
         log.error(
             "%s direction is dead: %s. The call continues one-way; Ctrl-C and "

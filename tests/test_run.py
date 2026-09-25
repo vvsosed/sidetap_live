@@ -611,6 +611,35 @@ def test_a_fatal_direction_is_wired_from_the_interpreter(session_args, fake_port
         session.shutdown()
 
 
+def test_a_fatal_direction_stops_only_its_own_pump(session_args, fake_ports):
+    """Each pump runs until its direction's event is set, not the session's.
+
+    Handed the session-wide `stop`, a pump ignores direction_stop, so the
+    dead direction keeps retrying against the API for the rest of the call.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    spawned = {}
+    session.capture.start = lambda: None
+    session._spawn = lambda target, args, name: spawned.__setitem__(name, (target, args))
+    session.start()
+    pumps = {}
+    for direction in Direction:
+        target, args = spawned[f"pump-{direction.value}"]
+        pumps[direction] = threading.Thread(target=target, args=args, daemon=True)
+        pumps[direction].start()
+    try:
+        session._on_direction_fatal(Direction.IN, RuntimeError("bad lang"))
+        pumps[Direction.IN].join(timeout=2.0)
+        assert not pumps[Direction.IN].is_alive(), "the dead direction's pump kept running"
+        assert pumps[Direction.OUT].is_alive(), "the healthy direction's pump stopped"
+    finally:
+        session.shutdown()
+        for thread in pumps.values():
+            thread.join(timeout=2.0)
+    assert not pumps[Direction.OUT].is_alive(), "shutdown left a pump running"
+
+
 def test_setup_fails_before_engaging_when_the_api_key_is_missing(
     session_args, fake_ports, monkeypatch
 ):
