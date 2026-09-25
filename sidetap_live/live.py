@@ -1,15 +1,12 @@
 """The only thing in this package that talks to Gemini.
 
 google-genai's Live API is asyncio-native and everything else here is
-threaded, because the ported capture and playout code is subprocess-and-thread
-shaped and converting it would risk the tested foundation to serve the part
-being measured. So the asyncio island is confined to this module: each
-GeminiLiveSession owns one thread running one event loop, and presents the
-synchronous InterpreterSession Protocol outward.
+threaded, so asyncio is confined to this module: each GeminiLiveSession owns
+one thread running one event loop and presents the synchronous
+InterpreterSession Protocol outward.
 
-`parse_message` is deliberately pure and outside the class. Translating an SDK
-message into this package's own event types is the part most likely to be
-wrong and most worth testing, and it needs no network to test.
+`parse_message` is pure and outside the class, so the translation from SDK
+messages to our events, the part most likely to be wrong, is testable offline.
 """
 
 from __future__ import annotations
@@ -39,11 +36,8 @@ MODEL = "gemini-3.5-live-translate-preview"
 OUTBOUND_BLOCKS = 100
 CLOSE_TIMEOUT_S = 3.0
 
-# How long the send loop parks on the outbound queue before looking at
-# _closing again. It must be a bounded wait, not a blocking get: an
-# indefinite one cannot be interrupted from outside, which is what made
-# shutdown depend on pushing a sentinel through a queue that is full exactly
-# when shutdown matters most.
+# How long the send loop waits on the outbound queue before checking
+# _closing. Bounded, because an indefinite get cannot be interrupted.
 QUEUE_POLL_S = 0.1
 
 _SENTINEL = object()
@@ -52,22 +46,17 @@ _SENTINEL = object()
 def seconds_of(value) -> float:
     """Coerce whatever `time_left` turns out to be into seconds.
 
-    MEASURED: docs/experiments/03-session-limits.md recorded
-    `go_away: time_left='50s' (type=str)` - a STRING, not a number and not a
-    duration object. This accepts the other shapes too rather than narrowing
-    to the one observation, because being wrong here means the rotation
-    window is silently zero and every rotation becomes forced.
+    Measured as the STRING '50s' (docs/experiments/03-session-limits.md).
+    Other shapes are accepted too, because a wrong guess silently makes the
+    rotation window zero.
     """
     if value is None:
         return 0.0
     if isinstance(value, (int, float)):
         return float(value)
     if isinstance(value, str):
-        # Guarded rather than bare: rstrip("s") handles '50s', the shape that
-        # was measured, and throws on anything else - 'PT50S', '1m30s'. This
-        # sits on the GoAway path, so an unhandled ValueError here kills the
-        # session at the one moment the rotation depends on, instead of
-        # costing a forced rotation the way a zero window does.
+        # Guarded: 'PT50S' or '1m30s' would raise, and a ValueError on the
+        # GoAway path kills the session instead of forcing a rotation.
         try:
             return float(value.rstrip("s") or 0.0)
         except ValueError:
@@ -85,9 +74,9 @@ def seconds_of(value) -> float:
 def parse_message(message) -> list[SessionEvent]:
     """Pure: one SDK message in, zero or more SessionEvents out.
 
-    Everything unrecognised is dropped HERE, which is what gives the state
-    machine above a finite input alphabet. Written with getattr throughout
-    because the preview SDK's message shape is not stable enough to unpack.
+    Everything unrecognised is dropped here, giving the state machine a
+    finite input alphabet. getattr throughout, because the preview SDK's
+    message shape is not stable.
     """
     events: list[SessionEvent] = []
 
@@ -120,27 +109,14 @@ def parse_message(message) -> list[SessionEvent]:
 def normalise_language(code: str) -> str:
     """Strip a region subtag, which this model rejects.
 
-    MEASURED, and the failure mode is nasty: `target_language_code="ru-RU"`
-    is accepted at connect time and survives the first block or two, then the
-    server closes the socket with 1007 "Request contains an invalid argument"
-    once it actually tries to use the code. A probe that connects and sends a
-    single chunk passes; a real call dies a second in.
+    A code like "ru-RU" is accepted at connect, then the server closes with
+    1007 once it uses it, a second or so into a call.
 
-        ru     20 blocks  OK        ru-RU  20 blocks  FAIL
-        en     20 blocks  OK        en-US  20 blocks  FAIL
-        ru-RU   1 block   OK        en-US   1 block   OK
+    A SCRIPT subtag is kept: BCP-47 is language[-script][-region] and a
+    script is four letters, so "zh-Hans" must not become "zh".
 
-    Google's own examples only ever show bare or script-qualified codes -
-    "pl", "en", "es", "zh-Hans" - never a region.
-
-    A SCRIPT subtag is kept: BCP-47 is language[-script][-region], script is
-    four letters ("Hans", "Cyrl") and region is two letters or three digits.
-    Blindly cutting at the first hyphen would turn "zh-Hans" into "zh" and
-    quietly pick the wrong script.
-
-    The CLI still takes full BCP-47 (`--their-lang ru-RU`), because that is
-    what sidetap took and what a user naturally types. Normalising here keeps
-    the accommodation in the one module that talks to Gemini.
+    The CLI takes full BCP-47 because that is what users type; normalising
+    here keeps the workaround in the one module that talks to Gemini.
     """
     parts = code.split("-")
     kept = [parts[0]]
@@ -153,25 +129,15 @@ def normalise_language(code: str) -> str:
 def build_config(*, target_lang: str, echo: bool, handle: str | None):
     """The session config, as the SDK's own typed objects.
 
-    MEASURED, not assumed - see docs/experiments/01-connect.md. The REST
-    documentation nests translationConfig under generationConfig; in
-    google-genai 2.24.0 it is a TOP-LEVEL field of LiveConnectConfig,
-    alongside input_audio_transcription and output_audio_transcription.
+    `translation_config` is a TOP-LEVEL field of LiveConnectConfig, despite
+    the REST docs nesting it under generationConfig. `GenerationConfig` also
+    has one, so the nested form connects with only a DeprecationWarning and
+    yields a conversational agent with its own turn-taking instead of an
+    interpreter. Do not move it under generation_config.
 
-    That distinction is load-bearing and silent. `GenerationConfig` ALSO
-    exposes a `translation_config` field, so the nested form type-checks AND
-    connects, emitting only a DeprecationWarning. A session built the wrong
-    way does not fail - it comes up as a conversational agent with its own
-    turn-taking instead of an interpreter, which is the exact behaviour this
-    project exists to avoid, with nothing in the logs to say so. Do not
-    "simplify" this by moving the field under generation_config.
+    `session_resumption` and `context_window_compression` are top-level too.
 
-    `session_resumption` and `context_window_compression` are likewise
-    top-level fields, confirmed in docs/experiments/03-session-limits.md
-    (there via `types.LiveConnectConfig.model_fields`, not guessed).
-
-    Imported inside the function so the package imports with no SDK present,
-    as with every other third-party dependency here.
+    The SDK is imported lazily so the package imports without it.
     """
     from google.genai import types
 
@@ -215,8 +181,7 @@ class GeminiLiveSession:
             self._outbound.put_nowait(pcm)
         except queue.Full:
             # Audio is lost either way once the socket stops draining; this
-            # way the process survives and the NO_AUDIO watchdog upstream
-            # stays meaningful instead of being masked by a stalled pump.
+            # way the capture pump does not stall behind it.
             log.warning("live outbound queue full; dropped a block")
 
     def events(self):
@@ -227,16 +192,10 @@ class GeminiLiveSession:
             yield item
 
     def close(self) -> None:
-        """Must never block. Every caller is on a pump thread.
+        """Must not block indefinitely: every caller is on a pump thread.
 
-        This used to unblock the send loop by putting a sentinel on the
-        outbound queue - a BLOCKING put on a bounded queue that send() already
-        documents as expected to fill whenever the socket stops draining. With
-        nothing consuming it, the put never returned, and since _close,
-        _suspend and _switch all run on the pump thread, a wedged socket at
-        rotation time stopped that direction feeding audio for the rest of the
-        call. The send loop now polls _closing instead, so setting it is
-        enough.
+        Setting _closing is enough, since the send loop polls it. A put on
+        the bounded outbound queue could block forever on a wedged socket.
         """
         self._closing.set()
         self._thread.join(timeout=CLOSE_TIMEOUT_S)
@@ -250,25 +209,16 @@ class GeminiLiveSession:
         else:
             self._inbound.put(Closed(reason="ended"))
         finally:
-            # Always, even if Closed could not be queued: events() must
-            # return or the receive thread above leaks for the whole call.
+            # Always: events() must return or its receive thread leaks.
             self._inbound.put(_SENTINEL)
 
     async def _main(self) -> None:
         """Run the send and receive loops until one of them finishes.
 
-        Whichever finishes first is retrieved and re-raised, and that is the
-        whole point. `asyncio.wait` RETURNS the completed task rather than
-        raising its exception, so without this a hard API rejection - a 1007
-        invalid-argument, a revoked key - was stored in the task and never
-        read: _thread_main took its `else` branch and queued
-        Closed(reason="ended"), the interpreter treated a fatal error as a
-        normal close and quietly reopened, and the real diagnosis surfaced
-        only as Python's "Task exception was never retrieved" noise at
-        garbage-collection time.
-
-        The cancelled task is gathered for the same reason - a cancellation
-        left unretrieved produces the same noise.
+        The finished task's exception is re-raised: `asyncio.wait` returns
+        it rather than raising, and an unread API rejection (a 1007, a
+        revoked key) would otherwise be reported as a normal close. The
+        cancelled task is gathered so its exception is retrieved too.
         """
         async with self._connect(model=self._model, config=self._config) as session:
             sender = asyncio.create_task(self._send_loop(session))
@@ -278,12 +228,9 @@ class GeminiLiveSession:
             )
             for task in pending:
                 task.cancel()
-            # Tell the sender to stop before awaiting it. Cancelling the task
-            # does not interrupt the queue wait running inside an executor
-            # thread, so without this the gather below waits out the full
-            # timeout; without the gather, the old code abandoned the thread
-            # outright, leaking one per failed session - and rotation produces
-            # one every nine minutes.
+            # Tell the sender to stop before awaiting it: cancelling does
+            # not interrupt its queue wait in the executor thread, and the
+            # gather would wait out the full timeout.
             self._closing.set()
             try:
                 await asyncio.wait_for(
@@ -308,48 +255,32 @@ class GeminiLiveSession:
 
         loop = asyncio.get_running_loop()
         while not self._closing.is_set():
-            # The outbound queue is thread-safe but blocking, so it is drained
-            # on a worker thread rather than stalling the event loop - which
-            # would stop the receive side too, for as long as nobody speaks.
-            # The wait is BOUNDED so that setting _closing is enough to end
-            # this loop: an unbounded get also parked a default-executor
-            # thread forever, and those are joined at interpreter exit, so a
-            # session that was never closed stopped the process exiting at all
-            # despite the thread being a daemon.
+            # Drained on a worker thread, because a blocking get would stall
+            # the event loop and with it the receive side. The wait is
+            # bounded so setting _closing ends the loop; an unbounded one
+            # parks an executor thread that blocks interpreter exit.
             pcm = await loop.run_in_executor(None, self._next_block)
             if pcm is None:
                 continue
-            # MEASURED: scripts/exp02_voice_stability.py, exp03 and exp04 all
-            # pass a `types.Blob(...)`, not a plain dict, even though
-            # `AsyncSession.send_realtime_input`'s `audio` parameter also
-            # accepts a BlobDict. Matching the shape that was actually
-            # exercised against the live API rather than the untested
-            # alternative that merely type-checks.
+            # A types.Blob rather than a dict: the shape the experiments
+            # exercised against the live API.
             await session.send_realtime_input(
                 audio=types.Blob(data=pcm, mime_type=f"audio/pcm;rate={TARGET_RATE}")
             )
 
     async def _recv_loop(self, session) -> None:
-        # MEASURED: docs/experiments/02-voice-stability.md and
-        # docs/experiments/03-session-limits.md both found that
-        # `session.receive()` is a per-turn async generator, not a
-        # connection-long one - it ends when one interaction/turn completes.
-        # Re-invoking it in an outer loop is what keeps this receiving for
-        # the life of the connection instead of silently going quiet after
-        # the first turn.
+        # `session.receive()` ends after each turn, not with the connection,
+        # so it is re-invoked in an outer loop.
         while not self._closing.is_set():
             produced = False
             async for message in session.receive():
                 produced = True
                 for event in parse_message(message):
                     self._inbound.put(event)
-            # An empty turn means the connection is finished, not idle: on a
-            # live connection receive() awaits the next message rather than
-            # returning. Without this the outer loop - which exists to survive
-            # the END of a turn - span on a half-closed socket instead,
-            # measured at millions of re-entries a second, pegging a core for
-            # the rest of the call. Returning ends the session and lets the
-            # interpreter reopen it.
+            # An empty turn means the connection is finished, not idle: a
+            # live receive() waits for the next message. Without this the
+            # loop spins on a half-closed socket. Returning ends the session
+            # and lets the interpreter reopen it.
             if not produced:
                 return
 

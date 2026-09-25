@@ -10,10 +10,8 @@ TARGET_RATE = 16_000
 BLOCK_MS = 100
 BLOCK_BYTES = TARGET_RATE * 2 * BLOCK_MS // 1000
 
-# Playout side. gemini-3.5-live-translate-preview returns s16 at this rate;
-# pw-cat resamples it to whatever the sink wants. (The rate is right but the
-# reason used to name Chirp 3 HD, which is sidetap's TTS and has no successor
-# in this program - the model synthesises the speech itself.)
+# Playout side. The model returns s16 at this rate; pw-cat resamples it for
+# the sink.
 TTS_RATE = 24_000
 TTS_BYTES_PER_S = TTS_RATE * 2
 
@@ -21,69 +19,48 @@ TTS_BYTES_PER_S = TTS_RATE * 2
 REMOTE = "remote"
 MIC = "mic"
 
-# Seconds of un-spoken audio past which playout starts dropping at an output
-# silence boundary.
-#
-# A safety valve, not a working limit. Backlog growth is the experimental
-# result this whole project exists to measure - see docs/experiments/04 - so
-# the cap sits high enough that an ordinary call never reaches it and only a
-# runaway does.
+# Seconds of un-spoken audio past which playout drops at an output silence
+# boundary. A safety valve for a runaway backlog, set high enough that an
+# ordinary call never reaches it.
 LAG_CAP_S = 30.0
 
 # Seconds of continuous speech into a direction with nothing coming out.
 DEAD_AIR_S = 6.0
 
 # No audio at all reaching a capture queue for this long. An unlinked capture
-# node delivers ZERO BYTES rather than silence, and with no gate in the path
-# that now means we simply stop sending - which looks healthy at every stage
-# downstream. This watchdog is the only thing that sees it.
+# node delivers zero bytes rather than silence, which looks healthy at every
+# stage downstream; this watchdog is the only thing that sees it.
 NO_AUDIO_S = 15.0
 
-# How long the outgoing and incoming sessions may overlap before the switch is
-# forced through without a clean join.
-#
-# On GoAway the replacement is opened immediately and fed the same audio; the
-# switch waits for it to warm up (~3s, measured) AND for the outgoing output
-# to fall silent. Output silences are plentiful - 154 in a 99s run - so the
-# wait is normally short. This bounds the pathological case, well inside the
-# 50s GoAway deadline, because joining mid-word is far better than overrunning
-# the deadline and losing the connection outright.
+# How long two sessions may overlap before the switch is forced without a
+# clean join. The switch normally waits for the replacement to warm up (~3 s)
+# and for the outgoing output to fall silent, which is quick because output
+# silences are frequent. The cap sits well inside GoAway's 50 s: joining
+# mid-word beats overrunning the deadline and losing the connection.
 OVERLAP_MAX_S = 15.0
 
-# Minimum gap between attempts to open a session after one failed.
-#
-# A failed open leaves the direction with nothing to send to, and the next
-# speech block would otherwise retry immediately - ten attempts a second
-# against an API that just refused us. Long enough to be polite to a rate
-# limiter or a revoked key, short enough that a transient network blip costs
-# one missed phrase rather than the rest of the call.
+# Minimum gap between open attempts after a failure. Without it every speech
+# block retries, ten a second against an API that just refused us. Long enough
+# to respect a rate limiter, short enough that a network blip costs one phrase.
 REOPEN_BACKOFF_S = 2.0
 
-# Consecutive failed opens after which a direction is called dead.
-#
-# _open() falls back to SUSPENDED and retries on the next speech onset, which
-# is right for a network blip and wrong for a misconfiguration: a rejected
-# language code or a revoked key fails identically every time, and without a
-# ceiling the direction retries for the whole call while the user is told
-# nothing beyond a health marker. At REOPEN_BACKOFF_S apart, this gives a
-# transient failure about ten seconds to clear before the call is declared
-# one-way.
+# Consecutive failed opens after which a direction is reported dead. Retrying
+# suits a network blip, but a rejected language code or revoked key fails the
+# same way every time and the user must be told. At REOPEN_BACKOFF_S apart this
+# gives a transient failure about ten seconds to clear.
 FATAL_OPEN_FAILURES = 5
 
-# Silence after which a session is closed entirely. Reopening costs the
-# cold-start latency measured in docs/experiments/01-connect.md, paid only
-# when someone starts talking again after most of a minute of nothing.
+# Silence after which a session is closed entirely. Reopening costs a cold
+# start, paid only after most of a minute of nothing.
 IDLE_SUSPEND_S = 45.0
 
 # Playout must be idle this long before the duck reopens. Without the hold it
 # flaps in the gaps between output chunks and chops the original into
-# fragments, which is heard as the duck failing rather than as hysteresis
-# missing.
+# fragments.
 DUCK_HOLD_S = 0.4
 
-# Seconds of recent capture kept for replay into a freshly opened session.
-# Feeds the two non-ideal paths only: waking from suspend, and crossing a
-# seam where no pause arrived. The happy path replays nothing.
+# Seconds of recent capture replayed into a freshly opened session, on wake
+# from suspend or after a session died.
 PREROLL_S = 3.0
 
 
@@ -133,12 +110,10 @@ class SessionState(StrEnum):
 
 @dataclass(frozen=True)
 class TranscriptEvent:
-    """One line of transcript.
+    """One line of transcript. `kind` is "source" or "target".
 
-    Deliberately NOT a source/target pair. inputAudioTranscription and
-    outputAudioTranscription arrive as two independently-drifting streams, so
-    any pairing would be invented rather than observed - see the spec's
-    Transcript section. `kind` is "source" or "target".
+    Not a source/target pair: the two transcriptions arrive as independently
+    drifting streams, so any pairing would be invented.
     """
 
     t: float
@@ -177,10 +152,9 @@ class GoAway:
 
 @dataclass(frozen=True)
 class ResumptionHandle:
-    """A handle the forced-seam fallback can reconnect with.
+    """A handle to resume from if the live session dies.
 
-    Kept even though rotate-at-a-pause does not normally use it: a handle
-    cannot be requested once GoAway has already arrived.
+    Kept continuously, because one cannot be requested after GoAway.
     """
 
     handle: str

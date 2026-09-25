@@ -25,11 +25,9 @@ class LinkResult(Enum):
 
 @dataclass(frozen=True)
 class LoopbackSpec:
-    """Arguments for one pw-loopback process.
+    """Arguments for one pw-loopback process, as pw-loopback property maps.
 
-    Both sides are property maps exactly as pw-loopback expects them; the
-    adapter renders them onto the command line. Keeping this a value type is
-    what lets routing.py be tested without PipeWire.
+    A value type so routing.py can be tested without PipeWire.
     """
 
     capture_props: tuple[tuple[str, str], ...]
@@ -59,9 +57,8 @@ class ManagedProcess(Protocol):
 class WritableProcess(Protocol):
     """A process we write to. pw-cat --playback and pw-loopback.
 
-    Separate from ManagedProcess rather than one type with both pipes: the
-    ported capture code only ever reads, and widening its Protocol would let a
-    stdin-less fake satisfy a consumer that needs one.
+    Separate from ManagedProcess so a stdin-less fake cannot satisfy a
+    consumer that needs stdin.
     """
 
     @property
@@ -94,14 +91,11 @@ class Unlinker(Protocol):
 @runtime_checkable
 class VolumeControl(Protocol):
     def set_volume(self, object_id: int, fraction: float) -> bool:
-        """`object_id` is the PipeWire global object.id, NOT object.serial.
+        """`object_id` is the PipeWire object.id, NOT object.serial.
 
-        wpctl resolves against the id; the serial is a separate counter and
-        yields "Object not found". This does not contradict the project's
-        "identify nodes by object.serial" rule - that is about DURABLE
-        references (the routing journal, the tap's dedup keys) where ids get
-        recycled over time. See sidetap's docs/experiments/01-tap-volume.md, which hit
-        this exact trap.
+        wpctl resolves against the id and answers "Object not found" for a
+        serial. Durable references (the journal, the tap's dedup keys) still
+        use serials, because ids get recycled.
         """
         ...
 
@@ -127,11 +121,9 @@ class Clock(Protocol):
     def wait(self, event: threading.Event, timeout: float) -> bool:
         """Block until `event` is set or `timeout` elapses.
 
-        Returns whether `event` was set (mirrors threading.Event.wait).
-        Unlike `sleep`, a real implementation wakes as soon as `event` is set
-        from another thread rather than only at the end of `timeout` - that
-        promptness is the whole point of using this instead of `sleep` in a
-        poll loop that a shutdown needs to interrupt.
+        Returns whether `event` was set, like threading.Event.wait. Unlike
+        `sleep` it wakes as soon as `event` is set, so a shutdown can
+        interrupt a poll loop promptly.
         """
         ...
 
@@ -140,10 +132,8 @@ class Clock(Protocol):
 class InterpreterSession(Protocol):
     """One live speech-to-speech translation session.
 
-    Synchronous on purpose. The SDK underneath is asyncio-native, but the
-    whole ported audio layer is subprocess-and-thread shaped, so the asyncio
-    island is confined inside the real implementation (live.py) rather than
-    leaking into every consumer.
+    Synchronous on purpose: the audio layer is thread-based, so the SDK's
+    asyncio is confined inside live.py rather than leaking into consumers.
     """
 
     def send(self, pcm: bytes) -> None:

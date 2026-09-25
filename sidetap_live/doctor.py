@@ -1,8 +1,7 @@
 """Check the environment before a call, not during one.
 
-A missing API key, or a Live API session that will not open, should fail in a
-second at setup, rather than two minutes into a conversation with the other
-party waiting.
+A missing API key or a session that will not open should fail at setup, not
+mid-conversation.
 """
 
 from __future__ import annotations
@@ -16,10 +15,8 @@ from .adapters import MIN_PW_VERSION, installed_pw_version
 from .graph import PwGraph
 from .routing import VIRTMIC_CONFIG, VIRTMIC_CONFIG_PATH, VIRTMIC_SINK, VIRTMIC_SOURCE
 
-# pw-cli belongs here even though sidetap never uses it at runtime:
-# check_pipewire_version() shells out to it, and without it in this list a
-# machine missing only pw-cli is told PipeWire is version 0.0.0 and to
-# upgrade - sending the user after a problem they do not have.
+# pw-cli is unused at runtime but check_pipewire_version() needs it; listing
+# it reports a missing pw-cli as such, not as an ancient PipeWire.
 REQUIRED_TOOLS = (
     "pw-dump",
     "pw-record",
@@ -54,10 +51,7 @@ def check_pipewire_version() -> Check:
     rendered = ".".join(str(p) for p in version)
     minimum = ".".join(str(p) for p in MIN_PW_VERSION)
     if version == (0, 0, 0):
-        # Not a real version. installed_pw_version() returns this sentinel
-        # when pw-cli is missing or will not run, and reporting it as though
-        # PipeWire were ancient points the user at an upgrade rather than at
-        # the actual problem.
+        # The sentinel for "pw-cli missing or failed", not a real version.
         return Check(
             "pipewire",
             False,
@@ -74,10 +68,8 @@ def check_pipewire_version() -> Check:
 def check_virtmic(graph: PwGraph, config_path: Path = VIRTMIC_CONFIG_PATH) -> Check:
     """Are both halves of the virtual mic present in the live graph?
 
-    The config file is consulted so this can tell the two failures apart. They
-    need different actions, and conflating them tells a user who has just run
-    `--install` to run `--install` - which is how someone concludes the tool is
-    broken and stops reading its output.
+    The config file is consulted to tell "not installed" from "installed but
+    not loaded", which need different actions.
     """
     sink = graph.node_by_name(VIRTMIC_SINK)
     source = graph.node_by_name(VIRTMIC_SOURCE)
@@ -107,12 +99,9 @@ def check_virtmic(graph: PwGraph, config_path: Path = VIRTMIC_CONFIG_PATH) -> Ch
 def check_linking() -> Check:
     """Does pw-link actually reach a running PipeWire session?
 
-    check_tools() only proves the binary is on PATH. A pw-link that exists but
-    cannot talk to a session - no session running, wrong XDG_RUNTIME_DIR, a
-    sandbox - fails at runtime as ONE warning about six seconds in, then
-    debug-level forever, while the IN direction silently never produces a
-    translation for the rest of the call. `pw-link -l` needs a live session, so
-    it is a cheap functional probe.
+    check_tools() only proves the binary is on PATH. A pw-link that cannot
+    reach a session leaves the IN direction silently deaf at runtime.
+    `pw-link -l` needs a live session, so it is a cheap functional probe.
     """
     try:
         result = subprocess.run(
@@ -153,13 +142,10 @@ def check_api_key(env: dict[str, str] | None = None) -> Check:
 
 
 def check_activity(detector=None) -> Check:
-    """Can we detect pauses?
+    """Can we detect speech?
 
-    Not fatal, unlike sidetap's equivalent. There the silence gate was the
-    difference between $0.10 and $2 an hour idle and its absence was silent;
-    here nothing is gated, so a missing detector costs no money. It costs two
-    behaviours: session rotation can no longer wait for a pause and always
-    lands mid-speech, and idle-suspend never fires.
+    Not fatal, since nothing is gated: without a detector sessions open at
+    once and idle-suspend never fires.
     """
     if detector is None:
         from .activity import webrtc_detector
@@ -179,18 +165,9 @@ def check_activity(detector=None) -> Check:
 def check_live_session(factory, languages: tuple[str, ...] = ("en",)) -> Check:
     """Open one real session per language and close it.
 
-    One cheap round trip here fails in a second, rather than two minutes into
-    a live conversation with the graph already rewired. `factory` is anything
-    with the SessionFactory shape (`.open(target_lang, *, echo,
-    handle=None)`) - production passes
-    `live.build_factory(genai.Client(api_key=...))`.
-
-    The languages are probed rather than assumed. This used to open "en"
-    whatever the user passed, while --their-lang and --my-lang advertised
-    "check this language too" and checked nothing - and the languages are the
-    part most likely to be wrong. The 1007 post-mortem is the standing lesson
-    here: a health check that does less than the real thing does not check
-    the real thing.
+    `factory` is any SessionFactory; production passes
+    `live.build_factory(genai.Client(api_key=...))`. The user's languages are
+    probed because they are the part most likely to be wrong.
     """
     for language in languages:
         try:
@@ -216,8 +193,7 @@ def check_live_session(factory, languages: tuple[str, ...] = ("en",)) -> Check:
 def install_virtmic_config(path: Path = VIRTMIC_CONFIG_PATH) -> bool:
     """Write the config if absent. Returns True if it wrote one.
 
-    Never clobbers: the user may have tuned the rate or the description, and
-    silently reverting that would be worse than doing nothing.
+    Never clobbers: the user may have tuned it.
     """
     if path.exists():
         return False

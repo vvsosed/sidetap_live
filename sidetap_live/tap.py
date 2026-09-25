@@ -1,17 +1,11 @@
 """Link a matching application's audio into our capture node.
 
-The tap itself is additive and never steals the stream: it only ever adds a
-second link from the application's existing output ports into our capture
-node, so PipeWire delivers an identical copy to us no matter what else those
-ports are plugged into. Whether the application's original link to the
-speakers survives is routing.py's call, not this module's - once engaged,
-routing.py unlinks the application from the speakers and re-routes it through
-a duck it controls, and this tap keeps tapping the same ports either way.
+The tap is additive: it adds a second link from the application's output
+ports, so we get a copy whatever else they feed. Unlinking the speakers is
+routing.py's job.
 
-The watcher re-scans because applications create their audio streams late:
-Zoom does it when the meeting starts, not when the app launches. Anything
-that resolves nodes once at startup records silence. The same re-scan covers
-reconnects when someone switches headphones mid-call.
+The watcher re-scans because applications create their streams late (Zoom
+at meeting start, not app launch) and recreate them when devices change.
 """
 
 from __future__ import annotations
@@ -74,11 +68,9 @@ class AppTap:
             for index, out_port in enumerate(outputs):
                 # Fan every channel into our mono input; PipeWire sums them.
                 in_port = inputs[min(index, len(inputs) - 1)]
-                # Keyed on the node's serial and the port NAMES, never on port
-                # ids: PipeWire recycles ids, and a restarted stream can be
-                # handed its dead predecessor's ids within one poll interval.
-                # Keying on ids would make us skip linking it and capture
-                # silence for the rest of the meeting.
+                # Keyed on serial and port NAMES, not port ids: PipeWire
+                # recycles ids, so a restarted stream could inherit a dead
+                # one's ids and never get linked.
                 pair = (source.serial, out_port.name, in_port.name)
                 if pair in self._linked:
                     continue
@@ -115,11 +107,8 @@ class AppTap:
             except Exception as exc:  # a transient graph read must not kill us
                 consecutive_errors += 1
                 if consecutive_errors == GRAPH_ERROR_WARN_AFTER:
-                    # One blip is unremarkable. Failing repeatedly means we are
-                    # blind to new streams for the rest of the meeting, which
-                    # must not be debug-only. Warn once, not every poll.
-                    # The cause is whatever %s carries - it may be the graph
-                    # read, but a missing pw-link lands here too.
+                    # Repeated failure means we are blind to new streams, so
+                    # warn once rather than only at debug level.
                     log.warning(
                         "tap watcher failing repeatedly (%s) - no longer "
                         "picking up new streams matching %r",
@@ -128,10 +117,6 @@ class AppTap:
                     )
                 else:
                     log.debug("tap watcher: %s", exc)
-            # The tap spends nearly all its time right here, since poll_once()
-            # is near-instant. An uninterruptible sleep would mean shutdown
-            # has to wait out a full poll interval - almost this thread's
-            # entire time budget - before router.restore() can hand the
-            # user's call audio back. Waiting on `stop` instead wakes us the
-            # moment shutdown fires.
+            # Wait on `stop` rather than sleep, so shutdown (and with it
+            # router.restore()) is not delayed by a full poll interval.
             self._clock.wait(stop, self._interval)
