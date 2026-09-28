@@ -1,6 +1,6 @@
 # Manual smoke checklist
 
-The automated suite is 351 tests that run with no audio hardware, no network
+The automated suite is 359 tests that run with no audio hardware, no network
 and no credentials. That property is why it is worth having — and it is also
 exactly why it cannot answer anything below.
 
@@ -227,14 +227,25 @@ this checklist is for — treat these as unconfirmed until it has been run:
 - **SIGTERM ends the call and restores the graph.** Nothing here covers it.
   Start a call, `kill <pid>` from another terminal, and confirm `pw-link -l`
   shows your messenger back on the speakers and no `sidetap_live_duck`.
-- **`b` (bypass) no longer runs `pw-dump`/`pw-link` on the UI thread.** Press
-  it mid-call and confirm the dashboard keeps repainting while it takes effect.
+- **Neither `b` nor `m` runs session work on the UI thread.** Press `b` and,
+  while it is still taking effect, press `m` and then `q`. The dashboard must
+  keep repainting and `q` must still quit: both hotkeys contend for
+  `Session._lifecycle_lock`, which bypass holds across `pw-dump` and `pw-link`.
+- **A hotkey that fails does not end the call.** Hard to stage deliberately;
+  if `pw-dump` ever does fail under `b`, the dashboard should stay up with
+  `bypass FAILED` in the subtitle rather than exiting to a traceback.
 - **A replacement that dies mid-rotation no longer wedges the direction**, and
   a replacement that fails to open is retried inside `time_left`. Check 5
   covers the happy path only; both failure paths need a real nine-minute call.
 - **The lag cap now fires when the output buffer opens on a pause.** Not
   reachable in an ordinary call — `LAG_CAP_S` is 30 s — so this stays
   unverified in practice.
+- **A lit footer key is legible as lit.** The suite asserts the `-engaged`
+  class; only your eyes confirm the CSS renders. Press `m` and look: the key
+  must read as clearly on against the unlit keys beside it. `$warning` is the
+  footer's own amber, which is why both component-class rules override the
+  foreground - if either regresses, the class is still set and every test
+  still passes while nothing on screen changes.
 
 ## Things that are known-untested
 
