@@ -7,6 +7,8 @@ code path.
 
 from __future__ import annotations
 
+import logging
+
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Footer, Static
@@ -18,6 +20,8 @@ from textual.widgets._footer import FooterKey
 
 from .metrics import Health, Metrics
 from .types import Direction, SessionState
+
+log = logging.getLogger(__name__)
 
 REFRESH_HZ = 10
 
@@ -78,6 +82,9 @@ class SidetapLiveApp(App):
         super().__init__()
         self._metrics = metrics
         self._session = session
+        # Latched, not transient: under the TUI logging goes to a file, so a
+        # hotkey that failed has nowhere else to be seen.
+        self._hotkey_error: str | None = None
 
     def compose(self) -> ComposeResult:
         for direction in Direction:
@@ -139,7 +146,10 @@ class SidetapLiveApp(App):
         overlap = (
             "—" if snapshot.overlap_pct is None else f"{snapshot.overlap_pct:.0f}%"
         )
-        self.sub_title = f"{bypassed}overlap {overlap}  est. ${snapshot.cost_usd:.2f}"
+        failed = f"{self._hotkey_error} FAILED  " if self._hotkey_error else ""
+        self.sub_title = (
+            f"{failed}{bypassed}overlap {overlap}  est. ${snapshot.cost_usd:.2f}"
+        )
 
         # Both lamps come from the snapshot, and muted_out is the same field
         # action_mute toggles. Painted from playouts[OUT].suppressed - which is
@@ -162,20 +172,47 @@ class SidetapLiveApp(App):
             if state is not None:
                 key.set_class(state, "-engaged")
 
+    def _off_ui_thread(self, work, *, label: str) -> None:
+        """Run a hotkey's session work on a worker thread, and survive it.
+
+        Both set_bypass and set_mute_out take Session._lifecycle_lock, and
+        set_bypass holds it across pw-dump (timeout 10 s) and up to two
+        pw-link calls (5 s each). Inline, the second key blocks the event
+        loop for as long as the first runs - no repaint, no hotkey, not even
+        `q`. The TUI is what polls session.stop, so a frozen loop also means
+        shutdown() and router.restore() never run and the call stays routed
+        through the duck.
+
+        The try/except is what keeps the app alive: bypass is what you reach
+        for when PipeWire is ALREADY misbehaving, which is when pw-dump is
+        likeliest to raise, and Textual's run_worker defaults to
+        exit_on_error=True - a failed rescue would end the call it was meant
+        to rescue. exit_on_error=False is the backstop for whatever the
+        except does not catch; it is not what the test pins.
+        """
+        def guarded() -> None:
+            try:
+                work()
+            except Exception:
+                log.exception("%s failed", label)
+                self._hotkey_error = label
+
+        self.run_worker(
+            guarded,
+            thread=True,
+            group=label,
+            name=f"set-{label}",
+            exit_on_error=False,
+        )
+
     def action_bypass(self) -> None:
         """Toggle against Metrics, not a local flag that could drift from it."""
         if self._session is None:
             return
+        # Read here, on the UI thread, so it matches what the screen showed.
         target = not self._metrics.snapshot().bypassed
-        # Off the UI thread: set_bypass calls pw-dump and pw-link, which
-        # would freeze every key, quit included. Session serialises the work,
-        # and the target is read here so it matches what the screen showed.
-        self.run_worker(
-            lambda: self._session.set_bypass(target),
-            thread=True,
-            group="bypass",
-            name="set-bypass",
-        )
+        self._off_ui_thread(lambda: self._session.set_bypass(target),
+                            label="bypass")
 
     def action_mute(self) -> None:
         """Stop sending your translated voice, without leaving the call.
@@ -183,8 +220,11 @@ class SidetapLiveApp(App):
         Read from Metrics, NOT playout.suppressed: bypass suppresses the same
         playout, so toggling that would un-suppress OUT mid-bypass.
         """
-        if self._session is not None:
-            self._session.set_mute_out(not self._metrics.snapshot().muted_out)
+        if self._session is None:
+            return
+        target = not self._metrics.snapshot().muted_out
+        self._off_ui_thread(lambda: self._session.set_mute_out(target),
+                            label="mute")
 
     def action_flush(self) -> None:
         if self._session is not None:

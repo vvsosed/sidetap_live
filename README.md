@@ -206,6 +206,10 @@ Bypass suppresses OUT too, but it does not light `Mute out` - otherwise `m`
 under bypass would change nothing on screen and you could not tell which way
 you had just toggled it.
 
+`b` and `m` both hand their work to a thread, because both take the same
+lock and bypass holds it across `pw-dump` and `pw-link`. A hotkey that fails
+leaves the dashboard up and says so in the subtitle.
+
 `f` clears queued audio at a pause in the output. **It cannot cut the audio
 already inside `pw-cat`'s buffer**, so expect a short tail.
 
@@ -278,7 +282,7 @@ Real, current limitations — not aspirational TODOs.
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
   leaves unverified — it is a twelve-item checklist, and every item on it is
-  something the 357 automated tests structurally cannot reach.
+  something the 359 automated tests structurally cannot reach.
 
 ## More detail
 
