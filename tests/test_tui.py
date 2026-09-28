@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from textual.widgets._footer import FooterKey
 
 from sidetap_live.metrics import Health, Metrics
 from sidetap_live.tui import (
@@ -11,6 +12,7 @@ from sidetap_live.tui import (
     health_marker,
 )
 from sidetap_live.types import Direction, SessionState
+from tests.conftest import FakeSessionFactory, build_session
 
 
 def test_markers_distinguish_the_three_states():
@@ -163,3 +165,69 @@ async def test_unmeasurable_overlap_shows_a_dash_not_zero_percent():
         await pilot.pause()
         assert "overlap —" in app.sub_title
         assert "0%" not in app.sub_title
+
+
+def engaged_keys(app) -> set[str]:
+    """Footer keys currently lit, named by the action each one triggers."""
+    return {key.action for key in app.query(FooterKey) if key.has_class("-engaged")}
+
+
+@pytest.mark.asyncio
+async def test_bypass_does_not_light_the_mute_key(session_args, fake_ports):
+    """The two toggles are separate latches and the footer must say so.
+
+    Bypass suppresses the OUT playout, and the footer used to be painted from
+    `playouts[OUT].suppressed` - which is `bypassed or muted_out`. So pressing
+    `b` lit `Mute out` as well, while metrics.muted_out was still False: the
+    lamp and the key that toggles it were reading different fields.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    app = SidetapLiveApp(metrics=session.metrics, session=session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session.set_bypass(True)
+        app.refresh_from_metrics()
+        await pilot.pause()
+
+        assert session.playouts[Direction.OUT].suppressed is True  # precondition
+        assert session.metrics.snapshot().muted_out is False
+        assert engaged_keys(app) == {"bypass"}
+
+
+@pytest.mark.asyncio
+async def test_pressing_mute_under_bypass_changes_what_the_footer_shows(
+    session_args, fake_ports
+):
+    """`m` must never be a keypress you cannot see the result of.
+
+    With the lamp painted from playout suppression, `m` under bypass moved
+    nothing on screen - the key was already lit - so you could not tell
+    whether you had just muted or unmuted. Leaving bypass then dropped you
+    into a muted OUT you did not remember asking for, and OUT has no raw path
+    to fall through to: the remote party hears nothing and has no way to know.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    app = SidetapLiveApp(metrics=session.metrics, session=session)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        session.set_bypass(True)
+        app.refresh_from_metrics()
+        await pilot.pause()
+        before = "mute" in engaged_keys(app)
+
+        app.action_mute()                     # what pressing `m` does
+        app.refresh_from_metrics()
+        await pilot.pause()
+        after = "mute" in engaged_keys(app)
+
+        assert before != after, "pressing `m` changed nothing on screen"
+        assert engaged_keys(app) == {"bypass", "mute"}
+
+        # And leaving bypass leaves the latch you set, still visible.
+        session.set_bypass(False)
+        app.refresh_from_metrics()
+        await pilot.pause()
+        assert engaged_keys(app) == {"mute"}
+        assert session.playouts[Direction.OUT].suppressed is True

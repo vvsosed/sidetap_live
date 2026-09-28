@@ -1,117 +1,16 @@
-import argparse
-import dataclasses
 import logging
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
 from sidetap_live.metrics import Metrics
-from sidetap_live.run import Session
 from sidetap_live.types import NO_AUDIO_S, TTS_RATE, Direction
 from tests.conftest import (
-    FakeClock,
-    FakeGraphSource,
-    FakeLauncher,
     FakeLinker,
     FakeSessionFactory,
-    FakeVolumeControl,
+    build_session,
 )
-
-
-@dataclasses.dataclass
-class FakePorts:
-    """One session's worth of injectable collaborators, bundled.
-
-    Session.setup() and Session.start() never touch real audio hardware, a
-    real network, or real credentials when built from one of these - every
-    port is a fake from tests/conftest.py.
-    """
-
-    graph: FakeGraphSource
-    launcher: FakeLauncher
-    linker: FakeLinker
-    clock: FakeClock
-    volume: FakeVolumeControl
-    journal_path: Path
-
-
-@pytest.fixture
-def session_args(tmp_path):
-    return argparse.Namespace(
-        app="zoom",
-        mic=None,
-        latency="100ms",
-        their_lang="ru-RU",
-        my_lang="en-US",
-        out=tmp_path,
-        lag_cap=None,
-        no_tui=True,
-        verbose=False,
-        duck_level=0.0,
-        echo_out=True,
-        idle_suspend=True,
-    )
-
-
-# routing_graph throughout, not the zoom fixture: setup() refuses to start
-# without sidetap_tts_sink, and only this fixture has it. It carries the same
-# ZOOM VoiceEngine stream, so engage(app_pattern="zoom") still matches.
-#
-# journal_path is pinned under tmp_path rather than left at Router's real
-# default (~/.local/state/sidetap_live/routing-journal.json). Session.setup()
-# below runs Router.engage() against the routing fixture, which routes a real
-# link and journals it - against the default path that would write to the
-# machine actually running this suite, not a fixture. Every other Router test
-# in tests/test_routing.py makes the same substitution.
-@pytest.fixture
-def fake_ports(tmp_path, routing_graph) -> FakePorts:
-    return FakePorts(
-        graph=FakeGraphSource(routing_graph),
-        launcher=FakeLauncher(),
-        linker=FakeLinker(),
-        clock=FakeClock(),
-        volume=FakeVolumeControl(),
-        journal_path=tmp_path / "routing-journal.json",
-    )
-
-
-@pytest.fixture
-def fake_ports_without_virtmic(tmp_path, routing_graph) -> FakePorts:
-    from sidetap_live.routing import VIRTMIC_SINK
-
-    without = dataclasses.replace(
-        routing_graph,
-        nodes=tuple(n for n in routing_graph.nodes if n.name != VIRTMIC_SINK),
-    )
-    return FakePorts(
-        graph=FakeGraphSource(without),
-        launcher=FakeLauncher(),
-        linker=FakeLinker(),
-        clock=FakeClock(),
-        volume=FakeVolumeControl(),
-        journal_path=tmp_path / "routing-journal.json",
-    )
-
-
-def build_session(args, ports: FakePorts, *, sessions=None, **overrides) -> Session:
-    """Session, built from one FakePorts bundle with any port swappable.
-
-    `overrides` lets one test replace a single collaborator - a half-broken
-    linker, say - without rebuilding the rest of the bundle.
-    """
-    kwargs = dict(
-        graph=ports.graph,
-        launcher=ports.launcher,
-        linker=ports.linker,
-        clock=ports.clock,
-        sessions=sessions,
-        volume=ports.volume,
-        journal_path=ports.journal_path,
-    )
-    kwargs.update(overrides)
-    return Session(args, **kwargs)
 
 
 def test_in_never_echoes_and_out_always_may(session_args, fake_ports):

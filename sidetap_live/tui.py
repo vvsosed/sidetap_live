@@ -141,14 +141,14 @@ class SidetapLiveApp(App):
         )
         self.sub_title = f"{bypassed}overlap {overlap}  est. ${snapshot.cost_usd:.2f}"
 
-        # The lit key shows whether OUT is actually suppressed, which is
-        # what the user hears.
-        muted = (
-            self._session.playouts[Direction.OUT].suppressed
-            if self._session is not None
-            else False
+        # Both lamps come from the snapshot, and muted_out is the same field
+        # action_mute toggles. Painted from playouts[OUT].suppressed - which is
+        # `bypassed or muted_out` - bypass lit the mute key too, so `m` under
+        # bypass moved nothing on screen and you could not tell which way you
+        # had just toggled it.
+        self._paint_toggles(
+            {"bypass": snapshot.bypassed, "mute": snapshot.muted_out}
         )
-        self._paint_toggles({"bypass": snapshot.bypassed, "mute": muted})
 
     def _paint_toggles(self, engaged: dict[str, bool]) -> None:
         """Light the footer key of a toggle that is currently on.

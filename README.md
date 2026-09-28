@@ -201,6 +201,11 @@ conversation it was meant to replace:
 Pressed while bypassed it changes what you come back to, not what bypass is
 doing now.
 
+**A lit key means you pressed it, not that its effect happens to be in force.**
+Bypass suppresses OUT too, but it does not light `Mute out` - otherwise `m`
+under bypass would change nothing on screen and you could not tell which way
+you had just toggled it.
+
 `f` clears queued audio at a pause in the output. **It cannot cut the audio
 already inside `pw-cat`'s buffer**, so expect a short tail.
 
