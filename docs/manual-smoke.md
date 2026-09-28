@@ -1,6 +1,6 @@
 # Manual smoke checklist
 
-The automated suite is 351 tests that run with no audio hardware, no network
+The automated suite is 357 tests that run with no audio hardware, no network
 and no credentials. That property is why it is worth having — and it is also
 exactly why it cannot answer anything below.
 
@@ -235,10 +235,12 @@ this checklist is for — treat these as unconfirmed until it has been run:
 - **The lag cap now fires when the output buffer opens on a pause.** Not
   reachable in an ordinary call — `LAG_CAP_S` is 30 s — so this stays
   unverified in practice.
-- **The footer lights a toggle you pressed, not one whose effect is in force.**
-  Press `b`, then `m`, then `b` again, and check the keys at each step: only
-  `Bypass`, then both, then only `Mute out`. Bypass used to light `Mute out`
-  as well, which made `m` under bypass a keypress with no visible result.
+- **A lit footer key is legible as lit.** The suite asserts the `-engaged`
+  class; only your eyes confirm the CSS renders. Press `m` and look: the key
+  must read as clearly on against the unlit keys beside it. `$warning` is the
+  footer's own amber, which is why both component-class rules override the
+  foreground - if either regresses, the class is still set and every test
+  still passes while nothing on screen changes.
 
 ## Things that are known-untested
 

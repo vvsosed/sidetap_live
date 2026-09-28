@@ -278,7 +278,7 @@ Real, current limitations — not aspirational TODOs.
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
   leaves unverified — it is a twelve-item checklist, and every item on it is
-  something the 351 automated tests structurally cannot reach.
+  something the 357 automated tests structurally cannot reach.
 
 ## More detail
 

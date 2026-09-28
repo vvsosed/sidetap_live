@@ -329,7 +329,7 @@ class FakePorts:
 
     Session.setup() and Session.start() never touch real audio hardware, a
     real network, or real credentials when built from one of these - every
-    port is a fake from tests/conftest.py.
+    port is one of the fakes above.
     """
 
     graph: FakeGraphSource
@@ -363,11 +363,11 @@ def session_args(tmp_path):
 # ZOOM VoiceEngine stream, so engage(app_pattern="zoom") still matches.
 #
 # journal_path is pinned under tmp_path rather than left at Router's real
-# default (~/.local/state/sidetap_live/routing-journal.json). Session.setup()
-# below runs Router.engage() against the routing fixture, which routes a real
-# link and journals it - against the default path that would write to the
-# machine actually running this suite, not a fixture. Every other Router test
-# in tests/test_routing.py makes the same substitution.
+# default (~/.local/state/sidetap_live/routing-journal.json). Any test that
+# calls Session.setup() runs Router.engage() against the routing fixture,
+# which routes a real link and journals it - against the default path that
+# would write to the machine actually running this suite, not a fixture.
+# Every Router test in tests/test_routing.py makes the same substitution.
 @pytest.fixture
 def fake_ports(tmp_path, routing_graph) -> FakePorts:
     return FakePorts(
@@ -398,12 +398,26 @@ def fake_ports_without_virtmic(tmp_path, routing_graph) -> FakePorts:
     )
 
 
-def build_session(args, ports: FakePorts, *, sessions=None, **overrides) -> Session:
+# Distinguishes "caller said nothing" from an explicit sessions=None.
+_FAKE_SESSIONS = object()
+
+
+def build_session(args, ports: FakePorts, *, sessions=_FAKE_SESSIONS,
+                  **overrides) -> Session:
     """Session, built from one FakePorts bundle with any port swappable.
 
     `overrides` lets one test replace a single collaborator - a half-broken
     linker, say - without rebuilding the rest of the bundle.
+
+    `sessions` defaults to a FRESH FakeSessionFactory, not to None: None makes
+    Session.setup() read GEMINI_API_KEY and build a real google.genai client.
+    That was one deliberate test's choice while this lived in test_run.py; in
+    conftest it would be the default every test module inherits, and a caller
+    that forgot the argument would pass on a machine with the key exported and
+    fail only in CI, which unsets it. Pass sessions=None to opt in.
     """
+    if sessions is _FAKE_SESSIONS:
+        sessions = FakeSessionFactory()
     kwargs = dict(
         graph=ports.graph,
         launcher=ports.launcher,

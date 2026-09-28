@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 
 import pytest
 from textual.widgets._footer import FooterKey
@@ -74,14 +75,10 @@ async def test_the_tui_exits_when_the_session_is_stopped_from_outside():
     """
     import threading
 
-    class StubPlayout:
-        suppressed = False
-
     class StoppableSession:
         def __init__(self):
             self.metrics = Metrics()
             self.stop = threading.Event()
-            self.playouts = {d: StubPlayout() for d in Direction}
 
     session = StoppableSession()
     app = SidetapLiveApp(metrics=session.metrics, session=session)
@@ -122,14 +119,10 @@ async def test_bypass_does_not_run_graph_work_on_the_ui_thread():
     finished = threading.Event()
     release = threading.Event()
 
-    class StubPlayout:
-        suppressed = False
-
     class SlowSession:
         def __init__(self):
             self.metrics = Metrics()
             self.stop = threading.Event()
-            self.playouts = {d: StubPlayout() for d in Direction}
 
         def set_bypass(self, value):
             started.set()
@@ -172,6 +165,24 @@ def engaged_keys(app) -> set[str]:
     return {key.action for key in app.query(FooterKey) if key.has_class("-engaged")}
 
 
+@contextlib.contextmanager
+def live_session(args, ports):
+    """A real Session, set up and always shut down.
+
+    setup() opens the transcript's long-lived append handle, starts a pw-cat
+    sink per direction and engages the router; without the shutdown these
+    tests leak all three and leave the graph rewired. The caller must let this
+    close AFTER `app.run_test()`: shutdown() sets session.stop, which makes the
+    next tick call app.exit().
+    """
+    session = build_session(args, ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        yield session
+    finally:
+        session.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_bypass_does_not_light_the_mute_key(session_args, fake_ports):
     """The two toggles are separate latches and the footer must say so.
@@ -181,18 +192,17 @@ async def test_bypass_does_not_light_the_mute_key(session_args, fake_ports):
     `b` lit `Mute out` as well, while metrics.muted_out was still False: the
     lamp and the key that toggles it were reading different fields.
     """
-    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
-    session.setup()
-    app = SidetapLiveApp(metrics=session.metrics, session=session)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        session.set_bypass(True)
-        app.refresh_from_metrics()
-        await pilot.pause()
+    with live_session(session_args, fake_ports) as session:
+        app = SidetapLiveApp(metrics=session.metrics, session=session)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            session.set_bypass(True)
+            app.refresh_from_metrics()
+            await pilot.pause()
 
-        assert session.playouts[Direction.OUT].suppressed is True  # precondition
-        assert session.metrics.snapshot().muted_out is False
-        assert engaged_keys(app) == {"bypass"}
+            assert session.playouts[Direction.OUT].suppressed is True  # precondition
+            assert session.metrics.snapshot().muted_out is False
+            assert engaged_keys(app) == {"bypass"}
 
 
 @pytest.mark.asyncio
@@ -207,27 +217,32 @@ async def test_pressing_mute_under_bypass_changes_what_the_footer_shows(
     into a muted OUT you did not remember asking for, and OUT has no raw path
     to fall through to: the remote party hears nothing and has no way to know.
     """
-    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
-    session.setup()
-    app = SidetapLiveApp(metrics=session.metrics, session=session)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        session.set_bypass(True)
-        app.refresh_from_metrics()
-        await pilot.pause()
-        before = "mute" in engaged_keys(app)
+    with live_session(session_args, fake_ports) as session:
+        app = SidetapLiveApp(metrics=session.metrics, session=session)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            # set_bypass directly, not `b`: action_bypass hands the work to a
+            # thread worker, and what this test is about is the `m` that
+            # follows. bypass stays covered by
+            # test_bypass_does_not_run_graph_work_on_the_ui_thread.
+            session.set_bypass(True)
+            app.refresh_from_metrics()
+            await pilot.pause()
+            before = "mute" in engaged_keys(app)
 
-        app.action_mute()                     # what pressing `m` does
-        app.refresh_from_metrics()
-        await pilot.pause()
-        after = "mute" in engaged_keys(app)
+            # The real keypress, through BINDINGS: calling action_mute() by
+            # name would stay green even if `m` were re-keyed away from it.
+            await pilot.press("m")
+            app.refresh_from_metrics()
+            await pilot.pause()
+            after = "mute" in engaged_keys(app)
 
-        assert before != after, "pressing `m` changed nothing on screen"
-        assert engaged_keys(app) == {"bypass", "mute"}
+            assert before != after, "pressing `m` changed nothing on screen"
+            assert engaged_keys(app) == {"bypass", "mute"}
 
-        # And leaving bypass leaves the latch you set, still visible.
-        session.set_bypass(False)
-        app.refresh_from_metrics()
-        await pilot.pause()
-        assert engaged_keys(app) == {"mute"}
-        assert session.playouts[Direction.OUT].suppressed is True
+            # And leaving bypass leaves the latch you set, still visible.
+            session.set_bypass(False)
+            app.refresh_from_metrics()
+            await pilot.pause()
+            assert engaged_keys(app) == {"mute"}
+            assert session.playouts[Direction.OUT].suppressed is True
