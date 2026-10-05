@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import dataclasses
 import io
 import queue
 import threading
@@ -12,6 +14,7 @@ import pytest
 
 from sidetap_live.graph import PwGraph, parse_graph
 from sidetap_live.ports import LinkResult, LoopbackSpec
+from sidetap_live.run import Session
 from sidetap_live.types import TARGET_RATE
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -318,3 +321,111 @@ class FakeSessionFactory:
 @pytest.fixture
 def fake_sessions() -> FakeSessionFactory:
     return FakeSessionFactory()
+
+
+@dataclasses.dataclass
+class FakePorts:
+    """One session's worth of injectable collaborators, bundled.
+
+    Session.setup() and Session.start() never touch real audio hardware, a
+    real network, or real credentials when built from one of these - every
+    port is one of the fakes above.
+    """
+
+    graph: FakeGraphSource
+    launcher: FakeLauncher
+    linker: FakeLinker
+    clock: FakeClock
+    volume: FakeVolumeControl
+    journal_path: Path
+
+
+@pytest.fixture
+def session_args(tmp_path):
+    return argparse.Namespace(
+        app="zoom",
+        mic=None,
+        latency="100ms",
+        their_lang="ru-RU",
+        my_lang="en-US",
+        out=tmp_path,
+        lag_cap=None,
+        no_tui=True,
+        verbose=False,
+        duck_level=0.0,
+        echo_out=True,
+        idle_suspend=True,
+    )
+
+
+# routing_graph throughout, not the zoom fixture: setup() refuses to start
+# without sidetap_tts_sink, and only this fixture has it. It carries the same
+# ZOOM VoiceEngine stream, so engage(app_pattern="zoom") still matches.
+#
+# journal_path is pinned under tmp_path rather than left at Router's real
+# default (~/.local/state/sidetap_live/routing-journal.json). Any test that
+# calls Session.setup() runs Router.engage() against the routing fixture,
+# which routes a real link and journals it - against the default path that
+# would write to the machine actually running this suite, not a fixture.
+# Every Router test in tests/test_routing.py makes the same substitution.
+@pytest.fixture
+def fake_ports(tmp_path, routing_graph) -> FakePorts:
+    return FakePorts(
+        graph=FakeGraphSource(routing_graph),
+        launcher=FakeLauncher(),
+        linker=FakeLinker(),
+        clock=FakeClock(),
+        volume=FakeVolumeControl(),
+        journal_path=tmp_path / "routing-journal.json",
+    )
+
+
+@pytest.fixture
+def fake_ports_without_virtmic(tmp_path, routing_graph) -> FakePorts:
+    from sidetap_live.routing import VIRTMIC_SINK
+
+    without = dataclasses.replace(
+        routing_graph,
+        nodes=tuple(n for n in routing_graph.nodes if n.name != VIRTMIC_SINK),
+    )
+    return FakePorts(
+        graph=FakeGraphSource(without),
+        launcher=FakeLauncher(),
+        linker=FakeLinker(),
+        clock=FakeClock(),
+        volume=FakeVolumeControl(),
+        journal_path=tmp_path / "routing-journal.json",
+    )
+
+
+# Distinguishes "caller said nothing" from an explicit sessions=None.
+_FAKE_SESSIONS = object()
+
+
+def build_session(args, ports: FakePorts, *, sessions=_FAKE_SESSIONS,
+                  **overrides) -> Session:
+    """Session, built from one FakePorts bundle with any port swappable.
+
+    `overrides` lets one test replace a single collaborator - a half-broken
+    linker, say - without rebuilding the rest of the bundle.
+
+    `sessions` defaults to a FRESH FakeSessionFactory, not to None: None makes
+    Session.setup() read GEMINI_API_KEY and build a real google.genai client.
+    That was one deliberate test's choice while this lived in test_run.py; in
+    conftest it would be the default every test module inherits, and a caller
+    that forgot the argument would pass on a machine with the key exported and
+    fail only in CI, which unsets it. Pass sessions=None to opt in.
+    """
+    if sessions is _FAKE_SESSIONS:
+        sessions = FakeSessionFactory()
+    kwargs = dict(
+        graph=ports.graph,
+        launcher=ports.launcher,
+        linker=ports.linker,
+        clock=ports.clock,
+        sessions=sessions,
+        volume=ports.volume,
+        journal_path=ports.journal_path,
+    )
+    kwargs.update(overrides)
+    return Session(args, **kwargs)
