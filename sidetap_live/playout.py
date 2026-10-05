@@ -16,7 +16,14 @@ from array import array
 from collections.abc import Callable
 
 from .ports import AudioSink, VolumeControl
-from .types import DUCK_HOLD_S, LAG_CAP_S, TTS_BYTES_PER_S, TTS_RATE, Direction
+from .types import (
+    DUCK_HOLD_S,
+    LAG_CAP_S,
+    TARGET_LATENCY_S,
+    TTS_BYTES_PER_S,
+    TTS_RATE,
+    Direction,
+)
 
 log = logging.getLogger(__name__)
 
@@ -158,14 +165,21 @@ class Playout:
         *,
         duck: DuckControl | None = None,
         lag_cap_s: float = LAG_CAP_S,
+        target_latency_s: float = TARGET_LATENCY_S,
     ):
         self.direction = direction
         self.dropped_s = 0.0
+        # Padding discarded to hold the latency target. Deliberately NOT
+        # folded into dropped_s: that one means the cap cut translated audio,
+        # which is a quality loss worth alarming about, and this one is the
+        # routine disposal of bytes that carry no speech.
+        self.squelched_s = 0.0
         self.spoken_s = 0.0
         self.suppressed = False
         self._sink = sink
         self._duck = duck
         self._lag_cap_s = lag_cap_s
+        self._target_latency_s = target_latency_s
         self._lock = threading.Lock()
         self._pending = bytearray()
         self._starved = 0
@@ -178,6 +192,10 @@ class Playout:
     def submit(self, pcm: bytes) -> None:
         with self._lock:
             self._pending.extend(pcm)
+            # Drain first. Padding removed here is backlog the cap never sees,
+            # which is the difference between the cap staying a safety valve
+            # and becoming the thing that holds a 30 s delay in place.
+            self._drain_locked()
             self._trim_locked()
 
     def backlog_s(self) -> float:
@@ -205,6 +223,51 @@ class Playout:
         self.suppressed = value
         if value:
             self.flush()
+
+    def _drain_locked(self) -> None:
+        """Discard keep-alive padding from the head, never speech.
+
+        The model holds its audio channel open whether or not it has anything
+        to translate, so inflow is padding plus speech and runs over realtime
+        - measured at 1.89x on IN across a 31.7 min call. Playout drains at
+        exactly realtime, so the surplus becomes queue depth, and queue depth
+        is not a statistic: it is the delay you hear. Left alone it ratchets
+        to LAG_CAP_S within the first minute and stays pinned there, and the
+        cap then discards real audio to hold the line - 1,688 s of it, 89% of
+        that call's IN stream.
+
+        Speech alone arrives at roughly 0.69x realtime, so it fits; only the
+        padding pushes inflow over 1.0. That is why dropping padding is always
+        enough and speech never has to be cut.
+
+        Only a quiet run at the HEAD may go. find_silence_boundary would also
+        find the dip inside a word and cut the word in half - see has_speech.
+        A speech head means the queue is long because someone is talking,
+        which is not a problem to solve by discarding what they said; it
+        drains on its own as the words play.
+
+        Cuts no more than the excess, in whole frames, so an ordinary pause
+        between sentences survives and the buffer stays frame-aligned for the
+        scans that follow.
+        """
+        target_bytes = int(self._target_latency_s * TTS_BYTES_PER_S)
+        while len(self._pending) > target_bytes:
+            quiet = leading_silence_bytes(self._pending)
+            if not quiet:
+                return
+            cut = min(quiet, len(self._pending) - target_bytes)
+            cut -= cut % CHUNK_BYTES
+            if not cut:
+                return
+            del self._pending[:cut]
+            self.squelched_s += cut / TTS_BYTES_PER_S
+            log.debug(
+                "%s playout drained %.2fs of padding (%.1fs total, %.1fs queued)",
+                self.direction.value,
+                cut / TTS_BYTES_PER_S,
+                self.squelched_s,
+                len(self._pending) / TTS_BYTES_PER_S,
+            )
 
     def _trim_locked(self) -> None:
         """Drop the head of the buffer, but only at a pause in the output.

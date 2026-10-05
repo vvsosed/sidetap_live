@@ -130,7 +130,7 @@ uv run sidetap-live run \
 | `--duck-level` | how loud their original stays under the translation. `0.0` (default) replaces it; `0.2` is interpreter-booth mode |
 | `--no-echo-out` | when you already speak their language, send nothing rather than synthesised audio |
 | `--no-idle-suspend` | keep the session open through long silences (bills continuously) |
-| `--lag-cap` | seconds of un-spoken translation before dropping the oldest at a pause. Must be greater than 0 — at or below, every submitted chunk is over the cap and the translation is dropped to the first pause continuously |
+| `--lag-cap` | seconds of un-spoken translation before dropping the oldest at a pause. A safety valve that may cut speech, so reaching it is a loss; playout drains non-speech at 1 s to keep it out of reach. Must be greater than 0 — at or below, every submitted chunk is over the cap and the translation is dropped to the first pause continuously |
 | `--out` | transcript directory |
 | `--no-tui` | plain console logging, useful over SSH. Reports DEAD AIR and NO AUDIO to the log, so a deaf capture node is visible without the dashboard |
 
@@ -178,6 +178,16 @@ about three seconds.
 
 The TUI's `rot` figure shows the count and how many were forced. `rot 6` over
 an hour is expected; `rot 6 (5 forced)` means the join rule needs revisiting.
+
+**`backlog`, `pad` and `dropped` are three different things.** `backlog` is how
+far behind the translation is, and it is the number that should stay flat —
+1–3 s, not climbing over the call. `pad` is the model's keep-alive padding
+being discarded to hold that: the model never closes its audio channel, so
+inflow runs over realtime (1.89x on a measured call, only ~37% of it speech),
+and `pad` in the hundreds of seconds is the drain working, not a fault.
+`dropped` is the lag cap cutting **translated speech**, and it should read
+`0.0s` for the whole call — anything else means sentences the other party never
+heard. See `docs/experiments/04-pacing.md`.
 
 ### Hotkeys
 
@@ -282,7 +292,7 @@ Real, current limitations — not aspirational TODOs.
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
   leaves unverified — it is a twelve-item checklist, and every item on it is
-  something the 359 automated tests structurally cannot reach.
+  something the 366 automated tests structurally cannot reach.
 
 ## More detail
 

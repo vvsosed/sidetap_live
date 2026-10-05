@@ -341,3 +341,28 @@ async def test_a_failing_hotkey_does_not_tear_the_dashboard_down():
         assert app.is_running, "a failed hotkey killed the dashboard"
         # And it has to be visible: under the TUI, logging goes to a file.
         assert "FAILED" in app.sub_title, app.sub_title
+
+
+@pytest.mark.asyncio
+async def test_discarded_padding_is_shown_apart_from_dropped_audio():
+    """Both are "audio we threw away" and only one of them is a problem.
+
+    The drain disposes of hundreds of seconds of keep-alive padding over a
+    long call, which is healthy and expected. `dropped` is the lag cap cutting
+    translated speech, which means the remote party is losing sentences. A
+    single figure covering both would read as catastrophe on every normal
+    call, which is exactly how a user learns to ignore the one number that
+    matters.
+    """
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    metrics.set_squelched_s(Direction.IN, 264.0)
+    metrics.set_dropped_s(Direction.IN, 0.0)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        line = str(app.query_one("#stats-in", Static).content)
+
+        assert "264" in line, f"padding is invisible: {line}"
+        assert "dropped 0.0s" in line, f"dropped lost its own figure: {line}"

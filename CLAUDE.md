@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **359 tests that run with no audio hardware, no network and no
+`tests/` holds **366 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -80,7 +80,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 359 tests, no audio/network/creds
+uv run pytest -q                                    # 366 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -220,7 +220,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 359 tests import the package with no
+  `activity.py`. This is what lets 366 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -246,6 +246,19 @@ preference and these are not.
   with the silence cut out changes what it hears. This is why the module is not
   called `vad.py` — the old name invites someone to reinstate gating, and
   `test_it_is_not_a_gate` guards it.
+- **Queue depth is latency, so playout must drain non-speech.** The model
+  never closes its audio channel, so inflow is keep-alive padding plus speech
+  and runs over realtime — measured at **1.89x on IN over a 31.7 min call**,
+  of which only ~37% of the bytes were speech. Playout drains at exactly
+  realtime, so the surplus becomes queue depth and the queue depth *is* the
+  delay you hear. Without `TARGET_LATENCY_S` draining the padding it ratcheted
+  to `LAG_CAP_S` **49 seconds into the call** and stayed pinned there for 31
+  minutes, with the cap discarding **1,688 s of real audio — 89% of the IN
+  stream** — to hold the line. Speech alone arrives at ~0.69x realtime, so
+  speech always fits: dropping padding is sufficient and translated audio
+  never has to be cut. Drain from the head with `leading_silence_bytes` only;
+  `find_silence_boundary` would cut the dip inside a word. Count it as
+  `squelched_s`, never `dropped_s` — see `docs/experiments/04-pacing.md`.
 - **The duck triggers on audio ENERGY, not byte presence.** The model emits a
   continuous 24 kHz stream whether or not it is translating — measured at
   ~151 s of audio returned for 154 s of pure digital silence in. Keyed on bytes
@@ -350,6 +363,11 @@ let either program's `doctor --repair` tear down the other's live duck.
   translated back at the other party.
 - **Wayland is irrelevant here** — audio capture needs no portal permission;
   that is a video-capture concern.
+- **A backlog is not visible in a 96-second test.** `docs/experiments/04-pacing.md`
+  measured the speech-time ratio at 0.894 and concluded no backlog management
+  was needed; the raw-byte ratio it set aside as "uninformative" was 1.012,
+  and that is the one the playout queue responds to. Report both, and run for
+  minutes, not seconds.
 - **Output billing does not stop during pauses.** The model streams output
   continuously while a session is open, so a call with ordinary conversational
   gaps bills output the whole time. `IDLE_SUSPEND_S` only catches gaps past

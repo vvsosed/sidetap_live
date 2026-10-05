@@ -431,6 +431,11 @@ class DirectionInterpreter:
                 # submit() may have trimmed, so read the drop total back here
                 # rather than letting Playout depend on Metrics.
                 self._metrics.set_dropped_s(self.direction, self._playout.dropped_s)
+                self._metrics.set_squelched_s(
+                    self.direction, self._playout.squelched_s
+                )
+                # Billed on what the model SENT, not what survived the drain:
+                # the padding was generated and charged for either way.
                 self._metrics.add_cost(self._rates.output_usd(output_seconds(len(pcm))))
                 self._note_spoke()
             case SourceText(text=text):

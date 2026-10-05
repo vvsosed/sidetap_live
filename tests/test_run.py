@@ -127,10 +127,15 @@ def test_muting_clears_the_backlog_rather_than_deferring_it(session_args, fake_p
     Session.set_mute_out has to reach Playout.set_suppressed, which flushes.
     Assigning `suppressed` directly would suppress and keep the backlog, and
     unmuting would then play a voice recapping the last minute.
+
+    The queue has to be built from SPEECH, not silence: silence is what
+    _drain_locked exists to discard, so a silent queue would be gone before
+    the mute could flush it and this would pass without testing anything.
     """
     session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
     session.setup()
-    session.playouts[Direction.OUT].submit(b"\x00" * (TTS_RATE * 2 * 3))  # 3 seconds
+    speech = b"\x00\x40" * (TTS_RATE * 3)                   # 3 s, peak 0x4000
+    session.playouts[Direction.OUT].submit(speech)
     assert session.playouts[Direction.OUT].backlog_s() == 3.0
 
     session.set_mute_out(True)

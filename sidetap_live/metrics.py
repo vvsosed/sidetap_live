@@ -39,6 +39,10 @@ class DirectionState:
 
     # Seconds of translated audio the lag cap threw away.
     dropped_s: float = 0.0
+    # Seconds of the model's keep-alive padding discarded to hold the latency
+    # target. Separate from dropped_s because it is not a loss: it carries no
+    # speech, and it is large by design (hundreds of seconds in a long call).
+    squelched_s: float = 0.0
     capture_dropped: int = 0
     dead_air: bool = False
     no_audio: bool = False
@@ -100,6 +104,16 @@ class Metrics:
         """
         with self._lock:
             self._states[direction].dropped_s = seconds
+
+    def set_squelched_s(self, direction: Direction, seconds: float) -> None:
+        """Keep-alive padding discarded to hold latency, cumulative.
+
+        Not a quality loss, unlike `dropped_s`: inflow runs over realtime
+        because the model never closes its audio channel, and this is the
+        surplus being disposed of before it becomes delay.
+        """
+        with self._lock:
+            self._states[direction].squelched_s = seconds
 
     def set_offset_s(self, direction: Direction, seconds: float) -> None:
         with self._lock:

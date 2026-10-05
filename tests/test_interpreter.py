@@ -670,3 +670,29 @@ def test_the_replacement_is_billed_while_it_overlaps():
     assert both == pytest.approx(single * 2, rel=1e-6), (
         "only one of the two live sessions was billed for"
     )
+
+
+def test_discarded_padding_is_reported_and_still_billed():
+    """Padding is charged for whether or not we keep it.
+
+    The model generated those bytes and billed them; the drain is our choice
+    after the fact. Billing what survived would under-report a call by the
+    majority of its output - 63% of the bytes on the measured 2026-10-05 run
+    - and the figure on screen is what the user decides whether to keep
+    talking on.
+
+    `squelched_s` has to reach Metrics separately from `dropped_s` too: the
+    dashboard reports the latter as audio lost, and this is routine.
+    """
+    from sidetap_live.types import TARGET_LATENCY_S
+
+    interpreter, _, metrics, _ = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=QUIET * 120))        # 3 s of padding
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.squelched_s > 0.0, "the drain never reached Metrics"
+    assert state.dropped_s == 0.0, "padding was reported as lost audio"
+    assert state.backlog_s <= TARGET_LATENCY_S
+    # 3 s of output billed, not the ~1 s that survived the drain.
+    assert metrics.snapshot().cost_usd > 3 * 25 * 21.0 / 1e6 * 0.9

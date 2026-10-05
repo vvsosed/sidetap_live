@@ -124,7 +124,7 @@ from sidetap_live.playout import (
     STARVE_LIMIT_TICKS,
     Playout,
 )
-from sidetap_live.types import TTS_BYTES_PER_S, Direction
+from sidetap_live.types import TARGET_LATENCY_S, TTS_BYTES_PER_S, Direction
 from tests.conftest import FakeAudioSink
 
 SPEECH = b"\x00\x40" * (CHUNK_BYTES // 2)
@@ -292,3 +292,128 @@ def test_one_bad_chunk_does_not_end_playout_for_the_call():
     assert sink.writes > 5, (
         f"playout died on the failing chunk after {sink.writes} writes"
     )
+
+
+# The model's keep-alive stream at its measured idle level, peak 1078
+# (docs/experiments/02-voice-stability.md) - below SPEECH_PEAK, so inaudible.
+IDLE = (1078).to_bytes(2, "little", signed=True) * (CHUNK_BYTES // 2)
+
+
+def model_stream():
+    """The output stream as the model actually delivers it: runs, not frames.
+
+    2 s of translated speech then ~3.5 s of keep-alive padding. The split is
+    derived from the 2026-10-05 call: of 3,588 s delivered on IN, the source
+    transcript accounts for only ~1,313 s of speech (22,024 chars at
+    conversational pace, times the 0.894 ratio measured in experiment 4), so
+    roughly 37% of the bytes are speech and 63% are padding.
+
+    That split is the whole reason this is fixable: speech alone arrives at
+    0.69x realtime, so it FITS in the call. Only the padding pushes inflow
+    over 1.0, so discarding padding is always sufficient and speech never has
+    to be cut.
+    """
+    while True:
+        for _ in range(100):
+            yield SPEECH
+        for _ in range(173):
+            yield IDLE
+
+
+def feed_at(playout, inflow: float, ticks: int) -> list[float]:
+    """Drive `ticks` of wall clock with the model delivering `inflow`x realtime.
+
+    One tick is one 20 ms chunk played, which is what pw-cat's blocking write
+    paces in production. Returns the backlog sampled every 100 ticks, because
+    the property that matters is the trend, not any single depth.
+    """
+    stream = model_stream()
+    carry = 0.0
+    depth = []
+    for tick in range(ticks):
+        carry += inflow
+        while carry >= 1.0:
+            playout.submit(next(stream))
+            carry -= 1.0
+        playout.tick()
+        if tick % 100 == 0:
+            depth.append(playout.backlog_s())
+    return depth
+
+
+def test_padding_is_drained_before_the_lag_cap_is_ever_reached():
+    """The failure from the 2026-10-05 call, in miniature.
+
+    The model holds its audio channel open continuously, so inflow is padding
+    PLUS speech and runs over realtime - measured at 1.89x on IN over a
+    31.7 min call. Playout drains at exactly realtime, so the surplus
+    accumulated as queue depth, and queue depth IS the delay you hear: it hit
+    the 30 s cap 49 s into the call and stayed pinned there, with the cap
+    discarding 1,688 s of real audio - 89% of the stream - to hold it.
+
+    The cap is a safety valve against runaway speech. Reaching it because
+    nobody drained the padding means it is cutting audio to solve a problem
+    that was never about audio.
+    """
+    playout, _, _ = build(lag_cap_s=5.0)
+    depth = feed_at(playout, 1.89, 3000)             # 60 s of wall clock
+
+    assert playout.dropped_s == 0.0, (
+        f"the lag cap cut real audio; {playout.backlog_s():.1f}s still queued"
+    )
+    assert playout.squelched_s > 0.0, "nothing was drained at all"
+    # Bounded by the longest speech run, which must play out, NOT by how long
+    # the call has been going. A ratchet is the bug; an oscillation is not.
+    assert max(depth) < 4.0, f"latency ran away: {[round(d, 1) for d in depth]}"
+    assert max(depth[-10:]) <= max(depth[:10]) + 0.5, (
+        f"latency ratcheted up over the run: {[round(d, 1) for d in depth]}"
+    )
+
+
+def test_draining_never_cuts_speech():
+    """Over the threshold is not a licence to drop. Only padding may go."""
+    playout, _, _ = build()
+    playout.submit(SPEECH * 150)                 # 3 s of solid speech
+
+    assert playout.squelched_s == 0.0
+    assert playout.backlog_s() == pytest.approx(3.0)
+
+
+def test_a_quiet_frame_inside_a_word_is_not_a_drain_point():
+    """Guards the one way to implement this that looks right and is not.
+
+    `find_silence_boundary` reports the first quiet frame, and clear speech
+    routinely contains one inside a word - so draining to it cuts the word in
+    half. Only a quiet run at the HEAD is safe to remove, which is what
+    leading_silence_bytes answers.
+    """
+    word = SPEECH * 7 + QUIET + SPEECH * 7
+    playout, _, _ = build()
+    playout.submit(word * 10)                    # 3 s, every word dipping
+
+    assert find_silence_boundary(word) is not None   # the trap is reachable
+    assert playout.squelched_s == 0.0, "drained at a dip inside a word"
+
+
+def test_discarded_padding_is_not_reported_as_dropped_audio():
+    """`dropped_s` is a quality loss the dashboard reports. Padding is not.
+
+    Conflating them makes the TUI alarm about losing 89% of the stream during
+    completely healthy operation, which trains you to ignore the one number
+    that means the translation is being cut.
+    """
+    playout, _, _ = build()
+    playout.submit(IDLE * 150)                   # 3 s of keep-alive padding
+
+    assert playout.squelched_s > 0.0
+    assert playout.dropped_s == 0.0
+    assert playout.backlog_s() <= TARGET_LATENCY_S
+
+
+def test_the_lag_cap_still_fires_on_a_backlog_of_real_speech():
+    """Draining padding must not disarm the valve it exists to keep closed."""
+    playout, _, _ = build(lag_cap_s=0.5)
+    playout.submit(SPEECH * 25 + QUIET + SPEECH * 25)
+
+    assert playout.dropped_s > 0.0
+    assert playout.backlog_s() <= 0.5
