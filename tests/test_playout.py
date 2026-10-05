@@ -5,6 +5,7 @@ from sidetap_live.playout import (
     DuckControl,
     find_silence_boundary,
     has_speech,
+    leading_silence_bytes,
 )
 from tests.conftest import FakeVolumeControl
 
@@ -179,13 +180,18 @@ def test_a_partial_tail_waits_then_is_flushed_padded():
 
 
 def test_backlog_reports_seconds_pending():
+    # SPEECH, not silence: silence is what the drain removes, so a silent
+    # buffer would make this depend on TARGET_LATENCY_S happening to equal
+    # the length submitted.
     playout, _, _ = build()
-    playout.submit(b"\x00" * TTS_BYTES_PER_S)
+    playout.submit(SPEECH * 50)
     assert playout.backlog_s() == pytest.approx(1.0)
 
 
 def test_the_cap_drops_at_a_silence_boundary_only():
-    playout, _, _ = build(lag_cap_s=0.5)
+    # target_latency_s high enough that the drain never fires: this is about
+    # _trim_locked, and the drain would otherwise remove the pause first.
+    playout, _, _ = build(lag_cap_s=0.5, target_latency_s=1e9)
     loud = SPEECH * 25                                   # 0.5 s, all loud
     playout.submit(loud + QUIET + loud)
     # It cut at the pause, never inside either loud run: exactly the second
@@ -200,7 +206,7 @@ def test_the_cap_drops_at_a_silence_boundary_only():
 
 
 def test_the_cap_refuses_to_cut_a_word_in_half():
-    playout, _, _ = build(lag_cap_s=0.1)
+    playout, _, _ = build(lag_cap_s=0.1, target_latency_s=1e9)
     playout.submit(SPEECH * 50)
     assert playout.dropped_s == 0.0
     assert playout.backlog_s() > 0.1
@@ -248,7 +254,7 @@ def test_the_cap_still_trims_when_the_buffer_opens_on_a_pause():
     translate, so a quiet head is the common case, not a corner: the one
     safety valve against a runaway backlog silently never fired.
     """
-    playout, _, _ = build(lag_cap_s=0.5)
+    playout, _, _ = build(lag_cap_s=0.5, target_latency_s=1e9)
     playout.submit(QUIET + SPEECH * 50 + QUIET + SPEECH * 5)
 
     assert playout.dropped_s > 0.0, "the cap never fired on a quiet head"
@@ -320,6 +326,31 @@ def model_stream():
             yield IDLE
 
 
+def interleaved_stream():
+    """Padding interleaved with speech at a 40 ms grain, same 37/63 split.
+
+    The coarse runs in model_stream are the easy case. Nothing measures how
+    finely the model actually interleaves its keep-alive stream with speech,
+    so the drain has to cope with the fine grain too.
+    """
+    while True:
+        for _ in range(37):
+            yield SPEECH
+            yield IDLE
+            yield IDLE
+
+
+def run_stream(run_s: float):
+    """Contiguous speech runs of `run_s`, then padding at the 37/63 split."""
+    speech_frames = int(run_s * 50)
+    padding_frames = int(speech_frames * 63 / 37)
+    while True:
+        for _ in range(speech_frames):
+            yield SPEECH
+        for _ in range(padding_frames):
+            yield IDLE
+
+
 def feed_at(playout, inflow: float, ticks: int) -> list[float]:
     """Drive `ticks` of wall clock with the model delivering `inflow`x realtime.
 
@@ -382,10 +413,11 @@ def test_draining_never_cuts_speech():
 def test_a_quiet_frame_inside_a_word_is_not_a_drain_point():
     """Guards the one way to implement this that looks right and is not.
 
-    `find_silence_boundary` reports the first quiet frame, and clear speech
-    routinely contains one inside a word - so draining to it cuts the word in
-    half. Only a quiet run at the HEAD is safe to remove, which is what
-    leading_silence_bytes answers.
+    Clear speech routinely contains a quiet 20 ms frame inside a word, so a
+    drain that keys on "is this frame quiet" clips consonants. Restricting it
+    to the head is NOT enough: tick() advances the head, so after 7 ticks the
+    head sits exactly on the dip and a head-only drain cuts it. The guard has
+    to be a minimum RUN length - a dip is one or two frames, a pause is many.
     """
     word = SPEECH * 7 + QUIET + SPEECH * 7
     playout, _, _ = build()
@@ -393,6 +425,118 @@ def test_a_quiet_frame_inside_a_word_is_not_a_drain_point():
 
     assert find_silence_boundary(word) is not None   # the trap is reachable
     assert playout.squelched_s == 0.0, "drained at a dip inside a word"
+
+    # The reachable case: let tick() walk the head onto the dip.
+    for _ in range(7):
+        playout.tick()
+    playout.submit(SPEECH)
+    assert playout.squelched_s == 0.0, (
+        "drained a dip inside a word once the head had advanced onto it"
+    )
+
+
+def test_a_pause_between_sentences_is_shortened_not_erased():
+    """Removing a pause outright splices two sentences into one.
+
+    It also keeps the duck shut across what used to be the gap - _idle_ticks
+    never reaches DUCK_HOLD_TICKS - so the remote party's original stays muted
+    through a silence that is no longer there. The drain has to leave a floor.
+    """
+    playout, _, _ = build()
+    playout.submit(QUIET * 60 + SPEECH * 120)    # 1.5 s pause, then 3 s
+
+    assert playout.squelched_s > 0.0, "the pause was not drained at all"
+    assert leading_silence_bytes(playout._pending) > 0, "the pause was erased"
+
+
+@pytest.mark.parametrize("chunk_frames,label", [(1, "20ms"), (5, "100ms"),
+                                                (10, "200ms")])
+def test_the_drain_keeps_up_whatever_size_chunks_the_model_sends(
+    chunk_frames, label
+):
+    """Throughput must not depend on how Gemini happens to packetise.
+
+    live.py emits one AudioOut per server message, so the submit granularity
+    is the model's choice and no experiment measures it. A drain that removes
+    one quiet run per submit() is rate-limited by submits/second: at 100 ms
+    chunks it fell 30 s behind and the cap cut 89 s of real speech, while the
+    same stream submitted one 20 ms frame at a time stayed at 1.0 s. Only the
+    second was tested.
+    """
+    playout, _, _ = build()
+    stream = model_stream()
+    carry, buf, peak = 0.0, [], 0.0
+    for _ in range(3000):                        # 60 s of wall clock
+        carry += 1.89
+        while carry >= 1.0:
+            buf.append(next(stream))
+            carry -= 1.0
+            if len(buf) >= chunk_frames:
+                playout.submit(b"".join(buf))
+                buf = []
+        playout.tick()
+        peak = max(peak, playout.backlog_s())
+
+    assert playout.dropped_s == 0.0, (
+        f"{label} chunks: the cap cut {playout.dropped_s:.1f}s of real audio"
+    )
+    assert peak < 4.0, f"{label} chunks: latency reached {peak:.1f}s"
+
+
+def test_padding_finer_than_the_drain_can_resolve_is_left_to_the_cap():
+    """The honest limit, stated as a test so nobody "fixes" it by accident.
+
+    Padding interleaved with speech at a 40 ms grain is, to any frame-energy
+    test, identical to the quiet frames that occur inside words - the same
+    20 ms frames below the same SPEECH_PEAK. Draining it would mean clipping
+    consonants, which is a worse failure than latency: see
+    test_a_quiet_frame_inside_a_word_is_not_a_drain_point.
+
+    So the drain declines, and LAG_CAP_S handles it as the runaway backlog it
+    cannot distinguish from one. Nothing measures whether the model actually
+    interleaves this finely; exp02 found its idle stretches to be long runs of
+    digital silence, which the drain does resolve.
+    """
+    playout, _, _ = build()
+    stream = interleaved_stream()
+    carry = 0.0
+    for _ in range(900):                         # 18 s of wall clock
+        carry += 1.89
+        while carry >= 1.0:
+            playout.submit(next(stream))
+            carry -= 1.0
+        playout.tick()
+
+    assert playout.squelched_s == 0.0, (
+        "the drain cut runs short enough to be dips inside words"
+    )
+
+
+@pytest.mark.parametrize("run_s", [2, 10, 30])
+def test_a_long_speaking_stretch_costs_latency_but_never_speech(run_s):
+    """One person presenting is a long contiguous speech run.
+
+    The model generates faster than realtime, so during an uninterrupted
+    stretch it runs ahead and the queue holds real speech - that latency is
+    the model's lead and draining cannot touch it. What must NOT happen is the
+    cap cutting speech to hide it: at 60 s runs the unfixed drain let the cap
+    discard 53.7 s. Bounding latency below the lead needs time-stretching, not
+    dropping, and is deliberately out of scope here.
+    """
+    playout, _, _ = build()
+    stream = run_stream(run_s)
+    carry = 0.0
+    for _ in range(2500):                        # 50 s of wall clock
+        carry += 1.89
+        while carry >= 1.0:
+            playout.submit(next(stream))
+            carry -= 1.0
+        playout.tick()
+
+    assert playout.dropped_s == 0.0, (
+        f"{run_s}s runs: the cap cut {playout.dropped_s:.1f}s of real speech"
+    )
+    assert playout.squelched_s > 0.0, "no padding was drained"
 
 
 def test_discarded_padding_is_not_reported_as_dropped_audio():
@@ -412,7 +556,7 @@ def test_discarded_padding_is_not_reported_as_dropped_audio():
 
 def test_the_lag_cap_still_fires_on_a_backlog_of_real_speech():
     """Draining padding must not disarm the valve it exists to keep closed."""
-    playout, _, _ = build(lag_cap_s=0.5)
+    playout, _, _ = build(lag_cap_s=0.5, target_latency_s=1e9)
     playout.submit(SPEECH * 25 + QUIET + SPEECH * 25)
 
     assert playout.dropped_s > 0.0

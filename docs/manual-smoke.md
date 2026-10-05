@@ -211,8 +211,15 @@ Then the part only you can judge: **does the translation still sound
 continuous?** The drain removes non-speech from the head of the queue, so the
 failure mode to listen for is a pause between sentences being clipped short, or
 a word losing its opening consonant. If the speech sounds hurried or
-run-together rather than merely prompt, say so — `TARGET_LATENCY_S` is the
-knob, and the trade is latency against breathing room.
+run-together rather than merely prompt, say so — `--target-latency` is the
+knob, and the trade is latency against breathing room. A pause the drain
+touches keeps 100 ms, and anything shorter than 200 ms is never eligible, so
+clipped consonants would be a bug rather than a tuning problem.
+
+If `backlog` sits high while one person talks for minutes at a stretch, that is
+expected and not this bug: the model generates faster than realtime, so during
+an uninterrupted stretch the queue holds real speech and the delay tracks that
+lead. `dropped` staying at `0.0s` is what says the difference.
 
 Afterwards, confirm it in the log rather than trusting memory:
 

@@ -32,8 +32,15 @@ LAG_CAP_S = 30.0
 # call. Without draining the padding the depth ratchets to LAG_CAP_S within
 # the first minute and stays pinned there, and the cap then discards real
 # audio (89% of that call's IN stream) to hold the line. Low enough to stay
-# near the 0.2-0.3 s event lag measured in experiment 4, high enough that an
-# ordinary pause between sentences is never touched.
+# near the 0.2-0.3 s event lag measured in experiment 4, high enough that
+# short pauses are left alone entirely - a pause the drain does touch keeps
+# KEEP_PAUSE_MS, and one shorter than MIN_DRAIN_RUN_MS is never eligible,
+# because at that length it cannot be told from a dip inside a word.
+#
+# This bounds the padding, not the model's generation lead: during one long
+# uninterrupted speaking stretch the queue holds real speech and latency
+# tracks that lead instead. Draining cannot help there - see
+# docs/experiments/04-pacing.md.
 TARGET_LATENCY_S = 1.0
 
 # Seconds of continuous speech into a direction with nothing coming out.

@@ -39,6 +39,35 @@ STARVE_LIMIT_TICKS = 10
 # Silent ticks before the duck reopens; see DUCK_HOLD_S.
 DUCK_HOLD_TICKS = max(1, int(DUCK_HOLD_S * 1000 / CHUNK_MS))
 
+# Shortest quiet run the drain may touch. Clear speech routinely contains a
+# quiet 20 ms frame inside a word, so keying on single frames clips
+# consonants - and restricting the drain to the head does not help, because
+# tick() walks the head onto the dip. A run this long is a pause between
+# words or sentences, never a dip inside one.
+MIN_DRAIN_RUN_MS = 200
+MIN_DRAIN_RUN_FRAMES = MIN_DRAIN_RUN_MS // CHUNK_MS
+
+# Left behind at every pause the drain touches. Removing a pause outright
+# splices two sentences together, and keeps the duck shut across a gap that
+# is no longer there, so the original stays muted through it.
+KEEP_PAUSE_MS = 100
+KEEP_PAUSE_FRAMES = KEEP_PAUSE_MS // CHUNK_MS
+
+# Seconds of drained padding between log lines. The drain fires on most
+# submits once the queue is over target, ~20/s/direction, and the line is
+# written while _drain_pass_locked still holds the lock tick() needs every
+# 20 ms - a per-cut log under -v is a synchronous file write on the audio
+# path, and 75,000 lines over a call. Rate-limited, the figure is still
+# greppable and the cumulative total is exact.
+DRAIN_LOG_EVERY_S = 5.0
+
+# Frames from the head the drain will examine. The scan runs under the lock
+# tick() needs every 20 ms, and a queue of solid speech offers nothing to
+# remove however far it is walked - so bound the work rather than re-walking
+# 30 s of speech on every submit. 2 s is well past TARGET_LATENCY_S: a pause
+# further out than that cannot be what is holding the latency up.
+DRAIN_SCAN_FRAMES = 100
+
 # Peak amplitude, out of 32767, above which a 20 ms OUTPUT frame counts as
 # speech. The model streams output even with nothing to translate; measured
 # (docs/experiments/02-voice-stability.md), the idle stream never peaked above
@@ -180,6 +209,7 @@ class Playout:
         self._duck = duck
         self._lag_cap_s = lag_cap_s
         self._target_latency_s = target_latency_s
+        self._logged_squelched_s = 0.0
         self._lock = threading.Lock()
         self._pending = bytearray()
         self._starved = 0
@@ -225,49 +255,109 @@ class Playout:
             self.flush()
 
     def _drain_locked(self) -> None:
-        """Discard keep-alive padding from the head, never speech.
+        """Discard keep-alive padding so the queue stops hoarding latency.
 
         The model holds its audio channel open whether or not it has anything
         to translate, so inflow is padding plus speech and runs over realtime
-        - measured at 1.89x on IN across a 31.7 min call. Playout drains at
-        exactly realtime, so the surplus becomes queue depth, and queue depth
-        is not a statistic: it is the delay you hear. Left alone it ratchets
-        to LAG_CAP_S within the first minute and stays pinned there, and the
-        cap then discards real audio to hold the line - 1,688 s of it, 89% of
-        that call's IN stream.
+        - measured at 1.89x on IN across a 31.7 min call, of which only ~37%
+        of the bytes were speech. Playout drains at exactly realtime, so the
+        surplus becomes queue depth, and queue depth is not a statistic: it is
+        the delay you hear. Left alone it ratchets to LAG_CAP_S within the
+        first minute and stays pinned there, and the cap then discards real
+        audio to hold the line - 1,688 s of it, 89% of that call's IN stream.
 
-        Speech alone arrives at roughly 0.69x realtime, so it fits; only the
-        padding pushes inflow over 1.0. That is why dropping padding is always
-        enough and speech never has to be cut.
+        Three constraints, each of which a simpler version got wrong:
 
-        Only a quiet run at the HEAD may go. find_silence_boundary would also
-        find the dip inside a word and cut the word in half - see has_speech.
-        A speech head means the queue is long because someone is talking,
-        which is not a problem to solve by discarding what they said; it
-        drains on its own as the words play.
+        - **Compact from anywhere in the window, not just the head.** Removing
+          the single leading quiet run once per submit is rate-limited by
+          submits per second. live.py emits one AudioOut per server message,
+          so the chunk size is the model's choice: at 100 ms chunks that
+          version fell 30 s behind and let the cap cut 89 s of speech, while
+          the same stream fed one 20 ms frame at a time held 1.0 s.
+        - **Only runs of at least MIN_DRAIN_RUN_FRAMES.** A dip inside a word
+          is one or two frames. Keying on single quiet frames clips
+          consonants, and confining the drain to the head does not avoid it,
+          because tick() advances the head onto the dip.
+        - **Leave KEEP_PAUSE_FRAMES behind.** Erasing a pause splices two
+          sentences, and holds the duck shut across a gap that no longer
+          exists.
 
-        Cuts no more than the excess, in whole frames, so an ordinary pause
-        between sentences survives and the buffer stays frame-aligned for the
-        scans that follow.
+        What this cannot do is bound latency below the model's generation
+        lead: during one long uninterrupted stretch the queue holds real
+        speech, and dropping it would lose words. That needs time-stretching,
+        not dropping, and the cap stays the backstop for the pathological case.
         """
         target_bytes = int(self._target_latency_s * TTS_BYTES_PER_S)
-        while len(self._pending) > target_bytes:
-            quiet = leading_silence_bytes(self._pending)
-            if not quiet:
-                return
-            cut = min(quiet, len(self._pending) - target_bytes)
-            cut -= cut % CHUNK_BYTES
-            if not cut:
-                return
-            del self._pending[:cut]
-            self.squelched_s += cut / TTS_BYTES_PER_S
+        while self._drain_pass_locked(target_bytes):
+            pass
+
+    def _drain_pass_locked(self, target_bytes: int) -> bool:
+        """One windowed compaction pass. True if it removed anything.
+
+        A pass can only free what lies inside DRAIN_SCAN_FRAMES of the head,
+        so the caller repeats it: without that, a buffer deeper than the
+        window is left above target until the next submit happens to arrive.
+        """
+        excess = len(self._pending) - target_bytes
+        if excess <= 0:
+            return False
+        limit = min(len(self._pending) // CHUNK_BYTES, DRAIN_SCAN_FRAMES)
+        if limit < MIN_DRAIN_RUN_FRAMES:
+            return False
+
+        # One conversion for the whole window, then max/min per frame on the
+        # array: an abs() genexp per sample made this the hot spot.
+        region = array("h")
+        region.frombytes(bytes(self._pending[: limit * CHUNK_BYTES]))
+        per_frame = CHUNK_BYTES // 2
+        cache: list[bool | None] = [None] * limit
+
+        def quiet(frame: int) -> bool:
+            known = cache[frame]
+            if known is None:
+                block = region[frame * per_frame : (frame + 1) * per_frame]
+                known = max(block) < SPEECH_PEAK and min(block) > -SPEECH_PEAK
+                cache[frame] = known
+            return known
+
+        cuts: list[tuple[int, int]] = []
+        removed = 0
+        frame = 0
+        while frame < limit and removed < excess:
+            if not quiet(frame):
+                frame += 1
+                continue
+            run_end = frame + 1
+            while run_end < limit and quiet(run_end):
+                run_end += 1
+            if run_end - frame >= MIN_DRAIN_RUN_FRAMES:
+                spare = run_end - frame - KEEP_PAUSE_FRAMES
+                wanted = -(-(excess - removed) // CHUNK_BYTES)
+                drop = min(spare, wanted)
+                if drop > 0:
+                    cuts.append((frame, frame + drop))
+                    removed += drop * CHUNK_BYTES
+            frame = run_end
+
+        if not cuts:
+            return False
+        kept = bytearray()
+        previous = 0
+        for cut_from, cut_to in cuts:
+            kept += self._pending[previous * CHUNK_BYTES : cut_from * CHUNK_BYTES]
+            previous = cut_to
+        kept += self._pending[previous * CHUNK_BYTES :]
+        self._pending = kept
+        self.squelched_s += removed / TTS_BYTES_PER_S
+        if self.squelched_s - self._logged_squelched_s >= DRAIN_LOG_EVERY_S:
+            self._logged_squelched_s = self.squelched_s
             log.debug(
-                "%s playout drained %.2fs of padding (%.1fs total, %.1fs queued)",
+                "%s playout drained %.1fs of padding in total, %.1fs queued",
                 self.direction.value,
-                cut / TTS_BYTES_PER_S,
                 self.squelched_s,
                 len(self._pending) / TTS_BYTES_PER_S,
             )
+        return True
 
     def _trim_locked(self) -> None:
         """Drop the head of the buffer, but only at a pause in the output.

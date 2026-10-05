@@ -131,6 +131,7 @@ uv run sidetap-live run \
 | `--no-echo-out` | when you already speak their language, send nothing rather than synthesised audio |
 | `--no-idle-suspend` | keep the session open through long silences (bills continuously) |
 | `--lag-cap` | seconds of un-spoken translation before dropping the oldest at a pause. A safety valve that may cut speech, so reaching it is a loss; playout drains non-speech at 1 s to keep it out of reach. Must be greater than 0 — at or below, every submitted chunk is over the cap and the translation is dropped to the first pause continuously |
+| `--target-latency` | queue depth above which the model's keep-alive padding is discarded (default 1.0). Queue depth is the delay you hear. Lower it for a shorter delay; raise it if pauses between sentences sound clipped. Must be below `--lag-cap` |
 | `--out` | transcript directory |
 | `--no-tui` | plain console logging, useful over SSH. Reports DEAD AIR and NO AUDIO to the log, so a deaf capture node is visible without the dashboard |
 
@@ -291,8 +292,8 @@ Real, current limitations — not aspirational TODOs.
 - **This has been built and reviewed by one person, against fakes, experiments
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
-  leaves unverified — it is a twelve-item checklist, and every item on it is
-  something the 366 automated tests structurally cannot reach.
+  leaves unverified — it is a thirteen-item checklist, and every item on it is
+  something the 377 automated tests structurally cannot reach.
 
 ## More detail
 

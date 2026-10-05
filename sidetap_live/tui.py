@@ -139,7 +139,7 @@ class SidetapLiveApp(App):
                 # Shown beside `dropped`, never added to it: padding carries
                 # no speech and runs to hundreds of seconds in a long call,
                 # while a non-zero `dropped` means sentences are being cut.
-                f"pad {state.squelched_s:.0f}s"
+                f"pad {format_lag(state.squelched_s)}"
                 f"{alarm}"
             )
             pane = self.query_one(f"#pane-{suffix}")

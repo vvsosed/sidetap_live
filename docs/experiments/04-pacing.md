@@ -225,12 +225,38 @@ reproduces the failure and the fix:
 | | before | after `TARGET_LATENCY_S` |
 |---|---|---|
 | first lag-cap drop | t=+34 s (real: +49 s) | never |
-| backlog | pinned 30 s (real: 30 s) | peak 2.76 s |
+| backlog | pinned 30 s (real: 30 s) | peak 1.6 s |
 | real audio cut over 31.7 min | 65% (real: 89%) | **0.0 s** |
-| padding discarded | — | **1,689 s** (real IN: 1,688.0 s) |
+| padding discarded | — | **~1,690 s** (real IN: 1,688.0 s) |
 
-The padding figure matching the real log to within a second, from an
+The padding figure matching the real log to within a second or two, from an
 independently derived split, is what confirms the diagnosis.
+
+### What the drain does not fix
+
+Three limits, all measured, none of them the bug above:
+
+- **Submit granularity used to matter and must not.** A first version removed
+  only the one quiet run at the head of the queue, once per `submit()`, which
+  rate-limits disposal to submits per second. `live.py` emits one `AudioOut`
+  per server message, so the chunk size is the model's choice and nothing here
+  measures it: at 100 ms chunks that version fell 30 s behind and the cap cut
+  89 s of speech, while the identical stream fed one 20 ms frame at a time
+  held 1.0 s. Compacting from anywhere in a 2 s window makes all three
+  granularities behave identically (peak 1.6 s, nothing cut).
+- **A long uninterrupted speaking stretch costs latency that cannot be
+  drained.** The model generates faster than realtime, so during one
+  continuous stretch it runs ahead and the queue holds *real speech*. Measured
+  at 1.89x inflow: 2 s speech runs give a 1.6 s peak, 10 s runs 8.4 s, 30 s
+  runs 26.2 s — all with nothing cut — and 60 s runs saturate the cap and lose
+  53.9 s. The 0.69x figure above is a call average, not an instantaneous
+  bound. Bounding this needs time-stretching the output, not discarding it.
+- **Padding finer than ~200 ms is indistinguishable from speech.** A quiet run
+  of one or two 20 ms frames is exactly what occurs inside a word, by the same
+  `SPEECH_PEAK` test, so the drain declines and leaves it to the cap.
+  Experiment 2 found the model's idle stretches to be long runs of digital
+  silence, which the drain does resolve, but nothing measures how finely it
+  interleaves padding *with* speech.
 
 ### What this changes
 

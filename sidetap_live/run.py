@@ -19,7 +19,13 @@ from .ports import LinkResult
 from .preroll import PreRoll
 from .routing import JOURNAL_PATH, VIRTMIC_SINK, Router
 from .transcript import EventTranscript
-from .types import LAG_CAP_S, NO_AUDIO_S, TTS_RATE, Direction
+from .types import (
+    LAG_CAP_S,
+    NO_AUDIO_S,
+    TARGET_LATENCY_S,
+    TTS_RATE,
+    Direction,
+)
 
 log = logging.getLogger(__name__)
 
@@ -173,7 +179,16 @@ class Session:
             # args.lag_cap is None when --lag-cap is unset; Playout needs a
             # number.
             lag_cap = args.lag_cap if args.lag_cap is not None else LAG_CAP_S
-            playout = Playout(direction, sink, duck=duck, lag_cap_s=lag_cap)
+            target_latency = getattr(args, "target_latency", None)
+            if target_latency is None:
+                target_latency = TARGET_LATENCY_S
+            playout = Playout(
+                direction,
+                sink,
+                duck=duck,
+                lag_cap_s=lag_cap,
+                target_latency_s=target_latency,
+            )
             self.playouts[direction] = playout
 
             self.interpreters[direction] = DirectionInterpreter(

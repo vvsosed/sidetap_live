@@ -20,7 +20,7 @@ from .adapters import (
 from .capture import CaptureError
 from .graph import PLAYBACK_STREAM, SINK, SOURCE, PwGraph
 from .ports import Clock, GraphSource, Linker, ProcessLauncher
-from .types import IDLE_SUSPEND_S, LAG_CAP_S
+from .types import IDLE_SUSPEND_S, LAG_CAP_S, TARGET_LATENCY_S
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +104,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds of un-spoken translation to allow before dropping the "
         f"oldest (default {LAG_CAP_S:g}). Raising it means hearing more while "
         "falling further behind; it does not stop the backlog growing.",
+    )
+    # Same None-means-unset trick as --lag-cap, so types.py stays the single
+    # source of the default and the help text derives from it.
+    out.add_argument(
+        "--target-latency",
+        type=target_latency,
+        default=None,
+        metavar="SECONDS",
+        help="queue depth above which the model's keep-alive padding is "
+        f"discarded (default {TARGET_LATENCY_S:g}). Queue depth is the delay "
+        "you hear: the model never closes its audio channel, so inflow runs "
+        "over realtime and without this the delay climbs until --lag-cap "
+        "starts cutting speech. Lower it for a shorter delay, raise it if "
+        "pauses between sentences sound clipped.",
     )
     out.add_argument(
         "--duck-level",
@@ -211,6 +225,19 @@ def lag_cap(value: str) -> float:
     seconds = float(value)
     if seconds <= 0:
         raise argparse.ArgumentTypeError("--lag-cap must be greater than 0")
+    return seconds
+
+
+def target_latency(value: str) -> float:
+    """Queue depth to drain padding down to. Must be positive.
+
+    At or below 0 the drain would run on an empty queue forever; there is no
+    upper bound here because the useful ceiling is --lag-cap, which main()
+    checks against this.
+    """
+    seconds = float(value)
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("--target-latency must be greater than 0")
     return seconds
 
 
@@ -328,7 +355,25 @@ def main(
     clock: Clock | None = None,
     sessions=None,
 ) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # Cross-flag, so it cannot live in either type= validator. Below the
+    # target the drain never fires - _trim_locked keeps the queue under it -
+    # and every byte of discarded padding is counted as dropped_s instead,
+    # which the TUI and README both present as translated audio the user
+    # permanently lost.
+    cap = getattr(args, "lag_cap", None)
+    target = getattr(args, "target_latency", None)
+    if cap is not None or target is not None:
+        effective_cap = cap if cap is not None else LAG_CAP_S
+        effective_target = target if target is not None else TARGET_LATENCY_S
+        if effective_cap <= effective_target:
+            parser.error(
+                f"--lag-cap ({effective_cap:g}) must be greater than "
+                f"--target-latency ({effective_target:g}); otherwise the cap "
+                "fires first and reports discarded padding as lost audio"
+            )
 
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     log_path, session = _configure_logging(args, level)

@@ -260,3 +260,45 @@ def test_lag_cap_must_be_positive():
         with pytest.raises(SystemExit):
             parse("--lag-cap", bad)
     assert parse("--lag-cap", "12.5").lag_cap == 12.5
+
+
+def test_target_latency_defaults_to_unset_so_types_owns_the_default():
+    from sidetap_live.types import TARGET_LATENCY_S
+
+    assert parse().target_latency is None, (
+        "None distinguishes unset from an explicit value"
+    )
+    assert parse("--target-latency", "0.5").target_latency == 0.5
+    action = next(
+        a for a in build_parser()._subparsers._group_actions[0].choices["run"]._actions
+        if a.dest == "target_latency"
+    )
+    assert f"{TARGET_LATENCY_S:g}" in action.help
+
+
+def test_a_lag_cap_at_or_below_the_target_is_refused():
+    """Below the target the drain never fires and the cap takes its place.
+
+    _trim_locked then holds the queue under TARGET_LATENCY_S, so _drain_locked
+    never sees an excess and every byte of discarded keep-alive padding lands
+    in dropped_s - measured at 20.8 s of pure padding reported as lost over
+    20 s. The TUI and README both present dropped_s as translated audio the
+    user permanently lost, so this configuration makes a healthy call look
+    like it is shedding sentences.
+    """
+    from sidetap_live.cli import main
+
+    for argv in (
+        ["--lag-cap", "0.5"],                     # under the 1.0 default
+        ["--lag-cap", "1.0"],                     # equal is no better
+        ["--target-latency", "40"],               # over the 30 default cap
+        ["--lag-cap", "2", "--target-latency", "2"],
+    ):
+        with pytest.raises(SystemExit) as exit_info:
+            main(["run", "--app", "zoom", "--their-lang", "ru-RU",
+                  "--my-lang", "en-US", *argv])
+        assert exit_info.value.code == 2, argv
+
+
+def test_a_lag_cap_above_the_target_is_accepted():
+    assert parse("--lag-cap", "5", "--target-latency", "2").lag_cap == 5.0

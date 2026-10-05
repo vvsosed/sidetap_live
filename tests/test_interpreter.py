@@ -694,5 +694,11 @@ def test_discarded_padding_is_reported_and_still_billed():
     assert state.squelched_s > 0.0, "the drain never reached Metrics"
     assert state.dropped_s == 0.0, "padding was reported as lost audio"
     assert state.backlog_s <= TARGET_LATENCY_S
-    # 3 s of output billed, not the ~1 s that survived the drain.
-    assert metrics.snapshot().cost_usd > 3 * 25 * 21.0 / 1e6 * 0.9
+    # Billed on the 3 s sent, not the ~1 s that survived the drain. Taken
+    # from the interpreter's own rates, so a price change cannot quietly
+    # lower this bound below the figure it is meant to catch.
+    expected = interpreter._rates.output_usd(3.0)
+    assert metrics.snapshot().cost_usd >= expected, (
+        f"billed {metrics.snapshot().cost_usd} for 3 s of output, "
+        f"expected at least {expected}"
+    )

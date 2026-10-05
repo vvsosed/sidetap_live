@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **366 tests that run with no audio hardware, no network and no
+`tests/` holds **377 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -80,7 +80,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 366 tests, no audio/network/creds
+uv run pytest -q                                    # 377 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -220,7 +220,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 366 tests import the package with no
+  `activity.py`. This is what lets 377 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -254,11 +254,20 @@ preference and these are not.
   delay you hear. Without `TARGET_LATENCY_S` draining the padding it ratcheted
   to `LAG_CAP_S` **49 seconds into the call** and stayed pinned there for 31
   minutes, with the cap discarding **1,688 s of real audio — 89% of the IN
-  stream** — to hold the line. Speech alone arrives at ~0.69x realtime, so
-  speech always fits: dropping padding is sufficient and translated audio
-  never has to be cut. Drain from the head with `leading_silence_bytes` only;
-  `find_silence_boundary` would cut the dip inside a word. Count it as
-  `squelched_s`, never `dropped_s` — see `docs/experiments/04-pacing.md`.
+  stream** — to hold the line. Over a whole call speech averages ~0.69x
+  realtime, so dropping padding is enough; that is an average, **not** an
+  instantaneous bound, and during one long uninterrupted stretch the queue
+  holds real speech whose latency draining cannot touch. Three things the
+  drain must do, each learned from a version that got it wrong: compact quiet
+  runs from anywhere in its window rather than only the head (head-only, once
+  per `submit`, is rate-limited by the model's chunk size — at 100 ms chunks
+  it fell 30 s behind and the cap cut 89 s of speech); touch only runs of at
+  least `MIN_DRAIN_RUN_MS`, because a dip inside a word is one or two frames
+  and `tick()` walks the head onto it; and leave `KEEP_PAUSE_MS` behind, or
+  sentences splice and the duck stays shut across a gap that no longer
+  exists. Count it as `squelched_s`, never `dropped_s`, and keep `--lag-cap`
+  above `--target-latency` or the cap fires first and reports padding as lost
+  audio — see `docs/experiments/04-pacing.md`.
 - **The duck triggers on audio ENERGY, not byte presence.** The model emits a
   continuous 24 kHz stream whether or not it is translating — measured at
   ~151 s of audio returned for 154 s of pure digital silence in. Keyed on bytes
