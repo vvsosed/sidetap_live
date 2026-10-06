@@ -5,7 +5,7 @@ import time
 import pytest
 
 from sidetap_live.metrics import Metrics
-from sidetap_live.types import NO_AUDIO_S, TTS_RATE, Direction
+from sidetap_live.types import NO_AUDIO_S, TTS_RATE, AudioOut, Direction
 from tests.conftest import (
     FakeLinker,
     FakeSessionFactory,
@@ -556,3 +556,35 @@ def test_a_failing_transcript_close_does_not_swallow_a_clean_shutdown(
     session.shutdown()          # must not raise
 
     assert session.router_restored is True
+
+
+def test_the_audio_probe_is_written_and_closed_when_asked_for(
+    session_args, fake_ports
+):
+    """Buffered, so an unclosed probe loses the end of the call.
+
+    That is the part that matters: the queue goes deep minutes in, and the
+    frames recorded while it is deep are the ones that say whether the drain
+    could have acted.
+    """
+    session_args.probe_audio = True
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    probe_path = session.transcript.jsonl_path.with_suffix(".audio-probe.jsonl")
+
+    session.interpreters[Direction.IN].note_event(
+        AudioOut(pcm=b"\x00\x40" * (TTS_RATE // 10))
+    )
+    session.shutdown()
+
+    assert probe_path.exists(), "the probe never reached disk"
+    assert probe_path.read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_no_probe_file_appears_unless_the_flag_is_given(session_args, fake_ports):
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    session.shutdown()
+    assert not session.transcript.jsonl_path.with_suffix(
+        ".audio-probe.jsonl"
+    ).exists()

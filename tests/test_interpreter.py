@@ -702,3 +702,41 @@ def test_discarded_padding_is_reported_and_still_billed():
         f"billed {metrics.snapshot().cost_usd} for 3 s of output, "
         f"expected at least {expected}"
     )
+
+
+def test_the_audio_probe_sees_every_chunk_with_the_target_text_timing(tmp_path):
+    """The measurement has to pair energy with the model's own speaking signal.
+
+    Energy alone could not separate padding from speech on the 2026-10-06
+    call - the keep-alive stream crossed SPEECH_PEAK every ~100 ms. Whether a
+    target-text event arrived recently is a signal that does not depend on
+    amplitude, so the probe is useless unless the two are recorded together.
+    """
+    import json
+
+    from sidetap_live.probe import AudioProbe
+
+    path = tmp_path / "probe.jsonl"
+    interpreter, _, _, clock = build()
+    interpreter._probe = AudioProbe(path, flush_every=1)
+    interpreter.feed(block(SPEECH))
+
+    interpreter.note_event(TargetText(text="hello"))
+    interpreter.note_event(AudioOut(pcm=LOUD))
+    clock.advance(2.5)
+    interpreter.note_event(AudioOut(pcm=QUIET))
+    interpreter._probe.close()
+
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(entries) == 2, entries
+    assert entries[0]["tt"] == pytest.approx(0.0), "target text had just arrived"
+    assert entries[1]["tt"] == pytest.approx(2.5), "2.5 s of silence since it"
+    assert max(entries[0]["peaks"]) > max(entries[1]["peaks"])
+
+
+def test_the_probe_is_off_unless_asked_for():
+    """It writes a file per call and costs work on the receive thread."""
+    interpreter, _, _, _ = build()
+    assert interpreter._probe is None
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=LOUD))      # must not raise

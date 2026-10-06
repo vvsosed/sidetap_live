@@ -132,6 +132,7 @@ uv run sidetap-live run \
 | `--no-idle-suspend` | keep the session open through long silences (bills continuously) |
 | `--lag-cap` | seconds of un-spoken translation before dropping the oldest at a pause. A safety valve that may cut speech, so reaching it is a loss; playout drains non-speech at 1 s to keep it out of reach. Must be greater than 0 — at or below, every submitted chunk is over the cap and the translation is dropped to the first pause continuously |
 | `--target-latency` | queue depth above which the model's keep-alive padding is discarded (default 1.0). Queue depth is the delay you hear. Lower it for a shorter delay; raise it if pauses between sentences sound clipped. Must be below `--lag-cap` |
+| `--probe-audio` | diagnostic: record every output chunk's per-frame energy to `<session>.audio-probe.jsonl`, with the model's own signal for when it is speaking. Analyse with `scripts/analyse_audio_probe.py`. Energies and timings only, no audio or text |
 | `--out` | transcript directory |
 | `--no-tui` | plain console logging, useful over SSH. Reports DEAD AIR and NO AUDIO to the log, so a deaf capture node is visible without the dashboard |
 
@@ -293,7 +294,7 @@ Real, current limitations — not aspirational TODOs.
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
   leaves unverified — it is a thirteen-item checklist, and every item on it is
-  something the 377 automated tests structurally cannot reach.
+  something the 386 automated tests structurally cannot reach.
 
 ## More detail
 

@@ -73,10 +73,17 @@ class DirectionInterpreter:
         on_event: Callable[[TranscriptEvent], None] | None = None,
         on_fatal: Callable[[Direction, BaseException], None] | None = None,
         session_t0: float = 0.0,
+        probe=None,
     ):
         self._config = config
         self._sessions = sessions
         self._playout = playout
+        # Diagnostic only, None unless --probe-audio. See probe.py: energy
+        # alone could not tell the model's keep-alive padding from speech on
+        # a real call, so this records the raw frames beside the model's own
+        # signal for when it is speaking.
+        self._probe = probe
+        self._last_target_text_at: float | None = None
         self._activity = activity
         self._metrics = metrics
         self._clock = clock
@@ -426,6 +433,11 @@ class DirectionInterpreter:
         """
         match event:
             case AudioOut(pcm=pcm):
+                if self._probe is not None:
+                    since = None
+                    if self._last_target_text_at is not None:
+                        since = self._clock.monotonic() - self._last_target_text_at
+                    self._probe.note(self.direction, pcm, since_target_text=since)
                 self._playout.submit(pcm)
                 self._metrics.set_backlog_s(self.direction, self._playout.backlog_s())
                 # submit() may have trimmed, so read the drop total back here
@@ -442,6 +454,7 @@ class DirectionInterpreter:
                 self._metrics.append_text(self.direction, source=text)
                 self._emit("source", text)
             case TargetText(text=text):
+                self._last_target_text_at = self._clock.monotonic()
                 self._metrics.append_text(self.direction, target=text)
                 self._emit("target", text)
             case GoAway():

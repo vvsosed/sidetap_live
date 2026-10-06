@@ -151,6 +151,14 @@ class Session:
             Direction.IN: default_sink.serial if default_sink else None,
             Direction.OUT: virtmic.serial,
         }
+        self._probe = None
+        if getattr(args, "probe_audio", False):
+            from .probe import AudioProbe
+
+            self._probe = AudioProbe(
+                self.transcript.jsonl_path.with_suffix(".audio-probe.jsonl")
+            )
+
         # Which language each direction translates INTO: what reaches your
         # ears is in your language, what reaches theirs is in theirs.
         lang_targets = {
@@ -209,6 +217,7 @@ class Session:
                 on_event=self.transcript.write,
                 on_fatal=self._on_direction_fatal,
                 session_t0=session_t0,
+                probe=self._probe,
             )
 
         self.capture = PipeWireCapture(
@@ -490,6 +499,13 @@ class Session:
                     self.transcript.close()
                 except Exception:
                     log.exception("could not write the transcript markdown")
+            if self._probe is not None:
+                # Buffered, so without this the last 200 chunks of the call -
+                # including everything after the queue went deep - never land.
+                try:
+                    self._probe.close()
+                except Exception:
+                    log.exception("could not write the audio probe")
 
 
 def run_session(args, *, graph, launcher, linker, clock, sessions=None,

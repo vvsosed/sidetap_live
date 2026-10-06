@@ -251,6 +251,24 @@ Three limits, all measured, none of them the bug above:
   runs 26.2 s — all with nothing cut — and 60 s runs saturate the cap and lose
   53.9 s. The 0.69x figure above is a call average, not an instantaneous
   bound. Bounding this needs time-stretching the output, not discarding it.
+- **The drain did not work on a real call, and this is why.** On 2026-10-06
+  (`transcripts/20261006-100025-886964.log`, 11.4 min) the drain removed
+  **nothing** and the queue pinned at the cap again, 1,965 drops. The OUT
+  direction is the proof it was not a speech-lead problem: 667 source
+  characters, about **40 s of speech in a 683 s call — 0.06x realtime** —
+  inside ~732 s delivered, so that queue was **95% padding by volume**. IN was
+  66% padding, speech 0.48x realtime. Both are fully removable in principle.
+  The classifier is what failed: the log's drop sizes are the leading
+  non-quiet run, **median 0.10 s**, so on a live call the keep-alive stream
+  crosses `SPEECH_PEAK` every ~100 ms and no quiet run reaches
+  `MIN_DRAIN_RUN_MS`. Experiment 2's idle-peak figure of 1078 came from a
+  session fed prerecorded audio already in the target language — "nothing
+  worth translating" — and did not transfer to a live call. Reproduced
+  offline: a stream that is 95% padding but crosses 2000 every 100 ms gives
+  peak backlog 30.0 s, drained 0.0 s, cap cut 58.0 s.
+  **Whether padding is separable from speech at all is now experiment 6**;
+  run `sidetap-live run --probe-audio` on a real call and analyse it with
+  `scripts/analyse_audio_probe.py`.
 - **Padding finer than ~200 ms is indistinguishable from speech.** A quiet run
   of one or two 20 ms frames is exactly what occurs inside a word, by the same
   `SPEECH_PEAK` test, so the drain declines and leaves it to the cap.

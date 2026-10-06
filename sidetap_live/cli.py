@@ -120,6 +120,15 @@ def build_parser() -> argparse.ArgumentParser:
         "pauses between sentences sound clipped.",
     )
     out.add_argument(
+        "--probe-audio",
+        action="store_true",
+        help="record the per-frame energy of every output chunk to "
+        "<session>.audio-probe.jsonl, beside the model's own signal for when "
+        "it is speaking. Diagnostic: the lab measurement of the keep-alive "
+        "stream did not hold on a real call, so the drain's threshold needs "
+        "measuring against one. Energies and timings only, no audio or text.",
+    )
+    out.add_argument(
         "--duck-level",
         type=duck_level,
         default=0.0,
