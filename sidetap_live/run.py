@@ -325,6 +325,11 @@ class Session:
         conversation. The interpreters keep running for the transcript.
         """
         with self._lifecycle_lock:
+            # At INFO, beside routing and rotation. Both hotkeys rewire the
+            # audio path and empty the playout queues, so a log without them
+            # cannot explain a backlog: on the 2026-10-08 call 311 of 325
+            # lag-cap drops fell inside one 81 s window that nothing recorded.
+            log.info("bypass %s", "engaged" if value else "released")
             self._set_bypass_locked(value)
 
     def _set_bypass_locked(self, value: bool) -> None:
@@ -357,6 +362,7 @@ class Session:
         with self._lifecycle_lock:
             # Flag and metric written together, so the lit key and the next
             # keypress agree.
+            log.info("mute out %s", "engaged" if value else "released")
             self._muted_out = value
             self.metrics.set_muted_out(value)
             self._apply_suppression_locked(self._bypassed)
@@ -549,6 +555,10 @@ def run_session(args, *, graph, launcher, linker, clock, sessions=None,
         session_obj.transcript.original_path,
         session_obj.transcript.translated_path,
     ]
+    # Named only when it exists, but named: a diagnostic the user cannot find
+    # is a diagnostic they will not send.
+    if session_obj._probe is not None:
+        saved.append(session_obj.transcript.jsonl_path.with_suffix(".audio-probe.jsonl"))
     log_path = session_obj.transcript.jsonl_path.with_suffix(".log")
     if log_path.exists():
         saved.append(log_path)

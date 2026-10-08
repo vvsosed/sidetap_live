@@ -39,6 +39,16 @@ STARVE_LIMIT_TICKS = 10
 # Silent ticks before the duck reopens; see DUCK_HOLD_S.
 DUCK_HOLD_TICKS = max(1, int(DUCK_HOLD_S * 1000 / CHUNK_MS))
 
+# Peak below which a frame is padding FOR THE DRAIN. Deliberately not
+# SPEECH_PEAK: that one answers "is the model translating", for the duck, and
+# experiment 6 measured OUT's translated speech at a median peak of 591
+# against IN's 5480 - so a drain keyed on 2000 ate most genuine OUT speech,
+# which the remote party then never hears at all. What the model actually
+# emits between utterances is exact digital silence: 21.2% of the IN stream
+# and 48.0% of OUT. 64 leaves room for dither and a DC offset while staying
+# an order of magnitude below the quietest speech measured.
+DRAIN_PEAK = 64
+
 # Shortest quiet run the drain may touch. Clear speech routinely contains a
 # quiet 20 ms frame inside a word, so keying on single frames clips
 # consonants - and restricting the drain to the head does not help, because
@@ -203,6 +213,11 @@ class Playout:
         # which is a quality loss worth alarming about, and this one is the
         # routine disposal of bytes that carry no speech.
         self.squelched_s = 0.0
+        # Discarded because playout was suppressed. A third category on
+        # purpose: not a quality loss like dropped_s, and not padding like
+        # squelched_s - it is translated speech that nobody wants, because
+        # the conversation it translates happened unmediated.
+        self.suppressed_s = 0.0
         self.spoken_s = 0.0
         self.suppressed = False
         self._sink = sink
@@ -221,6 +236,16 @@ class Playout:
 
     def submit(self, pcm: bytes) -> None:
         with self._lock:
+            if self.suppressed:
+                # tick() consumes nothing while suppressed, so queueing here
+                # filled the buffer to LAG_CAP_S with audio nobody will ever
+                # want: the conversation during bypass is unmediated, and its
+                # translation is stale before it could play. Leaving bypass
+                # then handed back ~28 s of it. It also made _trim_locked
+                # rescan a 30 s buffer on every submit, on the playout thread,
+                # for the whole bypass.
+                self.suppressed_s += len(pcm) / TTS_BYTES_PER_S
+                return
             self._pending.extend(pcm)
             # Drain first. Padding removed here is backlog the cap never sees,
             # which is the difference between the cap staying a safety valve
@@ -244,15 +269,19 @@ class Playout:
             return seconds
 
     def set_suppressed(self, value: bool) -> None:
-        """Entering bypass throws the queue away.
+        """Throw the queue away on BOTH edges of suppression.
 
-        The conversation during bypass is unmediated, so its translation is
-        stale by the time it could play. The lag cap also never runs while
-        suppressed.
+        Entering, because the conversation during bypass is unmediated and
+        its translation is stale by the time it could play. Leaving, because
+        anything that did slip in belongs to exactly that window - submit()
+        discards while suppressed, so this is the backstop for the chunk that
+        races the flag, not the mechanism.
+
+        The flag is set before the flush so a concurrent submit either sees
+        suppression and discards, or is flushed here.
         """
         self.suppressed = value
-        if value:
-            self.flush()
+        self.flush()
 
     def _drain_locked(self) -> None:
         """Discard keep-alive padding so the queue stops hoarding latency.
@@ -316,7 +345,7 @@ class Playout:
             known = cache[frame]
             if known is None:
                 block = region[frame * per_frame : (frame + 1) * per_frame]
-                known = max(block) < SPEECH_PEAK and min(block) > -SPEECH_PEAK
+                known = max(block) < DRAIN_PEAK and min(block) > -DRAIN_PEAK
                 cache[frame] = known
             return known
 

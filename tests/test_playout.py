@@ -300,9 +300,12 @@ def test_one_bad_chunk_does_not_end_playout_for_the_call():
     )
 
 
-# The model's keep-alive stream at its measured idle level, peak 1078
-# (docs/experiments/02-voice-stability.md) - below SPEECH_PEAK, so inaudible.
-IDLE = (1078).to_bytes(2, "little", signed=True) * (CHUNK_BYTES // 2)
+# What the model emits between utterances on a LIVE call: exact digital
+# silence (experiment 6, 2026-10-08 - 21.2% of the IN stream, 48.0% of OUT).
+# Experiment 2's 1078-peak figure came from a session with nothing to
+# translate and does not describe a real call; 1078 sits in the middle of
+# OUT's own speech distribution, so treating it as padding cuts speech.
+IDLE = (0).to_bytes(2, "little", signed=True) * (CHUNK_BYTES // 2)
 
 
 def model_stream():
@@ -561,3 +564,107 @@ def test_the_lag_cap_still_fires_on_a_backlog_of_real_speech():
 
     assert playout.dropped_s > 0.0
     assert playout.backlog_s() <= 0.5
+
+
+def test_nothing_accumulates_while_suppressed():
+    """What bypass is FOR: the conversation during it happened unmediated.
+
+    tick() consumes nothing while suppressed - it writes silence and returns -
+    but submit() had no suppression guard, so the model kept filling the queue
+    to LAG_CAP_S with audio nobody would ever want. Measured on the 2026-10-08
+    call: 311 of its 325 cap drops fell inside one 81 s window, with the cap
+    grinding continuously through it.
+
+    A small cap here only to keep the test quick. The deep queue is also what
+    made _trim_locked rescan the whole buffer on every submit, on the playout
+    thread, for the entire bypass.
+    """
+    playout, _, _ = build(lag_cap_s=2.0)
+    playout.set_suppressed(True)
+    for _ in range(300):                         # 6 s of bypass
+        playout.submit(SPEECH)
+        playout.tick()
+
+    assert playout.backlog_s() == 0.0, (
+        f"{playout.backlog_s():.1f}s queued up during bypass"
+    )
+    assert playout.dropped_s == 0.0, "the lag cap ran while suppressed"
+    assert playout.suppressed_s > 0.0, "the discard was not accounted for"
+
+
+def test_leaving_bypass_does_not_hand_back_the_bypassed_conversation():
+    """Leaving suppression used to inherit the whole bypassed window.
+
+    Measured at the real 30 s cap: 80 s of bypass left 27.92 s queued, and
+    set_suppressed(False) never flushed - so the remote party was about to
+    hear the last half minute of a conversation already had without the
+    interpreter.
+    """
+    playout, _, _ = build(lag_cap_s=2.0)
+    playout.submit(SPEECH * 100)
+    playout.set_suppressed(True)
+    for _ in range(300):
+        playout.submit(SPEECH)
+        playout.tick()
+
+    playout.set_suppressed(False)
+    assert playout.backlog_s() == 0.0, (
+        f"came back to {playout.backlog_s():.1f}s of the bypassed conversation"
+    )
+
+
+def test_the_queue_resumes_normally_after_bypass():
+    """The flush must not leave playout wedged - OUT has no raw fallback."""
+    playout, sink, _ = build()
+    playout.set_suppressed(True)
+    playout.submit(SPEECH)
+    playout.set_suppressed(False)
+
+    playout.submit(SPEECH)
+    assert playout.tick() is True
+    assert sink.chunks[-1] == SPEECH
+
+
+# OUT's translated speech, at its measured median peak (experiment 6,
+# 2026-10-08: p50 591, p90 2136). Well BELOW SPEECH_PEAK, which is why a
+# drain keyed on that threshold ate it.
+QUIET_SPEECH = (591).to_bytes(2, "little", signed=True) * (CHUNK_BYTES // 2)
+
+# The model's idle output as actually measured on a live call: exact digital
+# silence. 21.2% of the IN stream and 48.0% of OUT, in runs whose median
+# length is 17 frames on IN and 847 on OUT. Not the 1078-peak hiss experiment
+# 2 saw from a session with nothing to translate.
+DIGITAL_SILENCE = QUIET
+
+
+def test_quiet_speech_is_not_mistaken_for_padding():
+    """OUT's speech sits below SPEECH_PEAK, so that threshold cannot gate it.
+
+    Experiment 6 measured OUT's translated speech at a median peak of 591
+    against IN's 5480. A drain keyed on SPEECH_PEAK = 2000 therefore treats
+    most genuine OUT speech as padding - and OUT has no raw path to fall back
+    to, so what it cuts the remote party simply never hears.
+    """
+    playout, _, _ = build()
+    playout.submit(QUIET_SPEECH * 150)           # 3 s of OUT-level speech
+
+    assert playout.squelched_s == 0.0, (
+        f"drained {playout.squelched_s:.2f}s of speech quieter than SPEECH_PEAK"
+    )
+    assert playout.backlog_s() == pytest.approx(3.0)
+
+
+def test_the_drain_removes_the_models_digital_silence():
+    """What the model actually emits between utterances, and the whole point.
+
+    Experiment 6: 21.2% of the IN stream and 48.0% of OUT are exact zeros,
+    in runs long enough to act on. Against a measured surplus of 2.6% on IN
+    that is an order of magnitude of headroom - and it carries no risk at
+    all, because there is nothing in it to lose.
+    """
+    playout, _, _ = build()
+    playout.submit(DIGITAL_SILENCE * 150)        # 3 s of exact silence
+
+    assert playout.squelched_s > 0.0
+    assert playout.dropped_s == 0.0
+    assert playout.backlog_s() <= TARGET_LATENCY_S

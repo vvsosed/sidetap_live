@@ -87,4 +87,36 @@ def test_the_payload_carries_no_audio_and_no_text(tmp_path):
     probe.note(Direction.IN, frame(1078), since_target_text=0.1)
     probe.close()
 
-    assert set(read(path)[0]) == {"t", "d", "bytes", "peaks", "partial", "tt"}
+    assert set(read(path)[0]) == {"t", "w", "d", "bytes", "peaks", "partial", "tt"}
+
+
+def test_it_records_wall_clock_as_well_as_output_time(tmp_path):
+    """Without wall clock the probe cannot answer the question it exists for.
+
+    `t` is cumulative OUTPUT-audio time, so a file of it says how much audio
+    arrived but not how fast. Whether a burst arrives faster than realtime -
+    which is what makes queue depth grow - needs the two side by side.
+    """
+    path = tmp_path / "probe.jsonl"
+    ticks = iter([100.0, 100.5, 103.0])
+    probe = AudioProbe(path, clock=lambda: next(ticks), flush_every=1)
+    probe.note(Direction.IN, frame(0) * 25, since_target_text=None)   # 0.5 s
+    probe.note(Direction.IN, frame(0) * 25, since_target_text=None)   # 0.5 s
+    probe.close()
+
+    entries = read(path)
+    assert [e["w"] for e in entries] == [0.0, 0.5]
+    assert [e["t"] for e in entries] == [0.0, 0.5]
+
+
+def test_wall_clock_shows_audio_arriving_faster_than_realtime(tmp_path):
+    """The shape that makes a backlog: 1 s of audio delivered in 0.4 s."""
+    path = tmp_path / "probe.jsonl"
+    ticks = iter([0.0, 0.4, 0.4])
+    probe = AudioProbe(path, clock=lambda: next(ticks), flush_every=1)
+    probe.note(Direction.IN, frame(0) * 50, since_target_text=None)   # 1.0 s
+    probe.note(Direction.IN, frame(0) * 50, since_target_text=None)
+    probe.close()
+
+    second = read(path)[1]
+    assert second["t"] == 1.0 and second["w"] == 0.4, second

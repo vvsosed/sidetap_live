@@ -221,11 +221,20 @@ expected and not this bug: the model generates faster than realtime, so during
 an uninterrupted stretch the queue holds real speech and the delay tracks that
 lead. `dropped` staying at `0.0s` is what says the difference.
 
+**Then press `b` for a minute, release it, and watch `backlog`.** This is what
+broke on the 2026-10-08 call: playout consumed nothing while suppressed but
+kept queueing, so bypass filled the buffer to the cap and released ~28 s of
+the conversation you had just had *unmediated* — about to be spoken at the
+remote party. After releasing bypass, `backlog` should be back near zero
+within a second or two and `dropped` should not have moved. Do the same with
+`m`, which suppresses OUT only.
+
 Afterwards, confirm it in the log rather than trusting memory:
 
 ```bash
 grep -c "behind" transcripts/<session>.log     # expect 0
 grep -c "drained"  transcripts/<session>.log   # expect many, at -v
+grep -E "bypass|mute out" transcripts/<session>.log   # when you pressed them
 ```
 
 A non-zero first count is the regression. The 2026-10-05 call scored 11,000.

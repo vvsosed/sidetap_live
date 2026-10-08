@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from array import array
+from collections.abc import Callable
 from pathlib import Path
 
 from .types import TTS_BYTES_PER_S, Direction
@@ -43,11 +45,19 @@ FLUSH_EVERY = 200
 class AudioProbe:
     """Append one record per output chunk. Off unless explicitly constructed."""
 
-    def __init__(self, path: Path, *, flush_every: int = FLUSH_EVERY):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        flush_every: int = FLUSH_EVERY,
+        clock: Callable[[], float] | None = None,
+    ):
         self._path = Path(path)
         self._flush_every = flush_every
         self._buffer: list[str] = []
         self._elapsed = 0.0
+        self._clock = clock or time.monotonic
+        self._started: float | None = None
 
     def note(
         self,
@@ -78,10 +88,18 @@ class AudioProbe:
             peaks.append(max(max(samples), -min(samples)))
             offset += frame_bytes
 
+        now = self._clock()
+        if self._started is None:
+            self._started = now
         self._buffer.append(
             json.dumps(
                 {
+                    # Output-audio time and wall clock, together. `t` alone
+                    # says how much audio arrived; the pair says how fast,
+                    # and arriving faster than realtime is what makes queue
+                    # depth - and therefore the delay you hear - grow.
                     "t": round(self._elapsed, 3),
+                    "w": round(now - self._started, 3),
                     "d": direction.value,
                     "bytes": len(pcm),
                     "peaks": peaks,

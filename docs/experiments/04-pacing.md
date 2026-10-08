@@ -266,9 +266,11 @@ Three limits, all measured, none of them the bug above:
   worth translating" — and did not transfer to a live call. Reproduced
   offline: a stream that is 95% padding but crosses 2000 every 100 ms gives
   peak backlog 30.0 s, drained 0.0 s, cap cut 58.0 s.
-  **Whether padding is separable from speech at all is now experiment 6**;
-  run `sidetap-live run --probe-audio` on a real call and analyse it with
-  `scripts/analyse_audio_probe.py`.
+  **Answered by experiment 6**, which measured the real stream: the model's
+  inter-utterance output is *exact digital silence*, not a 1078-peak hiss, and
+  the delivery rate is 1.026x on IN rather than the 1.89x inferred here. The
+  30 s backlogs were caused by playout accumulating while suppressed, not by
+  inflow. See `06-padding-separability.md`.
 - **Padding finer than ~200 ms is indistinguishable from speech.** A quiet run
   of one or two 20 ms frames is exactly what occurs inside a word, by the same
   `SPEECH_PEAK` test, so the drain declines and leaves it to the cap.

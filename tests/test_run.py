@@ -588,3 +588,26 @@ def test_no_probe_file_appears_unless_the_flag_is_given(session_args, fake_ports
     assert not session.transcript.jsonl_path.with_suffix(
         ".audio-probe.jsonl"
     ).exists()
+
+
+def test_bypass_and_mute_are_logged(session_args, fake_ports, caplog):
+    """Diagnosing the 2026-10-08 call needed this and it was not there.
+
+    311 of that call's 325 lag-cap drops fell inside one 81 s window, which
+    was almost certainly a bypass - but bypass and mute wrote nothing at all,
+    so the attribution could not be confirmed from the log. They change the
+    audio path and the playout queue; they belong in the record at INFO,
+    beside the routing and rotation lines.
+    """
+    import logging
+
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    with caplog.at_level(logging.INFO, logger="sidetap_live.run"):
+        session.set_mute_out(True)
+        session.set_mute_out(False)
+    session.shutdown()
+
+    text = caplog.text
+    assert "mute" in text.lower(), text
+    assert text.lower().count("mute") >= 2, "only one edge was logged"

@@ -126,7 +126,7 @@ async def test_bypass_does_not_run_graph_work_on_the_ui_thread():
 
         def set_bypass(self, value):
             started.set()
-            release.wait(2.0)          # stands in for a slow pw-dump
+            release.wait(30.0)         # stands in for a slow pw-dump
             finished.set()
 
     session = SlowSession()
@@ -135,6 +135,9 @@ async def test_bypass_does_not_run_graph_work_on_the_ui_thread():
         await pilot.pause()
 
         app.action_bypass()
+        # The wait above is long on purpose: the assertion is that the work
+        # has NOT completed, so a short timeout lets the worker finish by
+        # itself under load and the test fails for a reason it is not about.
         assert not finished.is_set(), "set_bypass ran inline on the UI thread"
 
         # Yield to the loop so the worker can be scheduled - blocking on a
@@ -285,7 +288,7 @@ async def test_mute_does_not_run_session_work_on_the_ui_thread():
 
         def set_mute_out(self, value):
             started.set()
-            release.wait(2.0)          # stands in for bypass holding the lock
+            release.wait(30.0)         # stands in for bypass holding the lock
             finished.set()
 
     session = SlowSession()
