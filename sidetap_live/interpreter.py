@@ -31,6 +31,7 @@ from .types import (
     IDLE_SUSPEND_S,
     OVERLAP_MAX_S,
     REOPEN_BACKOFF_S,
+    SUPPRESSED_SUSPEND_S,
     TARGET_RATE,
     AudioChunk,
     AudioOut,
@@ -84,6 +85,11 @@ class DirectionInterpreter:
         # signal for when it is speaking.
         self._probe = probe
         self._last_target_text_at: float | None = None
+        # When this direction's output stopped being wanted - bypass or mute.
+        # None means wanted. See set_output_wanted.
+        self._unwanted_since: float | None = None
+        self._wake_on_release = False
+        self._release_pending = False
         self._activity = activity
         self._metrics = metrics
         self._clock = clock
@@ -122,10 +128,88 @@ class DirectionInterpreter:
     def state(self) -> SessionState:
         return self._state
 
+    def set_output_wanted(self, wanted: bool) -> None:
+        """Tell this direction whether anyone is listening to it.
+
+        Called when bypass or mute changes. Playout suppression alone only
+        throws the audio away after paying for it: the session stays open, the
+        model keeps translating, and on the 2026-10-09 call a ~30 minute mute
+        bought 2,129 s of OUT audio discarded on arrival, about $1.12.
+        IDLE_SUSPEND_S cannot catch that, because it keys on input silence and
+        the user is still talking.
+
+        Not immediate in either direction. Suspending waits
+        SUPPRESSED_SUSPEND_S so a short bypass does not churn a session that
+        emits nothing for its first ~3 s. Resuming opens at once rather than
+        waiting for speech onset, so the warm-up hides inside the time the
+        user takes to start talking.
+
+        Safe from another thread: it only sets flags, and the pump acts on
+        them when the next block arrives. Nothing here touches the pre-roll,
+        the session, or the state.
+        """
+        if wanted:
+            self._unwanted_since = None
+            # Only a flag. PreRoll has no lock and drain() iterates the deque
+            # that the pump's add() appends to, so clearing it from here -
+            # the hotkey's worker thread - can raise "deque mutated during
+            # iteration". _discard_suppressed_window does it on the pump.
+            self._release_pending = True
+            self._wake_on_release = True
+            return
+        if self._unwanted_since is None:
+            self._unwanted_since = self._clock.monotonic()
+
+    def _discard_suppressed_window(self) -> None:
+        """Forget everything recorded while nobody was listening.
+
+        The pre-roll, because _open(replay=True) would otherwise send the
+        model up to PREROLL_S of what was said WHILE MUTED, and the remote
+        party would hear a translation of it - mute means do not transmit
+        this. _speech_at, because nothing clears it while suspended (clearing
+        happens when output arrives, and none does), so the first feed after
+        release would read as DEAD_AIR_S of speech with silence out and sound
+        the earcon.
+
+        Runs on the pump, before the current block is added, so the first
+        block after release still reaches the new session.
+        """
+        self._preroll.drain()
+        with self._lock:
+            self._speech_at = None
+
+    def _suppressed_long_enough(self) -> bool:
+        if self._unwanted_since is None:
+            return False
+        # --no-idle-suspend is an explicit choice to pay for responsiveness,
+        # and this is the same trade.
+        if not self._config.idle_suspend:
+            return False
+        held = self._clock.monotonic() - self._unwanted_since
+        return held >= SUPPRESSED_SUSPEND_S
+
+    def _suspend_for_suppression(self) -> None:
+        """Close the session AND any warming replacement.
+
+        _close only touches the session on air, and a replacement opened for a
+        rotation bills just the same. Not _drop_pending: that reports a dead
+        replacement and sets the reopen backoff, which would then delay the
+        open on release.
+        """
+        pending, self._pending = self._pending, None
+        self._pending_warm = False
+        if pending is not None:
+            pending.close()
+        self._close("output suppressed")
+        self._set_state(SessionState.SUSPENDED)
+
     # ---------- the pump thread ----------
 
     def feed(self, chunk: AudioChunk) -> None:
         """Handle one captured block. Public so tests drive it without threads."""
+        if self._release_pending:
+            self._release_pending = False
+            self._discard_suppressed_window()
         speaking = self._activity.observe(chunk.pcm)
         self._preroll.add(chunk.pcm)
         if speaking:
@@ -137,6 +221,13 @@ class DirectionInterpreter:
             # _reopen's pre-roll replay already sends this chunk; falling
             # through would send it twice.
             self._reopen()
+            return
+
+        # Before the state dispatch, so it preempts an owed rotation and an
+        # overlap in progress: closing the session makes both moot, and
+        # neither is worth paying for when nobody is listening.
+        if self._state is not SessionState.SUSPENDED and self._suppressed_long_enough():
+            self._suspend_for_suppression()
             return
 
         if self._state is SessionState.SUSPENDED:
@@ -186,6 +277,16 @@ class DirectionInterpreter:
     def _should_wake(self, speaking: bool) -> bool:
         if self._backing_off():
             return False
+        if self._unwanted_since is not None:
+            # Nobody is listening; waking would reopen what suppression just
+            # closed and bill for it.
+            return False
+        if self._wake_on_release:
+            # Opening on release rather than on the next word is what keeps
+            # unmuting from costing the fresh session's ~3 s of silence on
+            # top of the user's own reaction time.
+            self._wake_on_release = False
+            return True
         # With no detector there is no onset to wait for, so open at once and
         # hold the session for the whole call.
         return speaking or not self._activity.available

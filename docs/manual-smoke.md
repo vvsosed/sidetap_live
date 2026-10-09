@@ -229,12 +229,30 @@ remote party. After releasing bypass, `backlog` should be back near zero
 within a second or two and `dropped` should not have moved. Do the same with
 `m`, which suppresses OUT only.
 
+**Then hold mute for a full minute and listen to what happens when you release
+it.** Past `SUPPRESSED_SUSPEND_S` the OUT session closes, because holding it
+open costs about $2.21 an hour for audio discarded on arrival. Two things have
+to be true on release, and only an ear can check them:
+
+- **You are audible again promptly.** The session reopens the moment you
+  release, not when you next speak, so its ~3 s warm-up should hide inside the
+  time you take to start talking. If the remote party loses your first
+  sentence, the eager reopen is not working.
+- **Nothing you said while muted is transmitted.** Say something distinctive
+  while muted, release, then stay quiet and ask the remote party what they
+  heard. The pre-roll spans the release boundary and is cleared for exactly
+  this reason; if they heard it, that is a serious bug, not a tuning problem.
+
+Watch `session` in the pane go `suspended` while muted and back to `running`
+on release. `rot` must not climb — a mute is not a rotation.
+
 Afterwards, confirm it in the log rather than trusting memory:
 
 ```bash
 grep -c "behind" transcripts/<session>.log     # expect 0
 grep -c "drained"  transcripts/<session>.log   # expect many, at -v
 grep -E "bypass|mute out" transcripts/<session>.log   # when you pressed them
+grep -c "closed (output suppressed)" transcripts/<session>.log   # sessions closed
 ```
 
 A non-zero first count is the regression. The 2026-10-05 call scored 11,000.

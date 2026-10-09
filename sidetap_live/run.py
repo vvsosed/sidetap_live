@@ -381,8 +381,17 @@ class Session:
             (Direction.OUT, bypassed or self._muted_out),
         ):
             playout = self.playouts[direction]
-            if playout.suppressed != want:
-                playout.set_suppressed(want)
+            if playout.suppressed == want:
+                continue
+            playout.set_suppressed(want)
+            # Suppression alone throws the audio away after paying for it:
+            # the session stays open and the model keeps translating. A ~30 min
+            # mute on 2026-10-09 bought 2,129 s of OUT audio nobody heard.
+            # The interpreter decides when to act on this - see
+            # set_output_wanted and SUPPRESSED_SUSPEND_S.
+            interpreter = self.interpreters.get(direction)
+            if interpreter is not None:
+                interpreter.set_output_wanted(not want)
 
     def _link_real_mic(self, connected: bool) -> None:
         """Wire the user's real microphone straight into the virtual mic.

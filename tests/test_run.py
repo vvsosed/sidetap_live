@@ -611,3 +611,42 @@ def test_bypass_and_mute_are_logged(session_args, fake_ports, caplog):
     text = caplog.text
     assert "mute" in text.lower(), text
     assert text.lower().count("mute") >= 2, "only one edge was logged"
+
+
+def test_mute_tells_only_the_out_interpreter_that_nobody_is_listening(
+    session_args, fake_ports
+):
+    """Mute suppresses OUT alone, so IN must keep translating.
+
+    Suspending IN on a mute would stop you hearing the person you are
+    listening to, which is the opposite of what mute means.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        session.set_mute_out(True)
+        assert session.interpreters[Direction.OUT]._unwanted_since is not None
+        assert session.interpreters[Direction.IN]._unwanted_since is None
+
+        session.set_mute_out(False)
+        assert session.interpreters[Direction.OUT]._unwanted_since is None
+    finally:
+        session.shutdown()
+
+
+def test_bypass_tells_both_interpreters_that_nobody_is_listening(
+    session_args, fake_ports
+):
+    """Bypass suppresses both playouts, so both sessions are billing for
+    audio discarded on arrival."""
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        session.set_bypass(True)
+        assert all(
+            session.interpreters[d]._unwanted_since is not None for d in Direction
+        )
+        session.set_bypass(False)
+        assert all(session.interpreters[d]._unwanted_since is None for d in Direction)
+    finally:
+        session.shutdown()
