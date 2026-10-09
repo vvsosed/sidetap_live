@@ -135,7 +135,11 @@ class SidetapLiveApp(App):
                 f"backlog {format_lag(state.backlog_s)}   "
                 f"offset {format_lag(state.offset_s)}   "
                 f"rot {format_rotations(state.rotations, state.forced_rotations)}   "
-                f"dropped {format_lag(state.dropped_s)}/{state.capture_dropped}"
+                f"dropped {format_lag(state.dropped_s)}/{state.capture_dropped}   "
+                # Shown beside `dropped`, never added to it: padding carries
+                # no speech and runs to hundreds of seconds in a long call,
+                # while a non-zero `dropped` means sentences are being cut.
+                f"pad {format_lag(state.squelched_s)}"
                 f"{alarm}"
             )
             pane = self.query_one(f"#pane-{suffix}")

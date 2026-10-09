@@ -161,3 +161,131 @@ ahead, forcing pauses) appears necessary for this condition.**
 
 - `scripts/exp04_pacing.py` — the experiment
 - Raw run log (not committed): `/tmp/exp04.log`
+
+## Addendum, 2026-10-05: the raw-byte ratio is the one that governs backlog
+
+This experiment's headline number, the 0.894 speech-time ratio, is correct and
+still the right answer to "does the model translate faster than it is spoken".
+It is the wrong number for "does the playout queue grow", and that distinction
+cost a real call.
+
+The figure set aside above as "for reference only and known to be
+uninformative" — **raw output 99.50 s against 98.29 s of sending, a ratio of
+1.012** — is the only one the playout queue responds to.
+`DirectionInterpreter._dispatch` enqueues every `AudioOut` byte, speech or not,
+and `Playout` drains exactly one 20 ms chunk per tick paced by `pw-cat`, i.e.
+at precisely realtime. So inflow is *raw bytes* and outflow is realtime: any
+raw ratio above 1.0 accumulates as queue depth, and **queue depth is latency**,
+not a statistic. The speech-bearing ratio never enters into it.
+
+Every translating run on record is above 1.0 on that measure: this one 1.012,
+exp02's `continuous.raw` 98.25/96.17 = 1.022, exp02's `rotated.raw`
+99.00/96.17 = 1.029. At those rates it takes 9–22 minutes to build 16 s of
+delay. This run lasted 96 s and accumulated 1.2 s, which is invisible. The last
+caveat above called it: "96 s is short next to a real call. Nothing here rules
+out a *slow* drift that would only become visible over many minutes."
+
+It was not a slow drift.
+
+### What a real call did
+
+`transcripts/20261005-100120-593938.log`, a 31.7 min Teams call, ru↔en:
+
+| | IN | OUT |
+|---|---|---|
+| lag-cap drop warnings | 7,931 | 3,069 |
+| audio discarded by the cap | **1,688.0 s** | 828.7 s |
+| share of the stream discarded | **89%** | 44% |
+| inflow (played + discarded ÷ elapsed) | **1.89x** | 1.44x |
+
+First drop at **t=+49 s, already 30.2 s behind**: the queue saturated
+`LAG_CAP_S` inside the first minute and stayed pinned there for the remaining
+31 minutes, with the cap discarding real audio continuously to hold the line.
+Every one of the 11,000 drops reported "at a pause", median 0.1 s — the queue
+was riddled with silence. Reproduced on the 2026-09-30 call: 30 s by t=+3.5 min,
+34.7 s discarded.
+
+The surplus is not speech, and the transcript proves it: IN carried 22,024
+source characters against 22,789 target (**1.035**), OUT 7,778 against 7,850
+(**1.009**), with 6 duplicate consecutive fragments in 1,683. The model is
+neither verbose nor repeating. Attributing the 22,024 characters to speech at
+conversational pace and applying this experiment's own 0.894 ratio gives
+~1,313 s of actual speech inside 3,588 s delivered — so roughly **37% speech,
+63% keep-alive padding**, and speech alone arrives at **0.69x realtime**.
+
+That last figure is the important one: **speech fits.** Only the padding pushes
+inflow over 1.0, which is why discarding padding is always sufficient and no
+translated audio ever has to be cut.
+
+### Confirmed by replay
+
+Driving `Playout` offline with that profile (1.89x inflow, 37/63 split)
+reproduces the failure and the fix:
+
+| | before | after `TARGET_LATENCY_S` |
+|---|---|---|
+| first lag-cap drop | t=+34 s (real: +49 s) | never |
+| backlog | pinned 30 s (real: 30 s) | peak 1.6 s |
+| real audio cut over 31.7 min | 65% (real: 89%) | **0.0 s** |
+| padding discarded | — | **~1,690 s** (real IN: 1,688.0 s) |
+
+The padding figure matching the real log to within a second or two, from an
+independently derived split, is what confirms the diagnosis.
+
+### What the drain does not fix
+
+Three limits, all measured, none of them the bug above:
+
+- **Submit granularity used to matter and must not.** A first version removed
+  only the one quiet run at the head of the queue, once per `submit()`, which
+  rate-limits disposal to submits per second. `live.py` emits one `AudioOut`
+  per server message, so the chunk size is the model's choice and nothing here
+  measures it: at 100 ms chunks that version fell 30 s behind and the cap cut
+  89 s of speech, while the identical stream fed one 20 ms frame at a time
+  held 1.0 s. Compacting from anywhere in a 2 s window makes all three
+  granularities behave identically (peak 1.6 s, nothing cut).
+- **A long uninterrupted speaking stretch costs latency that cannot be
+  drained.** The model generates faster than realtime, so during one
+  continuous stretch it runs ahead and the queue holds *real speech*. Measured
+  at 1.89x inflow: 2 s speech runs give a 1.6 s peak, 10 s runs 8.4 s, 30 s
+  runs 26.2 s — all with nothing cut — and 60 s runs saturate the cap and lose
+  53.9 s. The 0.69x figure above is a call average, not an instantaneous
+  bound. Bounding this needs time-stretching the output, not discarding it.
+- **The drain did not work on a real call, and this is why.** On 2026-10-06
+  (`transcripts/20261006-100025-886964.log`, 11.4 min) the drain removed
+  **nothing** and the queue pinned at the cap again, 1,965 drops. The OUT
+  direction is the proof it was not a speech-lead problem: 667 source
+  characters, about **40 s of speech in a 683 s call — 0.06x realtime** —
+  inside ~732 s delivered, so that queue was **95% padding by volume**. IN was
+  66% padding, speech 0.48x realtime. Both are fully removable in principle.
+  The classifier is what failed: the log's drop sizes are the leading
+  non-quiet run, **median 0.10 s**, so on a live call the keep-alive stream
+  crosses `SPEECH_PEAK` every ~100 ms and no quiet run reaches
+  `MIN_DRAIN_RUN_MS`. Experiment 2's idle-peak figure of 1078 came from a
+  session fed prerecorded audio already in the target language — "nothing
+  worth translating" — and did not transfer to a live call. Reproduced
+  offline: a stream that is 95% padding but crosses 2000 every 100 ms gives
+  peak backlog 30.0 s, drained 0.0 s, cap cut 58.0 s.
+  **Answered by experiment 6**, which measured the real stream: the model's
+  inter-utterance output is *exact digital silence*, not a 1078-peak hiss, and
+  the delivery rate is 1.026x on IN rather than the 1.89x inferred here. The
+  30 s backlogs were caused by playout accumulating while suppressed, not by
+  inflow. See `06-padding-separability.md`.
+- **Padding finer than ~200 ms is indistinguishable from speech.** A quiet run
+  of one or two 20 ms frames is exactly what occurs inside a word, by the same
+  `SPEECH_PEAK` test, so the drain declines and leaves it to the cap.
+  Experiment 2 found the model's idle stretches to be long runs of digital
+  silence, which the drain does resolve, but nothing measures how finely it
+  interleaves padding *with* speech.
+
+### What this changes
+
+`LAG_CAP_S` was never the problem — treating it as the *only* backpressure
+was. It is a valve against runaway speech and may cut speech to act, so
+reaching it is a quality loss. `TARGET_LATENCY_S` keeps it out of reach by
+discarding non-speech from the head of the queue at 1 s, counted separately as
+`squelched_s` because it is not a loss.
+
+**For future experiments: report the raw ratio alongside the speech ratio, and
+run long enough to see minutes of accumulation.** A 96 s run cannot see this
+class of bug, and a speech-bearing metric cannot see it at any length.

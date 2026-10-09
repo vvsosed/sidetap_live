@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **359 tests that run with no audio hardware, no network and no
+`tests/` holds **394 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -43,13 +43,16 @@ mattered. CI runs `uvx ruff check .` alongside it; the ruleset in
 `pyproject.toml` is deliberately narrow and says why, because a linter that
 flags the design is a linter that gets switched off.
 
-`docs/experiments/` records the six measurements the design rests on, in five
-files: the sixth, the `1007` region-subtag post-mortem, is an addendum at the
-end of `01-connect.md` rather than a file of its own, because it was found by
-a real call failing rather than by an experiment. **Prefer a number from there
-over a claim from memory.** Four of the six contradicted
-either Google's documentation or the original design, and two of those would
-have produced code that passed every offline test and failed only on a live
+`docs/experiments/` records the seven measurements the design rests on, in six
+files: the `1007` region-subtag post-mortem is an addendum at the end of
+`01-connect.md` rather than a file of its own, because it was found by a real
+call failing rather than by an experiment. **Experiment 6 corrects experiments
+2 and 4** — both were calibrated on sessions with nothing to translate, and
+neither described a live call. **Prefer a number from there
+over a claim from memory — and prefer one taken from a real call over one
+taken from a fed clip.** Five of the seven contradicted either Google's
+documentation, the original design, or an earlier experiment, and three of
+those produced code that passed every offline test and failed only on a live
 call.
 
 `docs/manual-smoke.md` is the checklist for what the automated suite
@@ -80,7 +83,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 359 tests, no audio/network/creds
+uv run pytest -q                                    # 394 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -220,7 +223,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 359 tests import the package with no
+  `activity.py`. This is what lets 394 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -246,13 +249,50 @@ preference and these are not.
   with the silence cut out changes what it hears. This is why the module is not
   called `vad.py` — the old name invites someone to reinstate gating, and
   `test_it_is_not_a_gate` guards it.
+- **Queue depth is latency, so playout must drain near-silence — and must
+  not accumulate while suppressed.** Measured on a real call
+  (`docs/experiments/06-padding-separability.md`): against the probe's own
+  wall clock the model delivers at **1.089x realtime on IN and 1.123x on
+  OUT**, with short bursts at **2x**, so the surplus to shed is around 10%.
+  What the model emits between utterances is **exact digital
+  silence** — 21.2% of the IN stream, 48.0% of OUT — of which 20.1% and 47.9%
+  sit in runs long enough to act on. So the drain has roughly an order of
+  magnitude of headroom at no risk. Earlier figures here claimed 1.89x; they
+  were inferred as `(call + cap_discarded) / call` from logs, which blames
+  inflow for discards the suppression bug caused.
+  **`DRAIN_PEAK` is deliberately not `SPEECH_PEAK`.** The drain asks "is this
+  silence"; the duck asks "is the model translating". OUT's measured speech
+  level moved between calls — a median peak of 591 on one, 3475 on the next —
+  so a drain keyed on 2000 cut most genuine OUT speech on the quieter one, and
+  OUT has no raw path to fall back to: the remote party simply never heard it.
+  64 is an order of magnitude below either figure, which is the point of
+  picking it conservatively while the level is still uncertain. Touch only
+  runs of at least `MIN_DRAIN_RUN_MS` (a dip inside a word is one or two frames, and `tick()`
+  walks the head onto it), leave `KEEP_PAUSE_MS` behind, count it as
+  `squelched_s` and never `dropped_s`, and keep `--lag-cap` above
+  `--target-latency` or the cap fires first and reports padding as lost audio.
+- **Suppression must discard, not queue.** `tick()` consumes nothing while
+  suppressed, so `submit()` queueing filled the buffer to `LAG_CAP_S` with
+  audio nobody can ever want — the conversation during bypass is unmediated —
+  and leaving bypass handed back ~28 s of it to speak at the remote party. It
+  also made `_trim_locked` rescan the whole buffer on every submit, on the
+  playout thread, for the entire bypass. `submit()` discards while suppressed
+  and `set_suppressed` flushes on **both** edges. On the 2026-10-08 call this
+  accounted for every one of the 325 lag-cap drops, in two windows, with 17
+  minutes of zero drops between them. **Bypass and mute log at INFO**, because
+  without that the log cannot explain a backlog.
 - **The duck triggers on audio ENERGY, not byte presence.** The model emits a
   continuous 24 kHz stream whether or not it is translating — measured at
   ~151 s of audio returned for 154 s of pure digital silence in. Keyed on bytes
   arriving, the duck closes on the first chunk and **never reopens**, muting
   the remote party for the entire call. Measured distributions: 0.04% of 20 ms
   frames above threshold when idle, 75.5% when translating, hence
-  `SPEECH_PEAK = 2000`.
+  `SPEECH_PEAK = 2000`. **Watch item, not a known bug:** that was measured on
+  IN-like audio, and experiment 6 saw OUT's speech median at 591 on one call
+  (below this threshold, which would barely close the duck) and 3475 on the
+  next. The first was a small-sample artefact of its labelling window. What is
+  genuinely unknown is whether OUT's level is stable across calls — see
+  experiment 6's "Still open".
 - **Use `has_speech()`, never `find_silence_boundary(...) is None`.** The
   latter reports where the *first* quiet frame is, which is right for the lag
   cap and wrong for "is this speech": a 250 ms chunk of clear speech routinely
@@ -350,6 +390,11 @@ let either program's `doctor --repair` tear down the other's live duck.
   translated back at the other party.
 - **Wayland is irrelevant here** — audio capture needs no portal permission;
   that is a video-capture concern.
+- **A backlog is not visible in a 96-second test.** `docs/experiments/04-pacing.md`
+  measured the speech-time ratio at 0.894 and concluded no backlog management
+  was needed; the raw-byte ratio it set aside as "uninformative" was 1.012,
+  and that is the one the playout queue responds to. Report both, and run for
+  minutes, not seconds.
 - **Output billing does not stop during pauses.** The model streams output
   continuously while a session is open, so a call with ordinary conversational
   gaps bills output the whole time. `IDLE_SUSPEND_S` only catches gaps past

@@ -670,3 +670,73 @@ def test_the_replacement_is_billed_while_it_overlaps():
     assert both == pytest.approx(single * 2, rel=1e-6), (
         "only one of the two live sessions was billed for"
     )
+
+
+def test_discarded_padding_is_reported_and_still_billed():
+    """Padding is charged for whether or not we keep it.
+
+    The model generated those bytes and billed them; the drain is our choice
+    after the fact. Billing what survived would under-report a call by the
+    majority of its output - 63% of the bytes on the measured 2026-10-05 run
+    - and the figure on screen is what the user decides whether to keep
+    talking on.
+
+    `squelched_s` has to reach Metrics separately from `dropped_s` too: the
+    dashboard reports the latter as audio lost, and this is routine.
+    """
+    from sidetap_live.types import TARGET_LATENCY_S
+
+    interpreter, _, metrics, _ = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=QUIET * 120))        # 3 s of padding
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.squelched_s > 0.0, "the drain never reached Metrics"
+    assert state.dropped_s == 0.0, "padding was reported as lost audio"
+    assert state.backlog_s <= TARGET_LATENCY_S
+    # Billed on the 3 s sent, not the ~1 s that survived the drain. Taken
+    # from the interpreter's own rates, so a price change cannot quietly
+    # lower this bound below the figure it is meant to catch.
+    expected = interpreter._rates.output_usd(3.0)
+    assert metrics.snapshot().cost_usd >= expected, (
+        f"billed {metrics.snapshot().cost_usd} for 3 s of output, "
+        f"expected at least {expected}"
+    )
+
+
+def test_the_audio_probe_sees_every_chunk_with_the_target_text_timing(tmp_path):
+    """The measurement has to pair energy with the model's own speaking signal.
+
+    Energy alone could not separate padding from speech on the 2026-10-06
+    call - the keep-alive stream crossed SPEECH_PEAK every ~100 ms. Whether a
+    target-text event arrived recently is a signal that does not depend on
+    amplitude, so the probe is useless unless the two are recorded together.
+    """
+    import json
+
+    from sidetap_live.probe import AudioProbe
+
+    path = tmp_path / "probe.jsonl"
+    interpreter, _, _, clock = build()
+    interpreter._probe = AudioProbe(path, flush_every=1)
+    interpreter.feed(block(SPEECH))
+
+    interpreter.note_event(TargetText(text="hello"))
+    interpreter.note_event(AudioOut(pcm=LOUD))
+    clock.advance(2.5)
+    interpreter.note_event(AudioOut(pcm=QUIET))
+    interpreter._probe.close()
+
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(entries) == 2, entries
+    assert entries[0]["tt"] == pytest.approx(0.0), "target text had just arrived"
+    assert entries[1]["tt"] == pytest.approx(2.5), "2.5 s of silence since it"
+    assert max(entries[0]["peaks"]) > max(entries[1]["peaks"])
+
+
+def test_the_probe_is_off_unless_asked_for():
+    """It writes a file per call and costs work on the receive thread."""
+    interpreter, _, _, _ = build()
+    assert interpreter._probe is None
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(AudioOut(pcm=LOUD))      # must not raise

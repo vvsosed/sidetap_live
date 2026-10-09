@@ -5,7 +5,7 @@ import time
 import pytest
 
 from sidetap_live.metrics import Metrics
-from sidetap_live.types import NO_AUDIO_S, TTS_RATE, Direction
+from sidetap_live.types import NO_AUDIO_S, TTS_RATE, AudioOut, Direction
 from tests.conftest import (
     FakeLinker,
     FakeSessionFactory,
@@ -127,10 +127,15 @@ def test_muting_clears_the_backlog_rather_than_deferring_it(session_args, fake_p
     Session.set_mute_out has to reach Playout.set_suppressed, which flushes.
     Assigning `suppressed` directly would suppress and keep the backlog, and
     unmuting would then play a voice recapping the last minute.
+
+    The queue has to be built from SPEECH, not silence: silence is what
+    _drain_locked exists to discard, so a silent queue would be gone before
+    the mute could flush it and this would pass without testing anything.
     """
     session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
     session.setup()
-    session.playouts[Direction.OUT].submit(b"\x00" * (TTS_RATE * 2 * 3))  # 3 seconds
+    speech = b"\x00\x40" * (TTS_RATE * 3)                   # 3 s, peak 0x4000
+    session.playouts[Direction.OUT].submit(speech)
     assert session.playouts[Direction.OUT].backlog_s() == 3.0
 
     session.set_mute_out(True)
@@ -551,3 +556,58 @@ def test_a_failing_transcript_close_does_not_swallow_a_clean_shutdown(
     session.shutdown()          # must not raise
 
     assert session.router_restored is True
+
+
+def test_the_audio_probe_is_written_and_closed_when_asked_for(
+    session_args, fake_ports
+):
+    """Buffered, so an unclosed probe loses the end of the call.
+
+    That is the part that matters: the queue goes deep minutes in, and the
+    frames recorded while it is deep are the ones that say whether the drain
+    could have acted.
+    """
+    session_args.probe_audio = True
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    probe_path = session.transcript.jsonl_path.with_suffix(".audio-probe.jsonl")
+
+    session.interpreters[Direction.IN].note_event(
+        AudioOut(pcm=b"\x00\x40" * (TTS_RATE // 10))
+    )
+    session.shutdown()
+
+    assert probe_path.exists(), "the probe never reached disk"
+    assert probe_path.read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_no_probe_file_appears_unless_the_flag_is_given(session_args, fake_ports):
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    session.shutdown()
+    assert not session.transcript.jsonl_path.with_suffix(
+        ".audio-probe.jsonl"
+    ).exists()
+
+
+def test_bypass_and_mute_are_logged(session_args, fake_ports, caplog):
+    """Diagnosing the 2026-10-08 call needed this and it was not there.
+
+    311 of that call's 325 lag-cap drops fell inside one 81 s window, which
+    was almost certainly a bypass - but bypass and mute wrote nothing at all,
+    so the attribution could not be confirmed from the log. They change the
+    audio path and the playout queue; they belong in the record at INFO,
+    beside the routing and rotation lines.
+    """
+    import logging
+
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    with caplog.at_level(logging.INFO, logger="sidetap_live.run"):
+        session.set_mute_out(True)
+        session.set_mute_out(False)
+    session.shutdown()
+
+    text = caplog.text
+    assert "mute" in text.lower(), text
+    assert text.lower().count("mute") >= 2, "only one edge was logged"

@@ -353,6 +353,7 @@ def session_args(tmp_path):
         no_tui=True,
         verbose=False,
         duck_level=0.0,
+        probe_audio=False,
         echo_out=True,
         idle_suspend=True,
     )

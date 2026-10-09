@@ -19,7 +19,13 @@ from .ports import LinkResult
 from .preroll import PreRoll
 from .routing import JOURNAL_PATH, VIRTMIC_SINK, Router
 from .transcript import EventTranscript
-from .types import LAG_CAP_S, NO_AUDIO_S, TTS_RATE, Direction
+from .types import (
+    LAG_CAP_S,
+    NO_AUDIO_S,
+    TARGET_LATENCY_S,
+    TTS_RATE,
+    Direction,
+)
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +151,14 @@ class Session:
             Direction.IN: default_sink.serial if default_sink else None,
             Direction.OUT: virtmic.serial,
         }
+        self._probe = None
+        if getattr(args, "probe_audio", False):
+            from .probe import AudioProbe
+
+            self._probe = AudioProbe(
+                self.transcript.jsonl_path.with_suffix(".audio-probe.jsonl")
+            )
+
         # Which language each direction translates INTO: what reaches your
         # ears is in your language, what reaches theirs is in theirs.
         lang_targets = {
@@ -173,7 +187,16 @@ class Session:
             # args.lag_cap is None when --lag-cap is unset; Playout needs a
             # number.
             lag_cap = args.lag_cap if args.lag_cap is not None else LAG_CAP_S
-            playout = Playout(direction, sink, duck=duck, lag_cap_s=lag_cap)
+            target_latency = getattr(args, "target_latency", None)
+            if target_latency is None:
+                target_latency = TARGET_LATENCY_S
+            playout = Playout(
+                direction,
+                sink,
+                duck=duck,
+                lag_cap_s=lag_cap,
+                target_latency_s=target_latency,
+            )
             self.playouts[direction] = playout
 
             self.interpreters[direction] = DirectionInterpreter(
@@ -194,6 +217,7 @@ class Session:
                 on_event=self.transcript.write,
                 on_fatal=self._on_direction_fatal,
                 session_t0=session_t0,
+                probe=self._probe,
             )
 
         self.capture = PipeWireCapture(
@@ -301,6 +325,11 @@ class Session:
         conversation. The interpreters keep running for the transcript.
         """
         with self._lifecycle_lock:
+            # At INFO, beside routing and rotation. Both hotkeys rewire the
+            # audio path and empty the playout queues, so a log without them
+            # cannot explain a backlog: on the 2026-10-08 call 311 of 325
+            # lag-cap drops fell inside one 81 s window that nothing recorded.
+            log.info("bypass %s", "engaged" if value else "released")
             self._set_bypass_locked(value)
 
     def _set_bypass_locked(self, value: bool) -> None:
@@ -333,6 +362,7 @@ class Session:
         with self._lifecycle_lock:
             # Flag and metric written together, so the lit key and the next
             # keypress agree.
+            log.info("mute out %s", "engaged" if value else "released")
             self._muted_out = value
             self.metrics.set_muted_out(value)
             self._apply_suppression_locked(self._bypassed)
@@ -475,6 +505,13 @@ class Session:
                     self.transcript.close()
                 except Exception:
                     log.exception("could not write the transcript markdown")
+            if self._probe is not None:
+                # Buffered, so without this the last 200 chunks of the call -
+                # including everything after the queue went deep - never land.
+                try:
+                    self._probe.close()
+                except Exception:
+                    log.exception("could not write the audio probe")
 
 
 def run_session(args, *, graph, launcher, linker, clock, sessions=None,
@@ -518,6 +555,10 @@ def run_session(args, *, graph, launcher, linker, clock, sessions=None,
         session_obj.transcript.original_path,
         session_obj.transcript.translated_path,
     ]
+    # Named only when it exists, but named: a diagnostic the user cannot find
+    # is a diagnostic they will not send.
+    if session_obj._probe is not None:
+        saved.append(session_obj.transcript.jsonl_path.with_suffix(".audio-probe.jsonl"))
     log_path = session_obj.transcript.jsonl_path.with_suffix(".log")
     if log_path.exists():
         saved.append(log_path)

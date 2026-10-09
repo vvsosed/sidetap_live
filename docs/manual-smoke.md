@@ -178,11 +178,72 @@ across 96 s of dense speech, with output running 0.894x input.
 is not a display bug. It means the single-box approach inherits the problem
 this project was built to escape.
 
+One cause of a climbing backlog is now known and fixed, so rule it out before
+reading a climb as the headline finding: the model's keep-alive padding used to
+be queued as if it were speech, which ratcheted latency to `LAG_CAP_S` within a
+minute on any call. Check `pad` in the pane — it should be climbing steadily,
+which is the drain working — and `dropped`, which should stay at `0.0s`. A
+climb with `dropped` still at zero and `pad` rising is about speech, and is the
+real finding. See check 11.
+
+---
+
+### 11. Latency stays flat over a call longer than ten minutes
+
+**This is the check that the automated suite structurally cannot make, and the
+one place the worst bug found so far was ever going to show.** Everything else
+here is observable in two minutes; this is not.
+
+Let the call run **at least 15 minutes** of ordinary back-and-forth, then
+compare the panes against what you noted at the five-minute mark:
+
+- `backlog` should be **the same as it was**, oscillating around 1–3 s, not
+  higher. A figure that is larger than it was ten minutes ago is a ratchet, and
+  a ratchet is the bug.
+- `dropped` should still read `0.0s`. Non-zero means the lag cap is cutting
+  translated speech — sentences the other party will never hear, with nothing
+  on screen to say which.
+- `pad` should be in the hundreds of seconds and climbing. That is the drain
+  disposing of the model's keep-alive stream, and it is healthy; it reached
+  ~1,690 s over a 31.7 min call.
+
+Then the part only you can judge: **does the translation still sound
+continuous?** The drain removes non-speech from the head of the queue, so the
+failure mode to listen for is a pause between sentences being clipped short, or
+a word losing its opening consonant. If the speech sounds hurried or
+run-together rather than merely prompt, say so — `--target-latency` is the
+knob, and the trade is latency against breathing room. A pause the drain
+touches keeps 100 ms, and anything shorter than 200 ms is never eligible, so
+clipped consonants would be a bug rather than a tuning problem.
+
+If `backlog` sits high while one person talks for minutes at a stretch, that is
+expected and not this bug: the model generates faster than realtime, so during
+an uninterrupted stretch the queue holds real speech and the delay tracks that
+lead. `dropped` staying at `0.0s` is what says the difference.
+
+**Then press `b` for a minute, release it, and watch `backlog`.** This is what
+broke on the 2026-10-08 call: playout consumed nothing while suppressed but
+kept queueing, so bypass filled the buffer to the cap and released ~28 s of
+the conversation you had just had *unmediated* — about to be spoken at the
+remote party. After releasing bypass, `backlog` should be back near zero
+within a second or two and `dropped` should not have moved. Do the same with
+`m`, which suppresses OUT only.
+
+Afterwards, confirm it in the log rather than trusting memory:
+
+```bash
+grep -c "behind" transcripts/<session>.log     # expect 0
+grep -c "drained"  transcripts/<session>.log   # expect many, at -v
+grep -E "bypass|mute out" transcripts/<session>.log   # when you pressed them
+```
+
+A non-zero first count is the regression. The 2026-10-05 call scored 11,000.
+
 ---
 
 ## After the call
 
-**11. The transcript is readable and complete.**
+**12. The transcript is readable and complete.**
 
 `Ctrl-C`, then open `transcripts/<session>.md`. Both directions, chronological,
 fragments joined into paragraphs. Check the tail is there: the `.jsonl` is
@@ -196,7 +257,7 @@ and missing from the other, or shifted against it, is a real finding. Read the
 original against your memory of the call: that is the only check that says
 whether the transcription itself was right, separately from the translation.
 
-**12. The graph is restored.**
+**13. The graph is restored.**
 
 ```bash
 wpctl status

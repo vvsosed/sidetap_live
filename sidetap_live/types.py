@@ -21,8 +21,27 @@ MIC = "mic"
 
 # Seconds of un-spoken audio past which playout drops at an output silence
 # boundary. A safety valve for a runaway backlog, set high enough that an
-# ordinary call never reaches it.
+# ordinary call never reaches it. It may cut speech, so reaching it is a
+# quality loss; TARGET_LATENCY_S exists to keep it out of reach.
 LAG_CAP_S = 30.0
+
+# Queue depth above which playout discards NON-SPEECH from the head. Queue
+# depth is not a statistic, it is the delay you hear: the model holds its
+# audio channel open continuously, so inflow is keep-alive padding plus
+# speech and runs over realtime - measured at 1.89x on IN over a 31.7 min
+# call. Without draining the padding the depth ratchets to LAG_CAP_S within
+# the first minute and stays pinned there, and the cap then discards real
+# audio (89% of that call's IN stream) to hold the line. Low enough to stay
+# near the 0.2-0.3 s event lag measured in experiment 4, high enough that
+# short pauses are left alone entirely - a pause the drain does touch keeps
+# KEEP_PAUSE_MS, and one shorter than MIN_DRAIN_RUN_MS is never eligible,
+# because at that length it cannot be told from a dip inside a word.
+#
+# This bounds the padding, not the model's generation lead: during one long
+# uninterrupted speaking stretch the queue holds real speech and latency
+# tracks that lead instead. Draining cannot help there - see
+# docs/experiments/04-pacing.md.
+TARGET_LATENCY_S = 1.0
 
 # Seconds of continuous speech into a direction with nothing coming out.
 DEAD_AIR_S = 6.0
