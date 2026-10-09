@@ -62,9 +62,9 @@ Two findings, both consequential.
 1078-peak hiss. 21.2% of the IN stream and 48.0% of OUT are exact zeros — on
 OUT in just **8 runs with a median length of 847 frames, about 17 s each**.
 
-**OUT's translated speech is an order of magnitude quieter than IN's** —
-median peak 591 against 5480, with p90 at 2136. Most genuine OUT speech sits
-*below* `SPEECH_PEAK`.
+**OUT's translated speech looked an order of magnitude quieter than IN's** —
+median peak 591 against 5480, p90 2136 — but see the addendum: that was a
+small-sample artefact, not a property of OUT.
 
 ### What a drain can remove, with no risk
 
@@ -101,14 +101,49 @@ risk, because there is nothing in it to lose.
    Reproduced: 80 s of bypass left 27.92 s queued and 41.7 s cap-dropped.
    The OUT-only window matches mute, which suppresses only OUT.
 
+## Addendum, 2026-10-09: the fix confirmed, and the OUT level corrected
+
+A 40 min call on the fixed build, with **four bypasses (one of 3.5 minutes)
+and a mute held for ~30 minutes**: the lag cap fired **zero times**. The log
+is 2 KB with 25 lines, against 746 KB and 6,246 drops on 2026-10-07.
+
+The sharpest part of that test is OUT. Muted from 10:08 to the end, it still
+received **2,129 s of audio at 1.123x realtime** — a suppressed direction
+taking delivery for half an hour, which before the fix pinned the queue at the
+cap within a minute. Nothing was dropped.
+
+**Delivery rate, measured properly for the first time** now the probe records
+wall clock beside output-audio time:
+
+| | audio | wall | rate | worst 10 s window |
+|---|---|---|---|---|
+| IN | 2,844.2 s | 2,611.4 s | **1.089x** | 2.08x |
+| OUT | 2,129.5 s | 1,896.9 s | **1.123x** | 2.07x |
+
+So the model does deliver faster than realtime — about 9–12% over, with short
+bursts at **2x**. Higher than the 1.026x computed above against call length
+rather than the probe's own span, and still comfortably inside the ~20% the
+drain has available.
+
+**Correcting this experiment's own OUT finding.** OUT's speech here has a
+median peak of **3475** (p90 15875), not 591. The earlier figure came from
+3,068 "speaking" frames on a call where OUT carried ~40 s of speech, and the
+1.5 s transcription window labelled the surrounding silence as speech, pulling
+the percentiles down. Today's sample is 11,323 frames with 59% of them
+speaking, and it is the one to trust.
+
+`DRAIN_PEAK = 64` is unaffected — it sits an order of magnitude below either
+figure, which is why a conservative threshold was the right choice while the
+level was uncertain.
+
 ## Still open
 
-**`SPEECH_PEAK` is probably wrong for OUT beyond the drain.** It also feeds
-the duck (`Playout.tick` → `DuckControl.close`) and rotation's "the outgoing
-output has fallen silent" test. With OUT's speech at a median peak of 591, the
-duck would barely close on OUT and a rotation could switch mid-word. Nothing
-here measures the audible consequence, and changing it needs a real-call
-listen rather than another threshold picked from a table.
+**`SPEECH_PEAK` and the duck on OUT — weaker than first thought, not
+resolved.** The alarm above rested on the 591 median, which was an artefact.
+At 3475 the duck closes on OUT normally. What remains unmeasured is whether
+OUT's level is *stable* across calls: one call at 591 and one at 3475 is not a
+distribution. Until that is known, `has_speech` on OUT is a thing to watch
+rather than a thing to change.
 
 **Bypass and mute were not logged**, which is why the attribution above took
 a code-level reproduction to confirm. They are logged at INFO now.

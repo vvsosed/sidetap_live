@@ -251,20 +251,23 @@ preference and these are not.
   `test_it_is_not_a_gate` guards it.
 - **Queue depth is latency, so playout must drain near-silence — and must
   not accumulate while suppressed.** Measured on a real call
-  (`docs/experiments/06-padding-separability.md`): IN delivers at **1.026x
-  realtime**, OUT at 0.116x, so the surplus to shed is **2.6% on IN and none
-  on OUT**. What the model emits between utterances is **exact digital
+  (`docs/experiments/06-padding-separability.md`): against the probe's own
+  wall clock the model delivers at **1.089x realtime on IN and 1.123x on
+  OUT**, with short bursts at **2x**, so the surplus to shed is around 10%.
+  What the model emits between utterances is **exact digital
   silence** — 21.2% of the IN stream, 48.0% of OUT — of which 20.1% and 47.9%
   sit in runs long enough to act on. So the drain has roughly an order of
   magnitude of headroom at no risk. Earlier figures here claimed 1.89x; they
   were inferred as `(call + cap_discarded) / call` from logs, which blames
   inflow for discards the suppression bug caused.
   **`DRAIN_PEAK` is deliberately not `SPEECH_PEAK`.** The drain asks "is this
-  silence"; the duck asks "is the model translating". OUT's translated speech
-  has a median peak of **591** against IN's 5480, so a drain keyed on 2000 cut
-  most genuine OUT speech — and OUT has no raw path to fall back to, so the
-  remote party simply never heard it. Touch only runs of at least
-  `MIN_DRAIN_RUN_MS` (a dip inside a word is one or two frames, and `tick()`
+  silence"; the duck asks "is the model translating". OUT's measured speech
+  level moved between calls — a median peak of 591 on one, 3475 on the next —
+  so a drain keyed on 2000 cut most genuine OUT speech on the quieter one, and
+  OUT has no raw path to fall back to: the remote party simply never heard it.
+  64 is an order of magnitude below either figure, which is the point of
+  picking it conservatively while the level is still uncertain. Touch only
+  runs of at least `MIN_DRAIN_RUN_MS` (a dip inside a word is one or two frames, and `tick()`
   walks the head onto it), leave `KEEP_PAUSE_MS` behind, count it as
   `squelched_s` and never `dropped_s`, and keep `--lag-cap` above
   `--target-latency` or the cap fires first and reports padding as lost audio.
@@ -284,11 +287,12 @@ preference and these are not.
   arriving, the duck closes on the first chunk and **never reopens**, muting
   the remote party for the entire call. Measured distributions: 0.04% of 20 ms
   frames above threshold when idle, 75.5% when translating, hence
-  `SPEECH_PEAK = 2000`. **Known gap:** that was measured on IN-like audio.
-  Experiment 6 measured OUT's translated speech at a median peak of 591, below
-  this threshold, so on OUT the duck would barely close and a rotation could
-  switch mid-word. Unresolved, and it needs a real-call listen rather than a
-  new number — see experiment 6's "Still open".
+  `SPEECH_PEAK = 2000`. **Watch item, not a known bug:** that was measured on
+  IN-like audio, and experiment 6 saw OUT's speech median at 591 on one call
+  (below this threshold, which would barely close the duck) and 3475 on the
+  next. The first was a small-sample artefact of its labelling window. What is
+  genuinely unknown is whether OUT's level is stable across calls — see
+  experiment 6's "Still open".
 - **Use `has_speech()`, never `find_silence_boundary(...) is None`.** The
   latter reports where the *first* quiet frame is, which is right for the lag
   cap and wrong for "is this speech": a 250 ms chunk of clear speech routinely
