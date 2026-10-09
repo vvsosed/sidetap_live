@@ -883,3 +883,32 @@ def test_no_idle_suspend_keeps_the_session_through_a_mute():
 
     assert interpreter.state is SessionState.RUNNING
     assert not sessions.sessions[0].closed
+
+
+def test_releasing_suppression_clears_the_window_on_the_pump_thread():
+    """PreRoll has no lock, and drain() iterates the deque that add() appends
+    to - so clearing it from the hotkey's worker thread can raise "deque
+    mutated during iteration" against the pump. set_output_wanted only raises
+    a flag; the pump does the clearing, before it adds the current block, so
+    the first block after release still reaches the new session.
+
+    This is the same discipline as the rest of the class: the receive thread
+    records, the pump acts.
+    """
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+    suppressed(interpreter, clock)
+    interpreter.feed(block(SPEECH))
+    interpreter.feed(block(SPEECH))              # fills the pre-roll while muted
+    assert interpreter._preroll.seconds() > 0.0
+
+    before = interpreter._preroll.seconds()
+    interpreter.set_output_wanted(True)
+    assert interpreter._preroll.seconds() == before, (
+        "cleared the pre-roll off the pump thread"
+    )
+
+    interpreter.feed(block(SPEECH))              # the pump clears, then wakes
+    assert bytes(sessions.sessions[-1].sent) == SPEECH, (
+        "the first block after release was lost, or muted audio survived"
+    )

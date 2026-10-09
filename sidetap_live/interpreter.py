@@ -89,6 +89,7 @@ class DirectionInterpreter:
         # None means wanted. See set_output_wanted.
         self._unwanted_since: float | None = None
         self._wake_on_release = False
+        self._release_pending = False
         self._activity = activity
         self._metrics = metrics
         self._clock = clock
@@ -148,21 +149,33 @@ class DirectionInterpreter:
         """
         if wanted:
             self._unwanted_since = None
-            # Everything recorded while nobody was listening belongs to that
-            # window. The pre-roll because _open(replay=True) would send the
-            # model up to PREROLL_S of what was said while muted, and the
-            # remote party would hear a translation of it - mute means do not
-            # transmit this. _speech_at because nothing cleared it while
-            # suspended (no output arrives to clear it), so the first feed
-            # after release would read as DEAD_AIR_S of speech with silence
-            # out and sound the earcon.
-            self._preroll.drain()
-            with self._lock:
-                self._speech_at = None
+            # Only a flag. PreRoll has no lock and drain() iterates the deque
+            # that the pump's add() appends to, so clearing it from here -
+            # the hotkey's worker thread - can raise "deque mutated during
+            # iteration". _discard_suppressed_window does it on the pump.
+            self._release_pending = True
             self._wake_on_release = True
             return
         if self._unwanted_since is None:
             self._unwanted_since = self._clock.monotonic()
+
+    def _discard_suppressed_window(self) -> None:
+        """Forget everything recorded while nobody was listening.
+
+        The pre-roll, because _open(replay=True) would otherwise send the
+        model up to PREROLL_S of what was said WHILE MUTED, and the remote
+        party would hear a translation of it - mute means do not transmit
+        this. _speech_at, because nothing clears it while suspended (clearing
+        happens when output arrives, and none does), so the first feed after
+        release would read as DEAD_AIR_S of speech with silence out and sound
+        the earcon.
+
+        Runs on the pump, before the current block is added, so the first
+        block after release still reaches the new session.
+        """
+        self._preroll.drain()
+        with self._lock:
+            self._speech_at = None
 
     def _suppressed_long_enough(self) -> bool:
         if self._unwanted_since is None:
@@ -193,6 +206,9 @@ class DirectionInterpreter:
 
     def feed(self, chunk: AudioChunk) -> None:
         """Handle one captured block. Public so tests drive it without threads."""
+        if self._release_pending:
+            self._release_pending = False
+            self._discard_suppressed_window()
         speaking = self._activity.observe(chunk.pcm)
         self._preroll.add(chunk.pcm)
         if speaking:
