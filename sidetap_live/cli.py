@@ -20,7 +20,12 @@ from .adapters import (
 from .capture import CaptureError
 from .graph import PLAYBACK_STREAM, SINK, SOURCE, PwGraph
 from .ports import Clock, GraphSource, Linker, ProcessLauncher
-from .types import IDLE_SUSPEND_S, LAG_CAP_S, TARGET_LATENCY_S
+from .types import (
+    IDLE_SUSPEND_S,
+    LAG_CAP_S,
+    SUPPRESSED_SUSPEND_S,
+    TARGET_LATENCY_S,
+)
 
 log = logging.getLogger(__name__)
 
@@ -151,9 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="idle_suspend",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=f"close the session after {int(IDLE_SUSPEND_S)}s of silence and "
-             "reopen on speech. On by default - leaving it off bills "
-             "continuously for a session nobody is using",
+        help=f"close the session after {int(IDLE_SUSPEND_S)}s of silence, or "
+             f"after {int(SUPPRESSED_SUSPEND_S)}s of bypass or mute, and "
+             "reopen when it is wanted again. On by default - leaving it off "
+             "bills continuously for a session nobody is listening to, which "
+             "is about $2.21 an hour per direction",
     )
     out.add_argument("--no-tui", action="store_true", help="plain console logging")
     out.add_argument("-v", "--verbose", action="store_true")

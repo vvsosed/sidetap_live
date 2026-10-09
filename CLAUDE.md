@@ -281,6 +281,15 @@ preference and these are not.
   accounted for every one of the 325 lag-cap drops, in two windows, with 17
   minutes of zero drops between them. **Bypass and mute log at INFO**, because
   without that the log cannot explain a backlog.
+  Discarding is not enough on its own, though — the session is still open and
+  billing, so `Session` also tells the interpreter through
+  `set_output_wanted`, and **releasing it must clear the pre-roll and
+  `_speech_at`**. The pre-roll because `_open(replay=True)` would otherwise
+  send the model up to `PREROLL_S` of what was said *while muted* and the
+  remote party would hear a translation of it — mute means do not transmit
+  this. `_speech_at` because nothing clears it while suspended (no output
+  arrives to clear it), so the first feed after release would read as
+  `DEAD_AIR_S` of speech with silence out and sound the earcon.
 - **The duck triggers on audio ENERGY, not byte presence.** The model emits a
   continuous 24 kHz stream whether or not it is translating — measured at
   ~151 s of audio returned for 154 s of pure digital silence in. Keyed on bytes
@@ -395,7 +404,14 @@ let either program's `doctor --repair` tear down the other's live duck.
   was needed; the raw-byte ratio it set aside as "uninformative" was 1.012,
   and that is the one the playout queue responds to. Report both, and run for
   minutes, not seconds.
-- **Output billing does not stop during pauses.** The model streams output
-  continuously while a session is open, so a call with ordinary conversational
-  gaps bills output the whole time. `IDLE_SUSPEND_S` only catches gaps past
-  45 seconds.
+- **Output billing does not stop during pauses, and a suppressed direction
+  is still a direction you pay for.** The model streams output continuously
+  while a session is open, so a call with ordinary conversational gaps bills
+  output the whole time — about **$2.21 an hour per direction** at $3.50/M in
+  and $21.00/M out, 25 tokens a second. `IDLE_SUSPEND_S` only catches gaps
+  past 45 seconds, and it keys on **input** silence, so it never fires while
+  you are muted and still talking: a ~30 min mute on 2026-10-09 bought
+  2,129 s of OUT audio discarded on arrival, about **$1.12**.
+  `SUPPRESSED_SUSPEND_S` closes a direction nobody is listening to, after a
+  grace period so a short bypass does not churn a session that emits nothing
+  for its first ~3 s.

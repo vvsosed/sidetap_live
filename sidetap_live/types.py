@@ -73,6 +73,19 @@ FATAL_OPEN_FAILURES = 5
 # start, paid only after most of a minute of nothing.
 IDLE_SUSPEND_S = 45.0
 
+# Seconds a direction's output must go unwanted - bypass or mute - before its
+# session is closed. Holding one open costs $0.0006 a second at $3.50/M in and
+# $21.00/M out, 25 tokens a second: $2.21 an hour, per direction, for audio
+# discarded on arrival. A 30 min mute on the 2026-10-09 call generated 2,129 s
+# of OUT audio nobody heard, about $1.12. IDLE_SUSPEND_S cannot catch it,
+# because it keys on input silence and you are still talking.
+#
+# The grace period is what stops a short bypass churning the session: a fresh
+# one emits nothing for ~3 s, so closing around a 3 s bypass buys dead air on
+# return in exchange for a fifth of a cent. Four bypasses on that call, two of
+# them under 10 s.
+SUPPRESSED_SUSPEND_S = 30.0
+
 # Playout must be idle this long before the duck reopens. Without the hold it
 # flaps in the gaps between output chunks and chops the original into
 # fragments.

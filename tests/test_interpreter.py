@@ -740,3 +740,146 @@ def test_the_probe_is_off_unless_asked_for():
     assert interpreter._probe is None
     interpreter.feed(block(SPEECH))
     interpreter.note_event(AudioOut(pcm=LOUD))      # must not raise
+
+
+# ---------- suspending a direction whose output nobody wants ----------
+
+
+def suppressed(interpreter, clock, *, seconds=None):
+    """Mark output unwanted and let the grace period pass."""
+    from sidetap_live.types import SUPPRESSED_SUSPEND_S
+
+    interpreter.set_output_wanted(False)
+    clock.advance(SUPPRESSED_SUSPEND_S if seconds is None else seconds)
+
+
+def test_a_long_mute_suspends_the_session_instead_of_paying_for_it():
+    """Mute suppresses playout; it used to leave the session open and billing.
+
+    Measured on the 2026-10-09 call: muted for ~30 minutes, OUT still took
+    delivery of 2,129 s of translated audio that was discarded on arrival -
+    about $1.12 at $21.00/M out and 25 tokens/s. IDLE_SUSPEND_S never fires
+    while you are still talking, so nothing closed it.
+    """
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+
+    suppressed(interpreter, clock)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.SUSPENDED
+    assert sessions.sessions[0].closed, "the session was left open while muted"
+
+
+def test_a_short_bypass_does_not_churn_the_session():
+    """Bypass is often seconds long - four on one call, two under 10 s.
+
+    A fresh session emits nothing for ~3 s, so closing and reopening around a
+    brief bypass costs dead air on return to save a fraction of a cent.
+    """
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+
+    suppressed(interpreter, clock, seconds=2.0)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.RUNNING
+    assert not sessions.sessions[0].closed
+
+
+def test_a_suspended_direction_stops_billing():
+    interpreter, _, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    suppressed(interpreter, clock)
+    interpreter.feed(block(SPEECH))
+
+    before = metrics.snapshot().cost_usd
+    for _ in range(50):                          # 5 s of muted speech
+        interpreter.feed(block(SPEECH))
+    assert metrics.snapshot().cost_usd == before, "still billing while suspended"
+
+
+def test_releasing_suppression_reopens_without_waiting_for_speech():
+    """Otherwise unmuting costs the ~3 s a fresh session takes to find its
+    voice, on top of however long the user takes to start talking. Opening on
+    release instead hides the warm-up inside their reaction time."""
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+    suppressed(interpreter, clock)
+    interpreter.feed(block(SPEECH))
+    opened = len(sessions.sessions)
+
+    interpreter.set_output_wanted(True)
+    interpreter.feed(block(SILENCE))             # NOT speech
+
+    assert len(sessions.sessions) == opened + 1, "waited for speech to reopen"
+
+
+def test_audio_recorded_while_muted_is_never_sent_after_unmute():
+    """Mute means do not transmit this, and the pre-roll spans the boundary.
+
+    feed() fills the pre-roll whatever the state, and _open(replay=True)
+    drains it into the new session - so without clearing it, unmuting sends
+    the model up to PREROLL_S of what was said while muted, and the remote
+    party hears a translation of it.
+    """
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+    suppressed(interpreter, clock)
+    interpreter.feed(block(SPEECH))
+
+    secret = b"\x11\x22" * 1600                  # 100 ms, not the speech token
+    interpreter.feed(block(secret))
+
+    interpreter.set_output_wanted(True)
+    interpreter.feed(block(SPEECH))
+
+    sent = bytes(sessions.sessions[-1].sent)
+    assert secret not in sent, "audio from the muted window was transmitted"
+
+
+def test_unmuting_does_not_raise_a_false_dead_air_alarm():
+    """_speech_at is set while muted and nothing ever clears it, because no
+    output arrives to clear it - so the first feed after unmuting looks like
+    six seconds of speech with nothing coming out, and sounds the earcon."""
+    from sidetap_live.types import DEAD_AIR_S
+
+    interpreter, _, metrics, clock = build()
+    interpreter.feed(block(SPEECH))
+    suppressed(interpreter, clock)
+    interpreter.feed(block(SPEECH))
+    clock.advance(DEAD_AIR_S + 1.0)              # muted, and still talking
+    interpreter.feed(block(SPEECH))
+
+    interpreter.set_output_wanted(True)
+    interpreter.feed(block(SPEECH))
+    interpreter.feed(block(SPEECH))
+
+    assert metrics.snapshot().directions[Direction.IN].dead_air is False
+
+
+def test_suspending_for_suppression_drops_a_warming_replacement():
+    """A replacement opened for a rotation bills too, and _close only ever
+    touches the session on air."""
+    interpreter, sessions, _, clock = build()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(GoAway(time_left_s=50.0))
+    assert len(sessions.sessions) == 2, "no replacement was opened"
+
+    suppressed(interpreter, clock)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.SUSPENDED
+    assert sessions.sessions[1].closed, "the replacement was left open, billing"
+
+
+def test_no_idle_suspend_keeps_the_session_through_a_mute():
+    """--no-idle-suspend is an explicit choice to pay for responsiveness."""
+    interpreter, sessions, _, clock = build(idle_suspend=False)
+    interpreter.feed(block(SPEECH))
+    suppressed(interpreter, clock, seconds=600.0)
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.RUNNING
+    assert not sessions.sessions[0].closed

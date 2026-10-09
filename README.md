@@ -129,7 +129,7 @@ uv run sidetap-live run \
 | `--mic` | microphone node name or substring; defaults to your default source |
 | `--duck-level` | how loud their original stays under the translation. `0.0` (default) replaces it; `0.2` is interpreter-booth mode |
 | `--no-echo-out` | when you already speak their language, send nothing rather than synthesised audio |
-| `--no-idle-suspend` | keep the session open through long silences (bills continuously) |
+| `--no-idle-suspend` | keep the session open through long silences, and through a bypass or mute (bills continuously — about $2.21 an hour per direction) |
 | `--lag-cap` | seconds of un-spoken translation before dropping the oldest at a pause. A safety valve that may cut speech, so reaching it is a loss; playout drains non-speech at 1 s to keep it out of reach. Must be greater than 0 — at or below, every submitted chunk is over the cap and the translation is dropped to the first pause continuously |
 | `--target-latency` | queue depth above which the model's keep-alive padding is discarded (default 1.0). Queue depth is the delay you hear. Lower it for a shorter delay; raise it if pauses between sentences sound clipped. Must be below `--lag-cap` |
 | `--probe-audio` | diagnostic: record every output chunk's per-frame energy to `<session>.audio-probe.jsonl`, with the model's own signal for when it is speaking. Analyse with `scripts/analyse_audio_probe.py`. Energies and timings only, no audio or text |
