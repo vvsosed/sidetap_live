@@ -144,8 +144,9 @@ class DirectionInterpreter:
         waiting for speech onset, so the warm-up hides inside the time the
         user takes to start talking.
 
-        Safe from another thread: it touches only these two fields, and the
-        pump acts on them when the next block arrives.
+        Safe from another thread: it only sets flags, and the pump acts on
+        them when the next block arrives. Nothing here touches the pre-roll,
+        the session, or the state.
         """
         if wanted:
             self._unwanted_since = None
