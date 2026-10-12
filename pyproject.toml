@@ -3,6 +3,8 @@ name = "sidetap-live"
 version = "0.1.0"
 description = "Single-box real-time voice interpretation for any call, captured from PipeWire"
 requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
 
 dependencies = [
     # Floors are the versions actually exercised, not the oldest that might

@@ -293,7 +293,7 @@ Real, current limitations — not aspirational TODOs.
 - **This has been built and reviewed by one person, against fakes, experiments
   and short local checks.** It has not been run through a full live call with a
   second human on the other end. See `docs/manual-smoke.md` for what that
-  leaves unverified — it is a thirteen-item checklist, and every item on it is
+  leaves unverified — it is a fourteen-item checklist, and every item on it is
   something the 428 automated tests structurally cannot reach.
 
 ## More detail
@@ -305,3 +305,7 @@ Real, current limitations — not aspirational TODOs.
 - `docs/superpowers/specs/` — the design, and what each decision rejected.
 - `CLAUDE.md` — architecture and the invariants worth knowing before changing
   `playout.py`, `interpreter.py` or `routing.py`.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
