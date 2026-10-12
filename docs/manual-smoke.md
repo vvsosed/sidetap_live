@@ -229,15 +229,80 @@ remote party. After releasing bypass, `backlog` should be back near zero
 within a second or two and `dropped` should not have moved. Do the same with
 `m`, which suppresses OUT only.
 
+**Then hold mute for a full minute and listen to what happens when you release
+it.** Past `SUPPRESSED_SUSPEND_S` the OUT session closes, because holding it
+open costs about $2.21 an hour for audio discarded on arrival. Two things have
+to be true on release, and only an ear can check them:
+
+- **You are audible again promptly.** The session reopens the moment you
+  release, not when you next speak, so its ~3 s warm-up should hide inside the
+  time you take to start talking. If the remote party loses your first
+  sentence, the eager reopen is not working.
+- **Nothing you said while muted is transmitted.** Say something distinctive
+  while muted, release, then stay quiet and ask the remote party what they
+  heard. The pre-roll spans the release boundary and is cleared for exactly
+  this reason; if they heard it, that is a serious bug, not a tuning problem.
+
+Watch `session` in the pane go `suspended` while muted and back to `running`
+on release. `rot` must not climb — a mute is not a rotation.
+
 Afterwards, confirm it in the log rather than trusting memory:
 
 ```bash
 grep -c "behind" transcripts/<session>.log     # expect 0
 grep -c "drained"  transcripts/<session>.log   # expect many, at -v
 grep -E "bypass|mute out" transcripts/<session>.log   # when you pressed them
+grep -c "closed (output suppressed)" transcripts/<session>.log   # sessions closed
 ```
 
 A non-zero first count is the regression. The 2026-10-05 call scored 11,000.
+
+### 12. A direction that cannot get a session says why, and gives up
+
+**Stage it deliberately, in its own throwaway run** — do not wait for it to
+happen. Start a run with a deliberately wrong key in the environment for that
+one command, which overrides the real one without touching
+`~/.config/sidetap-live.env`:
+
+```bash
+GEMINI_API_KEY=not-a-real-key uv run sidetap-live run \
+    --app zoom --their-lang ru-RU --my-lang en-US
+```
+
+Talk into the microphone and watch the OUT pane. Three things have to happen,
+and only the first is visible to the automated suite:
+
+- **The reason appears in the pane, on its own line, in red.** Not just
+  `session ○ suspended` and `DEAD AIR`. On 2026-10-12 a spending cap produced
+  exactly this situation and the only line that explained it — the server's
+  own message, with the URL that clears it — was in the log file, which under
+  the TUI nobody is watching. Check it is legible and that the end of a long
+  message wraps rather than vanishing off the right edge.
+- **It stops trying.** After five attempts the direction reports itself dead
+  and **its pump stops**, so the reconnects end. Watch `session` settle on
+  `suspended` and stay there. The call does **not** stop on its own here: with
+  no call running, only OUT ever wakes, so the "both directions are dead"
+  check never becomes true and you quit with `q` yourself. If the attempt
+  counter is still climbing a minute later, the give-up is not arming —
+  before this fix it kept going at about 24 a minute for the rest of the run,
+  because the flag the fatal set was read by nothing.
+- **It does not hammer the API.** Afterwards, count the attempts:
+
+```bash
+grep -c "died:" transcripts/<session>.log                      # expect 5
+grep -c "could not open a session" transcripts/<session>.log   # expect 0
+```
+
+Five attempts at two seconds apart, not hundreds. The failure this guards is
+measured: before the fix, a server that accepted every connection and then
+dropped it was retried **once every 0.51 s** for as long as the run lasted.
+
+The counts are that way round, and not by accident. `GeminiLiveSession`
+starts its thread and returns before it has connected, so **a refusal never
+raises out of `sessions.open()`** — it arrives later as a `Closed` on the
+receive thread, which is why a bad key is a `died:` line and not a "could not
+open a session" one. That second grep has returned zero on every log this
+project has ever produced.
 
 ---
 

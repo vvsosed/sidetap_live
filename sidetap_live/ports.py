@@ -113,6 +113,17 @@ class AudioSink(Protocol):
 
 
 @runtime_checkable
+class StopFlag(Protocol):
+    """Anything a worker polls to know it should stop.
+
+    `threading.Event` is the usual one; run._EitherEvent composes two, so a
+    pump can be stopped by its own direction dying or by the whole session.
+    """
+
+    def is_set(self) -> bool: ...
+
+
+@runtime_checkable
 class Clock(Protocol):
     def monotonic(self) -> float: ...
 

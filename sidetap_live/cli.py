@@ -20,7 +20,12 @@ from .adapters import (
 from .capture import CaptureError
 from .graph import PLAYBACK_STREAM, SINK, SOURCE, PwGraph
 from .ports import Clock, GraphSource, Linker, ProcessLauncher
-from .types import IDLE_SUSPEND_S, LAG_CAP_S, TARGET_LATENCY_S
+from .types import (
+    IDLE_SUSPEND_S,
+    LAG_CAP_S,
+    SUPPRESSED_SUSPEND_S,
+    TARGET_LATENCY_S,
+)
 
 log = logging.getLogger(__name__)
 
@@ -151,9 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="idle_suspend",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=f"close the session after {int(IDLE_SUSPEND_S)}s of silence and "
-             "reopen on speech. On by default - leaving it off bills "
-             "continuously for a session nobody is using",
+        help=f"close the session after {int(IDLE_SUSPEND_S)}s of silence, or "
+             f"after {int(SUPPRESSED_SUSPEND_S)}s of bypass or mute, and "
+             "reopen when it is wanted again. On by default - leaving it off "
+             "bills continuously for a session nobody is listening to, which "
+             "is about $2.21 an hour per direction",
     )
     out.add_argument("--no-tui", action="store_true", help="plain console logging")
     out.add_argument("-v", "--verbose", action="store_true")
@@ -162,8 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 # Only a fallback, for when --out cannot be written to. A session's log
 # normally lands beside its own transcript.
-FALLBACK_LOG_PATH = Path.home() / ".local/state/sidetap_live/sidetap_live.log"
-LOG_PATH = FALLBACK_LOG_PATH
+# Where the log goes when --out is unwritable. One name, because two meant
+# every test patching LOG_PATH was patching something nothing read.
+LOG_PATH = Path.home() / ".local/state/sidetap_live/sidetap_live.log"
 
 
 def session_name() -> str:
@@ -173,6 +181,33 @@ def session_name() -> str:
     to the utterance it explains. Sub-second, so runs cannot collide.
     """
     return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def _log_startup_failure(exc: BaseException) -> None:
+    """Put the reason in the log file as well, with its traceback.
+
+    _configure_logging creates that file, so anything raising before the
+    first line is logged left a zero-byte log and the explanation on a
+    terminal the next run clears - four of the thirteen runs on 2026-10-12,
+    each one a dead end afterwards.
+
+    Handed to the file handlers directly rather than logged: --no-tui has a
+    stderr handler too, and the caller is already printing one clean line
+    there. This way the durable copy exists in both modes and the user still
+    reads the failure once.
+    """
+    record = log.makeRecord(
+        log.name,
+        logging.ERROR,
+        __file__,
+        0,
+        "startup failed: %s",
+        (exc,),
+        (type(exc), exc, exc.__traceback__),
+    )
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.handle(record)
 
 
 def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
@@ -207,7 +242,7 @@ def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
         root.addHandler(stream)
 
     session = session_name()
-    for candidate in (Path(args.out) / f"{session}.log", FALLBACK_LOG_PATH):
+    for candidate in (Path(args.out) / f"{session}.log", LOG_PATH):
         try:
             candidate.parent.mkdir(parents=True, exist_ok=True)
             handler = logging.FileHandler(candidate, encoding="utf-8")
@@ -416,6 +451,7 @@ def main(
         return 130
     except json.JSONDecodeError as exc:
         # Not a RuntimeError, so the clause below would miss it.
+        _log_startup_failure(exc)
         print(
             f"Could not parse pw-dump output ({exc}). Is PipeWire running? "
             "Check with: pw-dump | head",
@@ -423,11 +459,13 @@ def main(
         )
         return 1
     except (CaptureError, MissingToolError, RuntimeError) as exc:
+        _log_startup_failure(exc)
         print(str(exc), file=sys.stderr)
         return 1
     except Exception as exc:
         # Everything else the outside world throws (auth, a dead pw-dump, a
         # full disk) gets one clean line; -v re-raises for a traceback.
+        _log_startup_failure(exc)
         if getattr(args, "verbose", False):
             raise
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)

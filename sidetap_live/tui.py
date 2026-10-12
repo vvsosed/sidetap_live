@@ -58,6 +58,12 @@ class SidetapLiveApp(App):
     .interim { color: $text-muted; }
     .target { text-style: bold; }
     .stats { color: $text-muted; }
+    /* Hidden rather than merely blank on a healthy call: an empty Static is
+       still one row tall, and .pane is 1fr, so the row would be taken off
+       the transcript lines for the whole call. It wraps rather than clipping
+       when shown - the message runs to ~150 characters and the URL at the
+       end of it is the actionable part. */
+    .error { color: $error; text-style: bold; display: none; }
 
     /* An engaged toggle. $warning, not $error: $error means something is
        wrong, and bypass and mute are deliberate.
@@ -94,6 +100,7 @@ class SidetapLiveApp(App):
                 Static("", classes="interim", id=f"source-{suffix}"),
                 Static("", classes="target", id=f"target-{suffix}"),
                 Static("", classes="stats", id=f"stats-{suffix}"),
+                Static("", classes="error", id=f"error-{suffix}"),
                 classes="pane",
                 id=f"pane-{suffix}",
             )
@@ -142,8 +149,18 @@ class SidetapLiveApp(App):
                 f"pad {format_lag(state.squelched_s)}"
                 f"{alarm}"
             )
+            # Verbatim, on its own line. DEAD AIR says the direction is
+            # silent; only this says why, and under the TUI the log goes to a
+            # file nobody is watching. Shown only when there is something to
+            # show, so the row costs nothing on a healthy call.
+            error = self.query_one(f"#error-{suffix}", Static)
+            error.display = bool(state.session_error)
+            error.update(state.session_error)
             pane = self.query_one(f"#pane-{suffix}")
-            pane.set_class(state.dead_air or state.no_audio, "alarm")
+            pane.set_class(
+                state.dead_air or state.no_audio or bool(state.session_error),
+                "alarm",
+            )
 
         bypassed = "BYPASSED  " if snapshot.bypassed else ""
         # An em dash, not 0%: without webrtcvad this cannot be measured.

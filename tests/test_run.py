@@ -48,6 +48,29 @@ def test_setup_fails_before_engaging_when_the_virtual_mic_is_missing(
     assert session.router is None
 
 
+def test_shutdown_survives_a_setup_that_failed_before_it_got_going(
+    session_args, fake_ports_without_virtmic
+):
+    """run_session calls shutdown() and re-raises, so shutdown() must not
+    raise anything of its own.
+
+    `_probe` was added to setup() without being initialised in __init__, so
+    every startup failure before that line died in shutdown() with
+    `AttributeError: 'Session' object has no attribute '_probe'` - and that,
+    not the real reason, is what the user was shown. Four of the thirteen
+    runs on 2026-10-12 ended that way, each leaving a zero-byte log.
+    """
+    session = build_session(
+        session_args, fake_ports_without_virtmic, sessions=FakeSessionFactory()
+    )
+    with pytest.raises(Exception, match="doctor") as caught:
+        session.setup()
+
+    session.shutdown()  # must not raise, and must not mask `caught`
+
+    assert "doctor" in str(caught.value), "the original reason was replaced"
+
+
 def test_the_graph_is_restored_on_shutdown(session_args, fake_ports):
     session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
     session.setup()
@@ -493,6 +516,29 @@ def test_headless_reports_no_audio_on_either_direction(caplog):
     )
 
 
+def test_headless_reports_why_a_direction_cannot_keep_a_session(caplog):
+    """Metrics exists so --no-tui and the TUI share one code path.
+
+    The server's message is the actionable part of a 1011 - it names the
+    cause and sometimes carries the URL that clears it - and under --no-tui
+    it appeared only as an INFO `session closed (died: ...)` line interleaved
+    with everything else, with nothing at error level tying it to the silence
+    being reported.
+    """
+    from sidetap_live.run import _run_headless
+
+    session = _StubHeadlessSession()
+    session.metrics.set_session_error(
+        Direction.IN, "1011 ... exceeded its monthly spending cap ... /spend"
+    )
+
+    with caplog.at_level(logging.ERROR, logger="sidetap_live.run"):
+        _run_headless(session)
+
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "spending cap" in said, f"the reason never reached the log: {said!r}"
+
+
 def test_a_fatal_direction_is_wired_from_the_interpreter(session_args, fake_ports):
     """_on_direction_fatal had no production caller - only tests reached it.
 
@@ -511,6 +557,84 @@ def test_a_fatal_direction_is_wired_from_the_interpreter(session_args, fake_port
             "the dead direction's pump was left running"
         )
         assert not session.stop.is_set(), "one dead direction dropped the whole call"
+    finally:
+        session.shutdown()
+
+
+def test_the_flag_a_fatal_sets_is_the_one_its_pump_is_watching(
+    session_args, fake_ports, monkeypatch
+):
+    """`direction_stop` was set by the fatal and read by nothing else.
+
+    start() handed every pump `self.stop`, so "stops that direction's pump" -
+    asserted in _on_direction_fatal's docstring and in CLAUDE.md - was not
+    true: the report latched once and the retries went on for the rest of the
+    call. Replayed against a server that drops every session, that is ~24
+    reconnects a minute, forever, after the program has already concluded the
+    direction is dead.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    spawned = []
+    monkeypatch.setattr(session, "_spawn", lambda target, args, name:
+                        spawned.append((name, args)))
+    session.setup()
+    # The thread wiring is the subject; the capture node never appears in a
+    # hand-built graph, and waiting for it is capture.start()'s own test.
+    monkeypatch.setattr(session.capture, "start", lambda: None)
+    try:
+        session.start()
+        stops = {
+            name.removeprefix("pump-"): args[1]
+            for name, args in spawned if name.startswith("pump-")
+        }
+        assert set(stops) == {"in", "out"}, f"no pump threads spawned: {spawned}"
+
+        session._on_direction_fatal(Direction.IN, RuntimeError("1007 invalid"))
+
+        assert stops["in"].is_set(), "IN's pump keeps feeding a dead direction"
+        assert not stops["out"].is_set(), "the healthy direction was stopped too"
+    finally:
+        session.shutdown()
+
+
+def test_a_session_wide_stop_still_stops_every_pump(session_args, fake_ports,
+                                                    monkeypatch):
+    """Ctrl-C sets `stop` and nothing else, so the per-direction flag cannot
+    be the only one a pump watches."""
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    spawned = []
+    monkeypatch.setattr(session, "_spawn", lambda target, args, name:
+                        spawned.append((name, args)))
+    session.setup()
+    monkeypatch.setattr(session.capture, "start", lambda: None)
+    try:
+        session.start()
+        stops = [args[1] for name, args in spawned if name.startswith("pump-")]
+        session.stop.set()
+        assert all(s.is_set() for s in stops), "a pump outlived Ctrl-C"
+    finally:
+        session.shutdown()
+
+
+@pytest.mark.parametrize(
+    "direction,flag",
+    [(Direction.IN, "--my-lang"), (Direction.OUT, "--their-lang")],
+)
+def test_the_fatal_hint_names_the_flag_that_was_actually_rejected(
+    session_args, fake_ports, caplog, direction, flag
+):
+    """setup() crosses them: IN translates INTO --my-lang.
+
+    The hint had it the other way round, so a rejected --my-lang sent the
+    user to inspect --their-lang, which was fine.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        with caplog.at_level(logging.ERROR, logger="sidetap_live.run"):
+            session._on_direction_fatal(direction, RuntimeError("1007 invalid"))
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert flag in said, f"{direction.value} should point at {flag}: {said}"
     finally:
         session.shutdown()
 
@@ -611,3 +735,42 @@ def test_bypass_and_mute_are_logged(session_args, fake_ports, caplog):
     text = caplog.text
     assert "mute" in text.lower(), text
     assert text.lower().count("mute") >= 2, "only one edge was logged"
+
+
+def test_mute_tells_only_the_out_interpreter_that_nobody_is_listening(
+    session_args, fake_ports
+):
+    """Mute suppresses OUT alone, so IN must keep translating.
+
+    Suspending IN on a mute would stop you hearing the person you are
+    listening to, which is the opposite of what mute means.
+    """
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        session.set_mute_out(True)
+        assert session.interpreters[Direction.OUT]._unwanted_since is not None
+        assert session.interpreters[Direction.IN]._unwanted_since is None
+
+        session.set_mute_out(False)
+        assert session.interpreters[Direction.OUT]._unwanted_since is None
+    finally:
+        session.shutdown()
+
+
+def test_bypass_tells_both_interpreters_that_nobody_is_listening(
+    session_args, fake_ports
+):
+    """Bypass suppresses both playouts, so both sessions are billing for
+    audio discarded on arrival."""
+    session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
+    session.setup()
+    try:
+        session.set_bypass(True)
+        assert all(
+            session.interpreters[d]._unwanted_since is not None for d in Direction
+        )
+        session.set_bypass(False)
+        assert all(session.interpreters[d]._unwanted_since is None for d in Direction)
+    finally:
+        session.shutdown()

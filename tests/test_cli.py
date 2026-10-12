@@ -302,3 +302,85 @@ def test_a_lag_cap_at_or_below_the_target_is_refused():
 
 def test_a_lag_cap_above_the_target_is_accepted():
     assert parse("--lag-cap", "5", "--target-latency", "2").lag_cap == 5.0
+
+
+@pytest.mark.parametrize("extra", [[], ["--no-tui"]])
+def test_a_startup_failure_reaches_the_log_not_only_a_lost_terminal(
+    tmp_path, monkeypatch, capsys, extra
+):
+    """Four of the thirteen runs on 2026-10-12 left a zero-byte log file.
+
+    _configure_logging creates the file, and anything that raises before the
+    first line is logged prints to stderr and returns 1 - so the one artefact
+    that outlives the run says nothing at all, and under the TUI the terminal
+    that had the message is cleared on the next start. The file is all there
+    is afterwards.
+
+    Both modes, because --no-tui is the one that already has a stderr handler:
+    the record must reach the file WITHOUT the user reading the same failure
+    twice.
+    """
+    import logging
+
+    from sidetap_live import cli
+
+    monkeypatch.setattr(cli, "LOG_PATH", tmp_path / "sidetap_live.log")
+
+    class BrokenGraph:
+        def snapshot(self):
+            raise RuntimeError("pw-loopback not found")
+
+    try:
+        code = main(
+            ["run", "--app", "zoom", "--their-lang", "ru-RU", "--my-lang",
+             "en-US", "--out", str(tmp_path), *extra],
+            graph=BrokenGraph(), launcher=FakeLauncher(), linker=FakeLinker(),
+            clock=FakeClock(),
+        )
+    finally:
+        for handler in list(logging.getLogger().handlers):
+            handler.close()
+            logging.getLogger().removeHandler(handler)
+
+    assert code == 1
+    logs = list(tmp_path.glob("*.log"))
+    assert logs, "no log file was written at all"
+    text = logs[0].read_text()
+    assert text.strip(), f"{logs[0].name} is empty, which is a dead end"
+    assert "pw-loopback not found" in text, f"the reason is not in the log: {text!r}"
+    assert "Traceback" in text, "no traceback, so an unexpected type says nothing"
+    err = capsys.readouterr().err
+    assert err.count("pw-loopback not found") == 1, f"said twice: {err!r}"
+
+
+def test_the_log_fallback_is_the_path_the_tests_patch(tmp_path, monkeypatch):
+    """Five tests in this file patch `cli.LOG_PATH`, which nothing read.
+
+    `_configure_logging` used `FALLBACK_LOG_PATH` directly, so every one of
+    those patches was a no-op: had the `--out` candidate ever failed, a suite
+    CLAUDE.md says touches no real audio, network or credentials would have
+    written the developer's own ~/.local/state/sidetap_live/sidetap_live.log.
+    """
+    import logging
+
+    from sidetap_live import cli
+
+    fallback = tmp_path / "fallback" / "sidetap_live.log"
+    monkeypatch.setattr(cli, "LOG_PATH", fallback)
+    # A file where the --out candidate wants a directory, so its mkdir fails
+    # and the fallback is the one that gets used.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    args = build_parser().parse_args(
+        ["run", "--app", "z", "--their-lang", "ru-RU", "--my-lang", "en-US",
+         "--out", str(blocked / "sub")]
+    )
+    try:
+        path, _ = cli._configure_logging(args, logging.INFO)
+    finally:
+        for handler in list(logging.getLogger().handlers):
+            handler.close()
+            logging.getLogger().removeHandler(handler)
+
+    assert path == fallback, f"the patched fallback was not used: {path}"
+    assert fallback.exists(), "nothing was written to the fallback at all"

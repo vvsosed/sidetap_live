@@ -84,6 +84,16 @@ class SpeechActivity:
             self._last_speech = self._clock.monotonic()
         return self._speaking
 
+    def restart_silence(self) -> None:
+        """Count silence from now. Still returns no audio and gates nothing.
+
+        For a moment that is activity without being a sample of it: releasing
+        mute says the user is about to talk, and without this the idle clock
+        still reads silent and closes the session that the release just
+        opened.
+        """
+        self._last_speech = self._clock.monotonic()
+
     def silence_s(self) -> float:
         """Seconds since speech was last heard, or 0.0 with no detector."""
         if self._detect is None:
