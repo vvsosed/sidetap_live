@@ -31,6 +31,7 @@ from .types import (
     IDLE_SUSPEND_S,
     OVERLAP_MAX_S,
     REOPEN_BACKOFF_S,
+    SESSION_PROBATION_S,
     SUPPRESSED_SUSPEND_S,
     TARGET_RATE,
     AudioChunk,
@@ -46,6 +47,15 @@ from .types import (
 )
 
 log = logging.getLogger(__name__)
+
+
+class SessionDied(RuntimeError):
+    """A session the server accepted and then dropped.
+
+    Carries the server's own reason, which is the actionable part: a 1011
+    names a spending cap, a quota or a rejected config, sometimes with the
+    URL that clears it.
+    """
 
 
 @dataclass(frozen=True)
@@ -101,6 +111,9 @@ class DirectionInterpreter:
 
         self._state = SessionState.SUSPENDED
         self._session = None
+        # When the session on air opened, or None once it has outlived
+        # SESSION_PROBATION_S. See _died_in_probation.
+        self._opened_at: float | None = None
         # Monotonic time of the last failed open, or None. Gates retries.
         self._open_failed_at: float | None = None
         self._open_failures = 0
@@ -217,11 +230,13 @@ class DirectionInterpreter:
                 if self._speech_at is None:
                     self._speech_at = self._clock.monotonic()
 
-        if self._state is not SessionState.SUSPENDED and self._take_dead() is not None:
-            # _reopen's pre-roll replay already sends this chunk; falling
-            # through would send it twice.
-            self._reopen()
-            return
+        if self._state is not SessionState.SUSPENDED:
+            reason = self._take_dead()
+            if reason is not None:
+                # _reopen's pre-roll replay already sends this chunk; falling
+                # through would send it twice.
+                self._reopen(reason)
+                return
 
         # Before the state dispatch, so it preempts an owed rotation and an
         # overlap in progress: closing the session makes both moot, and
@@ -247,6 +262,7 @@ class DirectionInterpreter:
             self._suspend()
             return
 
+        self._note_session_proven()
         self._check_dead_air()
         self._send(chunk.pcm)
         if self._pending is not None:
@@ -309,24 +325,17 @@ class DirectionInterpreter:
             # next speech onset retries, subject to the backoff.
             log.error("%s could not open a session: %s", self.direction.value, exc)
             self._session = None
-            self._open_failed_at = self._clock.monotonic()
             self._metrics.set_health(self.direction, session=Health.FAILED)
             self._set_state(SessionState.SUSPENDED)
-            # A blip clears, but a rejected language code or revoked key fails
-            # the same way every time, so report the direction dead after
-            # FATAL_OPEN_FAILURES. Reported once; the retries continue.
-            self._open_failures += 1
-            if (
-                self._open_failures >= FATAL_OPEN_FAILURES
-                and not self._reported_fatal
-                and self._on_fatal is not None
-            ):
-                self._reported_fatal = True
-                self._on_fatal(self.direction, exc)
+            self._note_open_failure(exc)
             return 0.0
+        # The backoff is cleared because an attempt just got through, but NOT
+        # _open_failures or _reported_fatal: the socket coming up is not
+        # evidence that anything works, and resetting the give-up accounting
+        # here is what let a server dropping every session be retried twice a
+        # second forever. _note_session_proven owns that reset.
         self._open_failed_at = None
-        self._open_failures = 0
-        self._reported_fatal = False
+        self._opened_at = self._clock.monotonic()
         with self._lock:
             self._goaway_at = None
             self._dead = None
@@ -345,6 +354,53 @@ class DirectionInterpreter:
         for block in blocks:
             self._send(block)
         return sum(len(b) for b in blocks) / (TARGET_RATE * 2)
+
+    def _note_open_failure(self, exc: BaseException) -> None:
+        """One attempt at having a session failed. Paces and gives up.
+
+        A blip clears, but a rejected language code, a revoked key or an
+        exhausted spending cap fails the same way every time, so report the
+        direction dead after FATAL_OPEN_FAILURES. Reported once; the retries
+        continue. The server's text is published too, because under the TUI
+        the log is a file nobody is watching.
+        """
+        self._open_failed_at = self._clock.monotonic()
+        self._metrics.set_session_error(self.direction, str(exc))
+        self._open_failures += 1
+        if (
+            self._open_failures >= FATAL_OPEN_FAILURES
+            and not self._reported_fatal
+            and self._on_fatal is not None
+        ):
+            self._reported_fatal = True
+            self._on_fatal(self.direction, exc)
+
+    def _died_in_probation(self) -> bool:
+        """The session on air died before it had shown it could work.
+
+        Such a death is an open that failed late, not a session that broke:
+        it must be paced and counted, or a server that accepts every
+        connection and hangs up becomes an unbounded reconnect loop.
+        """
+        if self._opened_at is None:
+            return False
+        return self._clock.monotonic() - self._opened_at < SESSION_PROBATION_S
+
+    def _note_session_proven(self) -> None:
+        """A session that has outlived SESSION_PROBATION_S really opened.
+
+        This is the reset _open's success path used to do. Here instead,
+        because the socket coming up proves nothing - on 2026-10-12 every
+        open succeeded and the server closed each one inside a second.
+        """
+        if self._opened_at is None:
+            return
+        if self._clock.monotonic() - self._opened_at < SESSION_PROBATION_S:
+            return
+        self._opened_at = None
+        self._open_failures = 0
+        self._reported_fatal = False
+        self._metrics.set_session_error(self.direction, "")
 
     def _suspend(self) -> None:
         self._close("idle")
@@ -436,6 +492,10 @@ class DirectionInterpreter:
 
     def _switch(self, *, forced: bool) -> None:
         old, self._session = self._session, self._pending
+        # The replacement goes on air with the age it already has, not the
+        # outgoing session's: _switch bypasses _open, so without this a fresh
+        # session would inherit "proven" and skip the pacing if it died.
+        self._opened_at = self._pending_since
         self._pending = None
         self._pending_warm = False
         with self._lock:
@@ -606,17 +666,32 @@ class DirectionInterpreter:
             )
         )
 
-    def _reopen(self) -> None:
+    def _reopen(self, reason: str) -> None:
         """The session died. Prefer a warming replacement over a cold start.
 
         Promoting a replacement that is already listening skips the ~3 s
         warm-up and avoids orphaning it: feed() keeps sending to `_pending`,
         so an orphan would be fed and billed for the rest of the call. The
         handover counts as forced, since it did not wait for an output gap.
+
+        A session that never made it out of probation is a failed open with
+        a late verdict, so it is counted and paced like one. Falling back to
+        SUSPENDED rather than reconnecting on the spot is the same choice
+        _open's failure path makes, and for the same reason: SUSPENDED is
+        both true and recoverable, _should_wake retries it once
+        REOPEN_BACKOFF_S is up, and FATAL_OPEN_FAILURES can eventually say so
+        instead of reconnecting for the rest of the call.
         """
         self._metrics.set_health(self.direction, session=Health.FAILED)
         if self._pending is not None:
             self._switch(forced=True)
             return
-        self._close("died")
+        # With the reason, not bare "died": it is the server's own account of
+        # why, and the only thing in the log a user can act on.
+        self._close(f"died: {reason}")
+        if self._died_in_probation():
+            self._note_open_failure(SessionDied(reason))
+        if self._backing_off():
+            self._set_state(SessionState.SUSPENDED)
+            return
         self._open(replay=True, handle=self._handle)

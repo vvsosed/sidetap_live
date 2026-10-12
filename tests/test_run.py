@@ -48,6 +48,29 @@ def test_setup_fails_before_engaging_when_the_virtual_mic_is_missing(
     assert session.router is None
 
 
+def test_shutdown_survives_a_setup_that_failed_before_it_got_going(
+    session_args, fake_ports_without_virtmic
+):
+    """run_session calls shutdown() and re-raises, so shutdown() must not
+    raise anything of its own.
+
+    `_probe` was added to setup() without being initialised in __init__, so
+    every startup failure before that line died in shutdown() with
+    `AttributeError: 'Session' object has no attribute '_probe'` - and that,
+    not the real reason, is what the user was shown. Four of the thirteen
+    runs on 2026-10-12 ended that way, each leaving a zero-byte log.
+    """
+    session = build_session(
+        session_args, fake_ports_without_virtmic, sessions=FakeSessionFactory()
+    )
+    with pytest.raises(Exception, match="doctor") as caught:
+        session.setup()
+
+    session.shutdown()  # must not raise, and must not mask `caught`
+
+    assert "doctor" in str(caught.value), "the original reason was replaced"
+
+
 def test_the_graph_is_restored_on_shutdown(session_args, fake_ports):
     session = build_session(session_args, fake_ports, sessions=FakeSessionFactory())
     session.setup()

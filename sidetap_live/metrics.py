@@ -53,6 +53,11 @@ class DirectionState:
     replayed_s: float = 0.0
 
     session: Health = Health.OK
+    # The server's own last words, verbatim and empty when healthy. A 1011
+    # names its cause and sometimes carries the URL that clears it, and under
+    # the TUI the log goes to a file nobody is watching, so the pane is the
+    # only place this can be read while the call is still up.
+    session_error: str = ""
 
 
 @dataclass
@@ -122,6 +127,16 @@ class Metrics:
     def set_session_state(self, direction: Direction, state: SessionState) -> None:
         with self._lock:
             self._states[direction].session_state = state
+
+    def set_session_error(self, direction: Direction, text: str) -> None:
+        """Why this direction's session will not stay up. "" once one does.
+
+        Set from the failure paths and cleared only when a session outlives
+        SESSION_PROBATION_S, so it is not blanked by an open that is about to
+        be dropped again half a second later.
+        """
+        with self._lock:
+            self._states[direction].session_error = text
 
     def add_rotation(self, direction: Direction, *, forced: bool,
                      replayed_s: float) -> None:

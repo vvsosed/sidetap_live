@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **405 tests that run with no audio hardware, no network and no
+`tests/` holds **415 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -83,7 +83,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 405 tests, no audio/network/creds
+uv run pytest -q                                    # 415 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -223,7 +223,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 405 tests import the package with no
+  `activity.py`. This is what lets 415 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -336,6 +336,39 @@ preference and these are not.
   consecutive failures the direction reports itself dead once through
   `Session._on_direction_fatal`, which stops that direction's pump and stops
   the call when both are gone. Retries continue; only the report is latched.
+- **A session the server accepts and then drops is a failed open, not a
+  successful one.** `_open` reports success the moment the socket is up, and
+  it used to reset `_open_failed_at`, `_open_failures` and `_reported_fatal`
+  there. On 2026-10-12 a Gemini spending cap made the server accept every
+  connection and close it with 1011 inside a second, so `_reopen` →
+  `_close` → `_open` took that success path on every attempt: neither
+  `REOPEN_BACKOFF_S` nor `FATAL_OPEN_FAILURES` could engage. Measured over
+  five runs: 193/27/202/31 reopens, **one every 0.51 s**, for minutes, with
+  no give-up — the same "a revoked key must not become a rate-limit ban"
+  hazard the invariant above exists to prevent, reached through a door it did
+  not cover. **And that door is the only one there is**: `GeminiLiveSession`
+  starts its thread and returns before it connects, so a server-side refusal
+  — revoked key, rejected language code, quota, spending cap — can never
+  raise out of `sessions.open()`. It arrives later as a `Closed` on the
+  receive thread. `"could not open a session"` has not appeared in a single
+  log this project has produced, so until this fix the backoff and the
+  give-up latch were, in production, unreachable code: everything they were
+  written for took the success path. So a death inside `SESSION_PROBATION_S`
+  of opening is counted
+  and paced like a failed open, and only a session that outlives that window
+  clears the accounting (`_note_session_proven`). A mid-call death is
+  untouched: it still reconnects at once, on the last resumption handle,
+  because a blip must cost one phrase and not two seconds.
+- **A direction that cannot keep a session says why on screen, not only in the
+  log.** Under the TUI logging goes to a file nobody is watching, so the
+  server's own message — which names the cause and sometimes carries the URL
+  that clears it — reached nobody: the screen said `DEAD AIR` and the log said
+  `session closed (died)`, with the reason discarded by `feed()`. It is
+  published verbatim as `DirectionState.session_error` and rendered on its own
+  wrapping line in the pane. The same applies before the call: a startup
+  failure prints to stderr and returns 1, which left a **zero-byte log file**
+  and the explanation on a terminal the next run clears — four of the thirteen
+  runs on 2026-10-12. `cli._log_startup_failure` writes it to the log too.
 - **The duck defaults open and fails open.** `DuckControl.close()` flips its
   flag only on a *successful* `wpctl` call, and `Playout.run()`'s `finally`
   opens it unconditionally. A duck stuck **closed** silences the person you are
@@ -404,6 +437,12 @@ let either program's `doctor --repair` tear down the other's live duck.
   was needed; the raw-byte ratio it set aside as "uninformative" was 1.012,
   and that is the one the playout queue responds to. Report both, and run for
   minutes, not seconds.
+- **`1011` is not always an internal error.** The close frame carries the
+  server's own text, and a Gemini **monthly spending cap** arrives as
+  `1011 ... Your project has exceeded its monthly spending cap`, with a URL.
+  Only the account holder can clear it; nothing in this program can. It
+  presents as `DEAD AIR` on whichever direction is being used, which is why
+  the reason has to reach the screen.
 - **Output billing does not stop during pauses, and a suppressed direction
   is still a direction you pay for.** The model streams output continuously
   while a session is open, so a call with ordinary conversational gaps bills

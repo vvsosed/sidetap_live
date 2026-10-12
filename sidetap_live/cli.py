@@ -182,6 +182,33 @@ def session_name() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
 
+def _log_startup_failure(exc: BaseException) -> None:
+    """Put the reason in the log file as well, with its traceback.
+
+    _configure_logging creates that file, so anything raising before the
+    first line is logged left a zero-byte log and the explanation on a
+    terminal the next run clears - four of the thirteen runs on 2026-10-12,
+    each one a dead end afterwards.
+
+    Handed to the file handlers directly rather than logged: --no-tui has a
+    stderr handler too, and the caller is already printing one clean line
+    there. This way the durable copy exists in both modes and the user still
+    reads the failure once.
+    """
+    record = log.makeRecord(
+        log.name,
+        logging.ERROR,
+        __file__,
+        0,
+        "startup failed: %s",
+        (exc,),
+        (type(exc), exc, exc.__traceback__),
+    )
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.handle(record)
+
+
 def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
     """stderr, unless Textual is about to take the terminal away.
 
@@ -423,6 +450,7 @@ def main(
         return 130
     except json.JSONDecodeError as exc:
         # Not a RuntimeError, so the clause below would miss it.
+        _log_startup_failure(exc)
         print(
             f"Could not parse pw-dump output ({exc}). Is PipeWire running? "
             "Check with: pw-dump | head",
@@ -430,11 +458,13 @@ def main(
         )
         return 1
     except (CaptureError, MissingToolError, RuntimeError) as exc:
+        _log_startup_failure(exc)
         print(str(exc), file=sys.stderr)
         return 1
     except Exception as exc:
         # Everything else the outside world throws (auth, a dead pw-dump, a
         # full disk) gets one clean line; -v re-raises for a traceback.
+        _log_startup_failure(exc)
         if getattr(args, "verbose", False):
             raise
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)

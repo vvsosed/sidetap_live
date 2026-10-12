@@ -333,9 +333,17 @@ def test_audio_out_clears_the_dead_air_alarm():
 
 
 def test_a_dead_session_is_reopened_on_the_last_handle():
-    interpreter, sessions, metrics, _ = build()
+    # Past SESSION_PROBATION_S first, so this is a session that broke rather
+    # than an open whose verdict arrived late: the latter is paced by
+    # REOPEN_BACKOFF_S instead of reconnecting here and now. See
+    # test_a_session_dropped_right_after_opening_counts_as_a_failed_open.
+    from sidetap_live.types import SESSION_PROBATION_S
+
+    interpreter, sessions, metrics, clock = build()
     interpreter.feed(block(SPEECH))
     interpreter.note_event(ResumptionHandle(handle="h-9"))
+    clock.advance(SESSION_PROBATION_S + 1)
+    interpreter.feed(block(SPEECH))
     interpreter.note_event(Closed(reason="boom"))
     assert metrics.snapshot().directions[Direction.IN].session is Health.OK
 
@@ -609,6 +617,184 @@ def test_an_endlessly_failing_open_is_eventually_reported_as_fatal():
     clock.advance(REOPEN_BACKOFF_S + 0.1)
     interpreter.feed(block(SPEECH))
     assert len(fatal) == 1
+
+
+# ---------- a session the server accepts and then drops ----------
+#
+# The 2026-10-12 incident. A spending cap made the server accept every
+# connection and close it within a second, which is a failure _open() cannot
+# see: it reports success the moment the socket is up. Five runs, 193/27/202/31
+# reopens, measured at one every 0.51 s against an intended REOPEN_BACKOFF_S of
+# 2.0 - and not one of them reached the give-up report.
+
+SERVER_DROP = (
+    "1011 None. Your project has exceeded its monthly spending cap. "
+    "Please go to AI Studio at https://ai.studio/spend to manage your project"
+)
+
+
+def build_watched():
+    """Sessions that open normally, with the fatal report recorded."""
+    clock = FakeClock()
+    sessions = FakeSessionFactory()
+    metrics = Metrics()
+    fatal: list[tuple[Direction, BaseException]] = []
+    interpreter = DirectionInterpreter(
+        InterpreterConfig(direction=Direction.IN, target_lang="en", echo=False),
+        sessions=sessions,
+        playout=Playout(Direction.IN, FakeAudioSink()),
+        activity=SpeechActivity(lambda pcm: pcm == SPEECH, clock),
+        metrics=metrics,
+        clock=clock,
+        rates=Rates(),
+        preroll=PreRoll(seconds=1.0),
+        on_fatal=lambda direction, exc: fatal.append((direction, exc)),
+    )
+    return interpreter, sessions, metrics, clock, fatal
+
+
+def test_a_session_dropped_right_after_opening_counts_as_a_failed_open():
+    """_open()'s success path reset the whole failure accounting.
+
+    The socket coming up proves nothing. Because _reopen() -> _close() ->
+    _open() took that success path, it cleared _open_failed_at,
+    _open_failures and _reported_fatal on every attempt, so
+    FATAL_OPEN_FAILURES could never arm for a server that accepts the
+    connection and then hangs up - and the actionable message stayed in the
+    log file while the screen said DEAD AIR.
+    """
+    interpreter, sessions, _, clock, fatal = build_watched()
+
+    for attempt in range(FATAL_OPEN_FAILURES):
+        clock.advance(REOPEN_BACKOFF_S + 0.1)
+        interpreter.feed(block(SPEECH))
+        assert len(sessions.opens) == attempt + 1, "the retry never happened"
+        clock.advance(0.5)
+        interpreter.note_event(Closed(reason=SERVER_DROP))
+        interpreter.feed(block(SPEECH))
+        assert interpreter.state is SessionState.SUSPENDED
+
+    assert len(fatal) == 1, "retried a permanent refusal forever"
+    assert "spending cap" in str(fatal[0][1]), "gave up without saying why"
+
+
+def test_a_server_that_drops_every_session_is_paced_by_the_backoff():
+    """Measured at 0.51 s between attempts, i.e. ~2 requests a second.
+
+    This is the "a revoked key must not become a rate-limit ban" hazard
+    reached through a door the invariant did not cover: the open succeeded,
+    so nothing was ever recorded as a failure to pace.
+    """
+    interpreter, sessions, _, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    clock.advance(0.5)
+    interpreter.note_event(Closed(reason=SERVER_DROP))
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.opens) == 1
+
+    for _ in range(20):  # a second of capture blocks, all inside the backoff
+        clock.advance(0.05)
+        interpreter.feed(block(SPEECH))
+    assert len(sessions.opens) == 1, "reconnected inside REOPEN_BACKOFF_S"
+
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.opens) == 2, "never retried once the backoff was up"
+
+
+def test_the_servers_own_reason_is_published_not_only_logged():
+    """Under the TUI, logging goes to a file nobody is watching.
+
+    The server's message names the cause and carries the URL that fixes it.
+    On 2026-10-12 the screen showed DEAD AIR and `session closed (died)`, and
+    the one line that explained the silence was only in the log.
+    """
+    interpreter, _, metrics, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    clock.advance(0.5)
+    interpreter.note_event(Closed(reason=SERVER_DROP))
+    interpreter.feed(block(SPEECH))
+
+    shown = metrics.snapshot().directions[Direction.IN].session_error
+    assert "spending cap" in shown, f"the cause is not on screen: {shown!r}"
+    assert "ai.studio/spend" in shown, "the actionable URL was dropped"
+
+
+def test_opening_a_session_does_not_clear_the_error_but_surviving_does():
+    """Clearing on open would blank the message half a second before the
+    next death, so the screen would flicker rather than explain."""
+    from sidetap_live.types import SESSION_PROBATION_S
+
+    interpreter, _, metrics, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    clock.advance(0.5)
+    interpreter.note_event(Closed(reason=SERVER_DROP))
+    interpreter.feed(block(SPEECH))
+    assert metrics.snapshot().directions[Direction.IN].session_error != ""
+
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SPEECH))
+    assert metrics.snapshot().directions[Direction.IN].session_error != "", (
+        "the socket coming up is not evidence that anything works"
+    )
+
+    clock.advance(SESSION_PROBATION_S + 0.1)
+    interpreter.feed(block(SPEECH))
+    assert metrics.snapshot().directions[Direction.IN].session_error == ""
+
+
+def test_a_session_that_dies_after_proving_itself_is_reopened_at_once():
+    """A mid-call death is a blip, not a refusal.
+
+    The backoff and the give-up latch are for a server that will not have us.
+    A session that ran for minutes and then dropped must still cost one
+    phrase, so this path must stay exactly as it was.
+    """
+    from sidetap_live.types import SESSION_PROBATION_S
+
+    interpreter, sessions, _, clock, fatal = build_watched()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(ResumptionHandle(handle="h-9"))
+    clock.advance(SESSION_PROBATION_S + 1)
+    interpreter.feed(block(SPEECH))
+
+    interpreter.note_event(Closed(reason="1011 internal error"))
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.RUNNING, "waited out a backoff"
+    assert sessions.opens[1] == ("en", False, "h-9")
+    assert fatal == []
+
+
+def test_a_promoted_replacement_starts_its_own_probation():
+    """_switch() puts a session on air without going through _open().
+
+    Reading the outgoing session's age would make the replacement's first
+    seconds look proven, so a server dropping every connection would get one
+    free un-paced retry per rotation.
+    """
+    from sidetap_live.types import SESSION_PROBATION_S
+
+    interpreter, sessions, _, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    clock.advance(SESSION_PROBATION_S + 1)
+    interpreter.feed(block(SPEECH))
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.OVERLAPPING
+    outgoing, replacement = sessions.sessions[0], sessions.sessions[1]
+    interpreter.note_event_from(replacement, AudioOut(pcm=LOUD))   # warm
+    interpreter.note_event_from(outgoing, AudioOut(pcm=QUIET))     # and silent
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING, "precondition: it switched"
+
+    clock.advance(0.5)
+    interpreter.note_event(Closed(reason=SERVER_DROP))
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.SUSPENDED, (
+        "a freshly promoted session that died at once was treated as proven"
+    )
 
 
 def test_audio_from_a_retired_session_is_not_played():

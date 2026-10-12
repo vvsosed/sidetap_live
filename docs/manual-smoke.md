@@ -257,6 +257,49 @@ grep -c "closed (output suppressed)" transcripts/<session>.log   # sessions clos
 
 A non-zero first count is the regression. The 2026-10-05 call scored 11,000.
 
+### 12. A direction that cannot get a session says why, and gives up
+
+**Stage it deliberately, in its own throwaway run** — do not wait for it to
+happen. Start a run with a deliberately wrong key in the environment for that
+one command, which overrides the real one without touching
+`~/.config/sidetap-live.env`:
+
+```bash
+GEMINI_API_KEY=not-a-real-key uv run sidetap-live run \
+    --app zoom --their-lang ru-RU --my-lang en-US
+```
+
+Talk into the microphone and watch the OUT pane. Three things have to happen,
+and only the first is visible to the automated suite:
+
+- **The reason appears in the pane, on its own line, in red.** Not just
+  `session ○ suspended` and `DEAD AIR`. On 2026-10-12 a spending cap produced
+  exactly this situation and the only line that explained it — the server's
+  own message, with the URL that clears it — was in the log file, which under
+  the TUI nobody is watching. Check it is legible and that the end of a long
+  message wraps rather than vanishing off the right edge.
+- **It stops trying.** After five attempts the direction reports itself dead;
+  with both directions gone the call stops on its own. If the dashboard is
+  still up a minute later with the counter climbing, the give-up latch is not
+  arming.
+- **It does not hammer the API.** Afterwards, count the attempts:
+
+```bash
+grep -c "died:" transcripts/<session>.log                      # expect 5
+grep -c "could not open a session" transcripts/<session>.log   # expect 0
+```
+
+Five attempts at two seconds apart, not hundreds. The failure this guards is
+measured: before the fix, a server that accepted every connection and then
+dropped it was retried **once every 0.51 s** for as long as the run lasted.
+
+The counts are that way round, and not by accident. `GeminiLiveSession`
+starts its thread and returns before it has connected, so **a refusal never
+raises out of `sessions.open()`** — it arrives later as a `Closed` on the
+receive thread, which is why a bad key is a `died:` line and not a "could not
+open a session" one. That second grep has returned zero on every log this
+project has ever produced.
+
 ---
 
 ## After the call

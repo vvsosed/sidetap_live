@@ -369,3 +369,34 @@ async def test_discarded_padding_is_shown_apart_from_dropped_audio():
 
         assert "264" in line, f"padding is invisible: {line}"
         assert "dropped 0.0s" in line, f"dropped lost its own figure: {line}"
+
+
+@pytest.mark.asyncio
+async def test_a_session_error_is_shown_in_the_pane_not_only_the_log():
+    """The server's own message is the only actionable thing on the screen.
+
+    On 2026-10-12 a spending cap made every session die within a second. The
+    pane said DEAD AIR, which is true and useless; the message naming the
+    cause and carrying the URL that clears it went to the log file, which
+    under the TUI nobody is watching. Its own line, not the stats line: the
+    message runs to ~150 characters and wraps, where appending it to stats
+    would push it off the right-hand edge.
+    """
+    from textual.widgets import Static
+
+    reason = (
+        "1011 None. Your project has exceeded its monthly spending cap. "
+        "Please go to AI Studio at https://ai.studio/spend to manage your project"
+    )
+    metrics = Metrics()
+    metrics.set_session_error(Direction.IN, reason)
+    metrics.set_dead_air(Direction.IN, True)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        shown = str(app.query_one("#error-in", Static).content)
+
+        assert "spending cap" in shown, f"the cause is invisible: {shown!r}"
+        assert "ai.studio/spend" in shown, "the actionable URL was truncated away"
+        # The healthy direction must stay clean.
+        assert str(app.query_one("#error-out", Static).content) == ""

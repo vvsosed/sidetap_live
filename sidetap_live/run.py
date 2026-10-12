@@ -88,6 +88,10 @@ class Session:
         self.router = None
         self.transcript = None
         self.capture = None
+        # Here and not only in setup(): every failure before setup() reached
+        # its line died in shutdown() with an AttributeError, which is what
+        # the user was shown INSTEAD of the real reason.
+        self._probe = None
 
     def setup(self) -> None:
         args = self._args
@@ -151,7 +155,6 @@ class Session:
             Direction.IN: default_sink.serial if default_sink else None,
             Direction.OUT: virtmic.serial,
         }
-        self._probe = None
         if getattr(args, "probe_audio", False):
             from .probe import AudioProbe
 
@@ -263,9 +266,14 @@ class Session:
         self.metrics.set_health(direction, session=Health.FAILED)
         # Set here, so the `all(...)` check below sees every dead direction.
         self.direction_stop[direction].set()
+        # The reason, then one hint - not a diagnosis. A rejected --their-lang
+        # was the only way here when this was written; an exhausted quota or
+        # spending cap reaches it too, and for that the server's own text
+        # names the cause and carries the URL that clears it.
         log.error(
-            "%s direction is dead: %s. The call continues one-way; Ctrl-C and "
-            "check --%s-lang.",
+            "%s direction is dead: %s. The call continues one-way; Ctrl-C, "
+            "then act on that message - check --%s-lang if it does not name "
+            "a cause.",
             direction.value,
             exc,
             "their" if direction is Direction.IN else "my",
