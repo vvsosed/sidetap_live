@@ -169,8 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 # Only a fallback, for when --out cannot be written to. A session's log
 # normally lands beside its own transcript.
-FALLBACK_LOG_PATH = Path.home() / ".local/state/sidetap_live/sidetap_live.log"
-LOG_PATH = FALLBACK_LOG_PATH
+# Where the log goes when --out is unwritable. One name, because two meant
+# every test patching LOG_PATH was patching something nothing read.
+LOG_PATH = Path.home() / ".local/state/sidetap_live/sidetap_live.log"
 
 
 def session_name() -> str:
@@ -241,7 +242,7 @@ def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
         root.addHandler(stream)
 
     session = session_name()
-    for candidate in (Path(args.out) / f"{session}.log", FALLBACK_LOG_PATH):
+    for candidate in (Path(args.out) / f"{session}.log", LOG_PATH):
         try:
             candidate.parent.mkdir(parents=True, exist_ok=True)
             handler = logging.FileHandler(candidate, encoding="utf-8")

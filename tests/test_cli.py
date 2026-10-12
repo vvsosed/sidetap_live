@@ -351,3 +351,36 @@ def test_a_startup_failure_reaches_the_log_not_only_a_lost_terminal(
     assert "Traceback" in text, "no traceback, so an unexpected type says nothing"
     err = capsys.readouterr().err
     assert err.count("pw-loopback not found") == 1, f"said twice: {err!r}"
+
+
+def test_the_log_fallback_is_the_path_the_tests_patch(tmp_path, monkeypatch):
+    """Five tests in this file patch `cli.LOG_PATH`, which nothing read.
+
+    `_configure_logging` used `FALLBACK_LOG_PATH` directly, so every one of
+    those patches was a no-op: had the `--out` candidate ever failed, a suite
+    CLAUDE.md says touches no real audio, network or credentials would have
+    written the developer's own ~/.local/state/sidetap_live/sidetap_live.log.
+    """
+    import logging
+
+    from sidetap_live import cli
+
+    fallback = tmp_path / "fallback" / "sidetap_live.log"
+    monkeypatch.setattr(cli, "LOG_PATH", fallback)
+    # A file where the --out candidate wants a directory, so its mkdir fails
+    # and the fallback is the one that gets used.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    args = build_parser().parse_args(
+        ["run", "--app", "z", "--their-lang", "ru-RU", "--my-lang", "en-US",
+         "--out", str(blocked / "sub")]
+    )
+    try:
+        path, _ = cli._configure_logging(args, logging.INFO)
+    finally:
+        for handler in list(logging.getLogger().handlers):
+            handler.close()
+            logging.getLogger().removeHandler(handler)
+
+    assert path == fallback, f"the patched fallback was not used: {path}"
+    assert fallback.exists(), "nothing was written to the fallback at all"

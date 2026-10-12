@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **415 tests that run with no audio hardware, no network and no
+`tests/` holds **428 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -83,7 +83,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 415 tests, no audio/network/creds
+uv run pytest -q                                    # 428 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -223,7 +223,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 415 tests import the package with no
+  `activity.py`. This is what lets 428 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -335,7 +335,12 @@ preference and these are not.
   language code fails identically every time, so after `FATAL_OPEN_FAILURES`
   consecutive failures the direction reports itself dead once through
   `Session._on_direction_fatal`, which stops that direction's pump and stops
-  the call when both are gone. Retries continue; only the report is latched.
+  the call when both are gone. **The pump must watch both stop flags for that
+  to be true** — `run._EitherEvent(stop, direction_stop[direction])`. It was
+  handed `stop` alone, so `direction_stop` was set by the fatal and read by
+  nothing: the report latched once and the reconnects went on for the whole
+  call, measured at about 24 a minute. Watching only `direction_stop` is
+  equally wrong — Ctrl-C sets `stop` and nothing else.
 - **A session the server accepts and then drops is a failed open, not a
   successful one.** `_open` reports success the moment the socket is up, and
   it used to reset `_open_failed_at`, `_open_failures` and `_reported_fatal`
@@ -437,6 +442,26 @@ let either program's `doctor --repair` tear down the other's live duck.
   was needed; the raw-byte ratio it set aside as "uninformative" was 1.012,
   and that is the one the playout queue responds to. Report both, and run for
   minutes, not seconds.
+- **`sessions.open()` returns before it has connected.**
+  `GeminiLiveSession.__init__` starts its thread and returns, so every
+  server-side refusal arrives later as a `Closed` on the receive thread
+  rather than as an exception from `open()` — even one raised inside
+  `google-genai`'s own `connect()` during the handshake, which is where the
+  2026-10-12 1011 came from. `_open`'s `except` branch therefore catches only
+  *local* errors, which is why `SESSION_PROBATION_S` exists at all. Making
+  `open()` wait for the handshake and raise would be the deeper fix, and
+  would make `"could not open a session"` mean something — but
+  `_open_pending` runs on the **receive thread** during a rotation, so
+  blocking there stalls dispatch of the outgoing session's audio for the
+  connect duration (~200-650 ms measured on a working network, unbounded on
+  a bad one) in the one code path make-before-break exists to protect. Not
+  done, deliberately; the probation window covers both channels and this
+  would still need it for a refusal that lands after the handshake.
+- **The languages are crossed, and error messages keep getting it wrong.**
+  IN translates INTO `--my-lang` and OUT into `--their-lang`
+  (`setup()`'s `lang_targets`). `_on_direction_fatal`'s hint had it the other
+  way round, so a rejected `--my-lang` sent the user to inspect the flag that
+  was fine.
 - **`1011` is not always an internal error.** The close frame carries the
   server's own text, and a Gemini **monthly spending cap** arrives as
   `1011 ... Your project has exceeded its monthly spending cap`, with a URL.

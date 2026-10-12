@@ -23,7 +23,7 @@ from .activity import SpeechActivity
 from .cost import Rates, input_seconds, output_seconds
 from .metrics import Health, Metrics
 from .playout import Playout
-from .ports import Clock, SessionFactory
+from .ports import Clock, SessionFactory, StopFlag
 from .preroll import PreRoll
 from .types import (
     DEAD_AIR_S,
@@ -168,7 +168,6 @@ class DirectionInterpreter:
             # the hotkey's worker thread - can raise "deque mutated during
             # iteration". _discard_suppressed_window does it on the pump.
             self._release_pending = True
-            self._wake_on_release = True
             return
         if self._unwanted_since is None:
             self._unwanted_since = self._clock.monotonic()
@@ -187,19 +186,32 @@ class DirectionInterpreter:
         Runs on the pump, before the current block is added, so the first
         block after release still reaches the new session.
         """
+        # Owed only if there is something to wake. A bypass shorter than
+        # SUPPRESSED_SUSPEND_S left the session RUNNING, which never consults
+        # _should_wake - so the debt survived the bypass and later cancelled
+        # a legitimate idle suspend, costing a connect per toggle.
+        self._wake_on_release = self._state is SessionState.SUSPENDED
+        # The release is itself activity. Without this the idle clock still
+        # reads silent after a mute longer than IDLE_SUSPEND_S, so the block
+        # after the eager open suspends it again and the warm-up is paid on
+        # the first word anyway - the 30 min mute case exactly.
+        self._activity.restart_silence()
         self._preroll.drain()
         with self._lock:
             self._speech_at = None
 
     def _suppressed_long_enough(self) -> bool:
-        if self._unwanted_since is None:
+        # Snapshotted, not read twice: set_output_wanted nulls this from the
+        # hotkey's worker thread, so a release landing between the guard and
+        # the subtraction computed `float - None` on the pump.
+        since = self._unwanted_since
+        if since is None:
             return False
         # --no-idle-suspend is an explicit choice to pay for responsiveness,
         # and this is the same trade.
         if not self._config.idle_suspend:
             return False
-        held = self._clock.monotonic() - self._unwanted_since
-        return held >= SUPPRESSED_SUSPEND_S
+        return self._clock.monotonic() - since >= SUPPRESSED_SUSPEND_S
 
     def _suspend_for_suppression(self) -> None:
         """Close the session AND any warming replacement.
@@ -270,7 +282,7 @@ class DirectionInterpreter:
             # replacement is billed too.
             self._send_to(self._pending, chunk.pcm)
 
-    def pump(self, chunks, stop: threading.Event) -> None:
+    def pump(self, chunks, stop: StopFlag) -> None:
         """Drain a capture queue into the session until told to stop."""
         while not stop.is_set():
             try:
@@ -300,8 +312,10 @@ class DirectionInterpreter:
         if self._wake_on_release:
             # Opening on release rather than on the next word is what keeps
             # unmuting from costing the fresh session's ~3 s of silence on
-            # top of the user's own reaction time.
-            self._wake_on_release = False
+            # top of the user's own reaction time. Cleared by _open once a
+            # session is actually up, never here: clearing on the attempt
+            # lost the debt to a refused open, and the user was back to
+            # waiting until they spoke. Same rule as _goaway_at's.
             return True
         # With no detector there is no onset to wait for, so open at once and
         # hold the session for the whole call.
@@ -336,6 +350,7 @@ class DirectionInterpreter:
         # second forever. _note_session_proven owns that reset.
         self._open_failed_at = None
         self._opened_at = self._clock.monotonic()
+        self._wake_on_release = False
         with self._lock:
             self._goaway_at = None
             self._dead = None
@@ -365,7 +380,12 @@ class DirectionInterpreter:
         the log is a file nobody is watching.
         """
         self._open_failed_at = self._clock.monotonic()
-        self._metrics.set_session_error(self.direction, str(exc))
+        # Never "": that is the sentinel for healthy, and the TUI keys both
+        # the line and the alarm border on it, so an exception carrying no
+        # message would render as a working session.
+        self._metrics.set_session_error(
+            self.direction, str(exc) or f"{type(exc).__name__}, with no message"
+        )
         self._open_failures += 1
         if (
             self._open_failures >= FATAL_OPEN_FAILURES
@@ -375,12 +395,12 @@ class DirectionInterpreter:
             self._reported_fatal = True
             self._on_fatal(self.direction, exc)
 
-    def _died_in_probation(self) -> bool:
-        """The session on air died before it had shown it could work.
+    def _in_probation(self) -> bool:
+        """The session on air has not yet shown that it works.
 
-        Such a death is an open that failed late, not a session that broke:
-        it must be paced and counted, or a server that accepts every
-        connection and hangs up becomes an unbounded reconnect loop.
+        A death in this window is an open that failed late, not a session
+        that broke: it must be paced and counted, or a server that accepts
+        every connection and hangs up becomes an unbounded reconnect loop.
         """
         if self._opened_at is None:
             return False
@@ -393,9 +413,7 @@ class DirectionInterpreter:
         because the socket coming up proves nothing - on 2026-10-12 every
         open succeeded and the server closed each one inside a second.
         """
-        if self._opened_at is None:
-            return
-        if self._clock.monotonic() - self._opened_at < SESSION_PROBATION_S:
+        if self._opened_at is None or self._in_probation():
             return
         self._opened_at = None
         self._open_failures = 0
@@ -689,9 +707,14 @@ class DirectionInterpreter:
         # With the reason, not bare "died": it is the server's own account of
         # why, and the only thing in the log a user can act on.
         self._close(f"died: {reason}")
-        if self._died_in_probation():
-            self._note_open_failure(SessionDied(reason))
-        if self._backing_off():
+        if self._in_probation():
+            self._note_open_failure(
+                SessionDied(reason or "the server closed it without saying why")
+            )
             self._set_state(SessionState.SUSPENDED)
             return
+        # Not gated on _backing_off(): _drop_pending and _open_pending arm
+        # that timer for a REPLACEMENT, and a proven session dying a moment
+        # later must not be made to wait out somebody else's backoff - it
+        # would lose both the two seconds and the resumption handle.
         self._open(replay=True, handle=self._handle)

@@ -278,10 +278,14 @@ and only the first is visible to the automated suite:
   own message, with the URL that clears it — was in the log file, which under
   the TUI nobody is watching. Check it is legible and that the end of a long
   message wraps rather than vanishing off the right edge.
-- **It stops trying.** After five attempts the direction reports itself dead;
-  with both directions gone the call stops on its own. If the dashboard is
-  still up a minute later with the counter climbing, the give-up latch is not
-  arming.
+- **It stops trying.** After five attempts the direction reports itself dead
+  and **its pump stops**, so the reconnects end. Watch `session` settle on
+  `suspended` and stay there. The call does **not** stop on its own here: with
+  no call running, only OUT ever wakes, so the "both directions are dead"
+  check never becomes true and you quit with `q` yourself. If the attempt
+  counter is still climbing a minute later, the give-up is not arming —
+  before this fix it kept going at about 24 a minute for the rest of the run,
+  because the flag the fatal set was read by nothing.
 - **It does not hammer the API.** Afterwards, count the attempts:
 
 ```bash

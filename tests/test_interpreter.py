@@ -1098,3 +1098,169 @@ def test_releasing_suppression_clears_the_window_on_the_pump_thread():
     assert bytes(sessions.sessions[-1].sent) == SPEECH, (
         "the first block after release was lost, or muted audio survived"
     )
+
+
+# ---------- hazards found by review of the two fixes above ----------
+
+
+def test_a_mature_session_keeps_its_handle_when_a_replacement_just_failed():
+    """The backoff is for a server refusing us, not for any armed timer.
+
+    `_drop_pending` and `_open_pending`'s failure path both set
+    `_open_failed_at` with no probation involved, so a proven session dying a
+    moment later fell back to SUSPENDED and the eventual reopen came from
+    feed()'s wake path with no handle. The blip cost two seconds AND the
+    session's context, which is the opposite of the intent.
+    """
+    from sidetap_live.types import SESSION_PROBATION_S
+
+    interpreter, sessions, _, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    interpreter.note_event(ResumptionHandle(handle="h-9"))
+    clock.advance(SESSION_PROBATION_S + 1)
+    interpreter.feed(block(SPEECH))                       # proven
+    goaway(interpreter)
+    interpreter.feed(block(SPEECH))
+    replacement = sessions.sessions[1]
+    interpreter.note_event_from(replacement, Closed(reason="1007 invalid"))
+    assert interpreter._pending is None, "precondition: the replacement was dropped"
+
+    interpreter.note_event(Closed(reason="1011 internal error"))
+    interpreter.feed(block(SPEECH))
+
+    assert interpreter.state is SessionState.RUNNING, (
+        "a proven session was made to wait out somebody else's backoff"
+    )
+    assert sessions.opens[-1] == ("en", False, "h-9"), (
+        f"the resumption handle was dropped: {sessions.opens}"
+    )
+
+
+def test_a_bypass_too_short_to_suspend_owes_no_wake():
+    """`_wake_on_release` was set on every release and consumed only by
+    `_should_wake`, which a RUNNING direction never calls.
+
+    So the debt outlived a bypass that suspended nothing, and later cancelled
+    a legitimate idle suspend: a wasted ~3 s connect and an open/close pair
+    in the log, per toggle.
+    """
+    interpreter, sessions, _, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    interpreter.set_output_wanted(False)
+    clock.advance(2.0)                        # far under SUPPRESSED_SUSPEND_S
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING, "precondition: nothing suspended"
+    interpreter.set_output_wanted(True)
+    interpreter.feed(block(SPEECH))
+    assert len(sessions.opens) == 1
+
+    clock.advance(IDLE_SUSPEND_S + 1)
+    interpreter.feed(block(SILENCE))
+    assert interpreter.state is SessionState.SUSPENDED, "precondition: it idled out"
+    interpreter.feed(block(SILENCE))
+
+    assert len(sessions.opens) == 1, "reopened a session nobody had asked for"
+    assert interpreter.state is SessionState.SUSPENDED
+
+
+def test_releasing_a_long_mute_does_not_suspend_what_it_just_opened():
+    """The eager reopen exists so the fresh session's ~3 s hides inside the
+    user's reaction time.
+
+    `_discard_suppressed_window` clears `_speech_at` but not the activity
+    clock, so after a mute longer than IDLE_SUSPEND_S the very next block
+    suspended the session again: the warm-up was paid on the first word after
+    all, and a connect was spent for nothing. The 30 min mute this whole fix
+    was written for is exactly that case.
+    """
+    from sidetap_live.types import SUPPRESSED_SUSPEND_S
+
+    interpreter, sessions, _, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    interpreter.set_output_wanted(False)
+    clock.advance(SUPPRESSED_SUSPEND_S + 1)
+    interpreter.feed(block(SILENCE))
+    assert interpreter.state is SessionState.SUSPENDED, "precondition: it suspended"
+    clock.advance(IDLE_SUSPEND_S + 1)         # listening quietly, still muted
+
+    interpreter.set_output_wanted(True)
+    interpreter.feed(block(SILENCE))
+    assert interpreter.state is SessionState.RUNNING, "the eager reopen never happened"
+
+    interpreter.feed(block(SILENCE))
+    assert interpreter.state is SessionState.RUNNING, (
+        "idle-suspend closed the session the release had just opened"
+    )
+
+
+def test_a_release_landing_mid_check_does_not_crash_the_pump():
+    """`set_output_wanted` runs on the hotkey's worker thread.
+
+    It nulls `_unwanted_since` with no lock, and the guard and the
+    subtraction were two separate reads of it - so a release landing between
+    them computed `float - None` on the pump thread, swallowed by pump()'s
+    except as one "interpreter pump error" with a capture block lost. Every
+    other cross-thread read in this class snapshots under the lock first.
+    """
+    interpreter, _, _, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    interpreter.set_output_wanted(False)
+
+    passage = clock.monotonic
+
+    def release_lands_mid_read():
+        interpreter._unwanted_since = None    # exactly that interleaving
+        return passage()
+
+    clock.monotonic = release_lands_mid_read
+
+    assert interpreter._suppressed_long_enough() is False
+
+
+def test_a_refusal_with_no_message_still_reads_as_a_failure():
+    """`""` is the sentinel for healthy, and `str(RuntimeError())` is `""`.
+
+    tui.py keys the pane text AND the alarm border on the truthiness of this
+    field, so a refusal carrying no message rendered as a blank, un-alarmed
+    pane - indistinguishable from a session that is working.
+    """
+    interpreter, _, metrics, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    clock.advance(0.5)
+    interpreter.note_event(Closed(reason=""))
+    interpreter.feed(block(SPEECH))
+
+    shown = metrics.snapshot().directions[Direction.IN].session_error
+    assert shown != "", "a refusal with no text was published as healthy"
+
+
+def test_a_release_that_lands_on_a_refusal_still_owes_the_wake():
+    """`_should_wake` consumed the debt before `_open` could fail.
+
+    This file's own rule for this is `_goaway_at`'s: the rotation stays owed
+    until a switch actually happens. Here the debt vanished on a failed open,
+    so after the backoff the direction was waiting for speech again - and the
+    user loses the first sentence after unmuting, which is the one thing
+    manual-smoke's mute step asks a human to listen for.
+    """
+    from sidetap_live.types import SUPPRESSED_SUSPEND_S
+
+    interpreter, sessions, clock = build_flaky(fail_on=2)
+    interpreter.feed(block(SPEECH))
+    assert interpreter.state is SessionState.RUNNING
+
+    interpreter.set_output_wanted(False)
+    clock.advance(SUPPRESSED_SUSPEND_S + 1)
+    interpreter.feed(block(SILENCE))
+    assert interpreter.state is SessionState.SUSPENDED, "precondition: it suspended"
+
+    interpreter.set_output_wanted(True)
+    interpreter.feed(block(SILENCE))          # the eager open, which refuses
+    assert interpreter.state is SessionState.SUSPENDED, "precondition: it failed"
+
+    clock.advance(REOPEN_BACKOFF_S + 0.1)
+    interpreter.feed(block(SILENCE))          # still silent, debt still owed
+
+    assert interpreter.state is SessionState.RUNNING, (
+        "the release was forgotten, so the user waits until they speak"
+    )

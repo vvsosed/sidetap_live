@@ -32,6 +32,23 @@ log = logging.getLogger(__name__)
 SHUTDOWN_JOIN_S = 3.0
 
 
+class _EitherEvent:
+    """Set when either flag is. A pump takes one, and there are two reasons.
+
+    The whole session can stop (Ctrl-C, or both directions dead) or one
+    direction alone can (`_on_direction_fatal`). Handing the pump only
+    `stop` is what made "stops that direction's pump" untrue: the fatal
+    report latched once and the reconnects went on for the rest of the call.
+    Handing it only `direction_stop` would outlive Ctrl-C.
+    """
+
+    def __init__(self, *events: threading.Event):
+        self._events = events
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
+
+
 class Session:
     def __init__(
         self,
@@ -247,7 +264,10 @@ class Session:
         for direction, interpreter in self.interpreters.items():
             self._spawn(
                 interpreter.pump,
-                (self.capture.queues[direction.track], self.stop),
+                (
+                    self.capture.queues[direction.track],
+                    _EitherEvent(self.stop, self.direction_stop[direction]),
+                ),
                 f"pump-{direction.value}",
             )
             self._spawn(
@@ -266,17 +286,21 @@ class Session:
         self.metrics.set_health(direction, session=Health.FAILED)
         # Set here, so the `all(...)` check below sees every dead direction.
         self.direction_stop[direction].set()
-        # The reason, then one hint - not a diagnosis. A rejected --their-lang
-        # was the only way here when this was written; an exhausted quota or
-        # spending cap reaches it too, and for that the server's own text
+        # The reason, then one hint - not a diagnosis. A rejected language
+        # code was the only way here when this was written; an exhausted quota
+        # or spending cap reaches it too, and for that the server's own text
         # names the cause and carries the URL that clears it.
+        #
+        # setup() CROSSES the languages - IN translates into --my-lang - and
+        # the hint had it the other way round, sending the user to inspect
+        # the flag that was fine.
         log.error(
             "%s direction is dead: %s. The call continues one-way; Ctrl-C, "
             "then act on that message - check --%s-lang if it does not name "
             "a cause.",
             direction.value,
             exc,
-            "their" if direction is Direction.IN else "my",
+            "my" if direction is Direction.IN else "their",
         )
         if all(event.is_set() for event in self.direction_stop.values()):
             log.error("both directions are dead; stopping")
@@ -590,6 +614,7 @@ def _run_headless(session: Session) -> None:
     # Latched per direction so a standing condition is reported once rather
     # than twice a second for the rest of the call.
     deaf: dict[Direction, bool] = {d: False for d in Direction}
+    refused: dict[Direction, bool] = {d: False for d in Direction}
     while not session.stop.is_set():
         session.stop.wait(0.5)
         snapshot = session.metrics.snapshot()
@@ -600,6 +625,19 @@ def _run_headless(session: Session) -> None:
             alarmed = True
         elif not out.dead_air:
             alarmed = False
+
+        # The headless counterpart of the TUI's red line in the pane. The
+        # reason is the only actionable thing a 1011 carries, and it was
+        # reaching the log solely as an INFO `session closed (died: ...)`
+        # line interleaved with everything else.
+        for direction, state in snapshot.directions.items():
+            if state.session_error and not refused[direction]:
+                log.error(
+                    "the %s direction cannot keep a session: %s",
+                    direction.value,
+                    state.session_error,
+                )
+            refused[direction] = bool(state.session_error)
 
         # The headless counterpart of the TUI's NO AUDIO ARRIVING.
         for direction, state in snapshot.directions.items():

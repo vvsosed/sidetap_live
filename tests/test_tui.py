@@ -400,3 +400,28 @@ async def test_a_session_error_is_shown_in_the_pane_not_only_the_log():
         assert "ai.studio/spend" in shown, "the actionable URL was truncated away"
         # The healthy direction must stay clean.
         assert str(app.query_one("#error-out", Static).content) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_error_line_costs_no_height_while_everything_is_healthy():
+    """An empty Static is still one row tall - measured height=1.
+
+    `.pane` is `height: 1fr`, so a row reserved for a line that is blank on
+    every healthy call is taken off the transcript panes, in both directions,
+    for the whole call.
+    """
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        error = app.query_one("#error-in", Static)
+        assert error.display is False, "a blank line is taking a row from the pane"
+
+        metrics.set_session_error(Direction.IN, "1011 exceeded its spending cap")
+        app.refresh_from_metrics()
+        await pilot.pause()
+
+        assert error.display is True, "the reason is hidden when there IS one"
+        assert "spending cap" in str(error.content)
