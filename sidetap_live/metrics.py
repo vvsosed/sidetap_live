@@ -46,6 +46,11 @@ class DirectionState:
     capture_dropped: int = 0
     dead_air: bool = False
     no_audio: bool = False
+    # Output audio delivered per second of wall clock, or None when there is
+    # no session to measure. The model's stream is continuous, so this sits
+    # near 1.0 when healthy; `starved` is it falling under STARVED_RATIO.
+    output_ratio: float | None = None
+    starved: bool = False
 
     session_state: SessionState = SessionState.SUSPENDED
     rotations: int = 0
@@ -127,6 +132,21 @@ class Metrics:
     def set_session_state(self, direction: Direction, state: SessionState) -> None:
         with self._lock:
             self._states[direction].session_state = state
+
+    def set_output_ratio(self, direction: Direction, ratio: float | None) -> None:
+        """How much output audio arrived per second of wall clock.
+
+        None while there is nothing to measure - no session, or one still
+        warming up - because a stale figure reads as a live one.
+        """
+        with self._lock:
+            self._states[direction].output_ratio = ratio
+
+    def set_starved(self, direction: Direction, value: bool) -> None:
+        """The model's continuous stream is arriving thin: a half-dead
+        session, distinct from a quiet one."""
+        with self._lock:
+            self._states[direction].starved = value
 
     def set_session_error(self, direction: Direction, text: str) -> None:
         """Why this direction's session will not stay up. "" once one does.

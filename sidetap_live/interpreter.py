@@ -32,8 +32,11 @@ from .types import (
     OVERLAP_MAX_S,
     REOPEN_BACKOFF_S,
     SESSION_PROBATION_S,
+    STARVED_RATIO,
+    STARVED_WINDOW_S,
     SUPPRESSED_SUSPEND_S,
     TARGET_RATE,
+    TTS_BYTES_PER_S,
     AudioChunk,
     AudioOut,
     Closed,
@@ -114,6 +117,11 @@ class DirectionInterpreter:
         # When the session on air opened, or None once it has outlived
         # SESSION_PROBATION_S. See _died_in_probation.
         self._opened_at: float | None = None
+        # Output delivery over the current window. Written by the receive
+        # thread under the lock, judged on the pump. See _check_output_rate.
+        self._output_bytes = 0
+        self._output_since: float | None = None
+        self._starved = False
         # Monotonic time of the last failed open, or None. Gates retries.
         self._open_failed_at: float | None = None
         self._open_failures = 0
@@ -275,6 +283,7 @@ class DirectionInterpreter:
             return
 
         self._note_session_proven()
+        self._check_output_rate()
         self._check_dead_air()
         self._send(chunk.pcm)
         if self._pending is not None:
@@ -351,6 +360,7 @@ class DirectionInterpreter:
         self._open_failed_at = None
         self._opened_at = self._clock.monotonic()
         self._wake_on_release = False
+        self._reset_output_rate()
         with self._lock:
             self._goaway_at = None
             self._dead = None
@@ -420,11 +430,67 @@ class DirectionInterpreter:
         self._reported_fatal = False
         self._metrics.set_session_error(self.direction, "")
 
+    def _reset_output_rate(self) -> None:
+        """No session, no measurement. Called wherever one starts or ends."""
+        with self._lock:
+            self._output_bytes = 0
+        self._output_since = None
+        self._starved = False
+        self._metrics.set_output_ratio(self.direction, None)
+        self._metrics.set_starved(self.direction, False)
+
+    def _check_output_rate(self) -> None:
+        """Is the model's continuous stream still arriving at realtime?
+
+        It emits padding whether or not it is translating, so a session
+        delivering a fraction of realtime is half-dead rather than quiet -
+        measured at 0.282x on 2026-10-13 against 0.909-1.001x on healthy
+        calls. Nothing else sees this: the direction stays RUNNING with
+        health OK until a Closed arrives, and _check_dead_air cannot fire
+        because the bursts that do arrive keep clearing _speech_at.
+
+        On the pump, not on arrival: a stream that stops dead delivers no
+        chunk to judge.
+        """
+        if self._in_probation():
+            # A fresh session emits nothing for ~3 s. Judging it would alarm
+            # on every open, rotation and wake.
+            return
+        now = self._clock.monotonic()
+        if self._output_since is None:
+            # Discard what arrived during probation along with opening the
+            # window, or the first verdict covers ~20 s of audio over a 10 s
+            # span and reads as 2.05x - measured on two of the four probes.
+            with self._lock:
+                self._output_bytes = 0
+            self._output_since = now
+            return
+        span = now - self._output_since
+        if span < STARVED_WINDOW_S:
+            return
+        with self._lock:
+            delivered, self._output_bytes = self._output_bytes, 0
+        self._output_since = now
+        ratio = delivered / TTS_BYTES_PER_S / span
+        self._metrics.set_output_ratio(self.direction, ratio)
+        starved = ratio < STARVED_RATIO
+        if starved and not self._starved:
+            log.warning(
+                "%s output arriving at %.2fx realtime; the model's stream is "
+                "continuous, so this session is probably half-dead rather "
+                "than quiet",
+                self.direction.value,
+                ratio,
+            )
+        self._starved = starved
+        self._metrics.set_starved(self.direction, starved)
+
     def _suspend(self) -> None:
         self._close("idle")
         self._set_state(SessionState.SUSPENDED)
 
     def _close(self, reason: str) -> None:
+        self._reset_output_rate()
         session = self._session
         self._session = None
         if session is not None:
@@ -514,6 +580,7 @@ class DirectionInterpreter:
         # outgoing session's: _switch bypasses _open, so without this a fresh
         # session would inherit "proven" and skip the pacing if it died.
         self._opened_at = self._pending_since
+        self._reset_output_rate()
         self._pending = None
         self._pending_warm = False
         with self._lock:
@@ -617,6 +684,8 @@ class DirectionInterpreter:
                     if self._last_target_text_at is not None:
                         since = self._clock.monotonic() - self._last_target_text_at
                     self._probe.note(self.direction, pcm, since_target_text=since)
+                with self._lock:
+                    self._output_bytes += len(pcm)
                 self._playout.submit(pcm)
                 self._metrics.set_backlog_s(self.direction, self._playout.backlog_s())
                 # submit() may have trimmed, so read the drop total back here

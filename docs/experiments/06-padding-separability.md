@@ -136,6 +136,48 @@ speaking, and it is the one to trust.
 figure, which is why a conservative threshold was the right choice while the
 level was uncertain.
 
+## Addendum, 2026-10-13: the continuous stream is not always continuous
+
+Four probes exist now. Reading them by **10-second window** rather than by
+whole-call average changes the picture, and found a failure mode nothing in
+the program could see.
+
+| session | length | overall | 10 s windows (min / median / max) | n |
+|---|---|---|---|---|
+| `20261012-143354` | 22.3 min | 1.001x | **0.97 / 1.00 / 1.05** | 133 |
+| `20261013-100456` | 29 s | 1.021x | 1.00 / 1.05 / 1.05 | 2 |
+| `20261013-100146` | 1.7 min | 0.909x | **0.20 / 1.00 / 2.08** | 10 |
+| `20261013-100937` | 33.7 s | 0.282x | **0.20 / 0.30 / 0.35** | 3 |
+
+**A healthy session is a rock.** 133 consecutive windows between 0.97x and
+1.05x. That is a far stronger statement than the 1.089x whole-call figure
+above, and it is what makes a threshold possible at all.
+
+**Two of the four were degraded, and the whole-call average hid one of them.**
+`100937` delivered 9.5 s of audio over 33.7 s with **0.4% exact digital
+silence**, where the healthy probes carry 11.9–31.3% — the keep-alive stream
+had stopped, so what arrived was pure speech with multi-second holes between
+bursts. Transcription text kept arriving for 33 s, so the socket was alive;
+the client's own keepalive declared it dead at ~44 s, and the user had quit
+at 43 s. `100146`, eight minutes earlier, looks healthy at 0.909x overall and
+is not: its windows swing 0.20x → 2.08x, which is the signature — stall, then
+catch up in a burst. **Averaging over a stall hides the stall.**
+
+Nothing in the program noticed either one. The direction stays `RUNNING` with
+health `OK` until a `Closed` arrives, and `DEAD_AIR_S` cannot fire because the
+bursts that do arrive keep clearing `_speech_at`.
+
+So delivery rate is now measured at runtime, not just in the probe:
+`STARVED_WINDOW_S = 10.0` and `STARVED_RATIO = 0.5`, reported and never acted
+on. Replayed against all four probes with their real arrival timings: the
+22-minute call produces 79 verdicts and never alarms, and both degraded
+sessions alarm at the first verdict — `100937` at t=20 s, 23 s before the user
+gave up on it.
+
+One measurement artefact found while validating it: audio delivered during the
+session's warm-up was counted in the first window, which read as 2.05x on two
+probes. The counter is cleared when the window opens.
+
 ## Still open
 
 **`SPEECH_PEAK` and the duck on OUT — weaker than first thought, not
@@ -150,7 +192,13 @@ a code-level reproduction to confirm. They are logged at INFO now.
 
 **The probe's `t` was output-audio time only.** It now records wall clock
 beside it, so a future file can show whether a burst arrives faster than
-realtime — the thing that actually makes queue depth grow.
+realtime — the thing that actually makes queue depth grow. The 2026-10-13
+addendum is what that pair bought.
+
+**Why the stream stalls is unknown.** Two sessions in one morning, on a
+connection that stayed alive enough to deliver text throughout. Whether it is
+the server, the edge or the network is not answerable from this side; the
+program now reports it rather than explaining it.
 
 ## Files
 

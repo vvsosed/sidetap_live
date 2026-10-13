@@ -80,6 +80,19 @@ FATAL_OPEN_FAILURES = 5
 # GoAway, so anything this short is pathological rather than a blip.
 SESSION_PROBATION_S = 10.0
 
+# Window over which output delivery is judged, and the fraction of realtime
+# below which it is reported. The model's output stream is CONTINUOUS - it
+# emits padding whether or not it is translating - so delivery sits near 1.0x
+# on a healthy session, and a thin stream means the session is half-dead
+# rather than quiet. Measured against the probe's own wall clock: 1.001x over
+# 22.3 min, plus 1.021x and 0.909x, against 0.282x on the degraded session of
+# 2026-10-13 - which also carried 0.4% exact digital silence where the three
+# healthy probes carried 11.9-31.3%, i.e. the keep-alive stream had stopped.
+# 0.5 is clear of both sides. The window tumbles rather than slides, so a
+# degradation surfaces within 2x it; that is cheap and this only reports.
+STARVED_WINDOW_S = 10.0
+STARVED_RATIO = 0.5
+
 # Silence after which a session is closed entirely. Reopening costs a cold
 # start, paid only after most of a minute of nothing.
 IDLE_SUSPEND_S = 45.0

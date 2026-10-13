@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **428 tests that run with no audio hardware, no network and no
+`tests/` holds **441 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -83,7 +83,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 428 tests, no audio/network/creds
+uv run pytest -q                                    # 441 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -223,7 +223,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 428 tests import the package with no
+  `activity.py`. This is what lets 441 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -292,9 +292,12 @@ preference and these are not.
   `DEAD_AIR_S` of speech with silence out and sound the earcon.
 - **The duck triggers on audio ENERGY, not byte presence.** The model emits a
   continuous 24 kHz stream whether or not it is translating — measured at
-  ~151 s of audio returned for 154 s of pure digital silence in. Keyed on bytes
-  arriving, the duck closes on the first chunk and **never reopens**, muting
-  the remote party for the entire call. Measured distributions: 0.04% of 20 ms
+  ~151 s of audio returned for 154 s of pure digital silence in, and at
+  0.97–1.05x realtime across 133 consecutive 10 s windows of a 22-minute
+  call. **"Continuous" is what a healthy session does, not a guarantee** —
+  see the starvation invariant below. Keyed on bytes arriving, the duck closes
+  on the first chunk and **never reopens**, muting the remote party for the
+  entire call. Measured distributions: 0.04% of 20 ms
   frames above threshold when idle, 75.5% when translating, hence
   `SPEECH_PEAK = 2000`. **Watch item, not a known bug:** that was measured on
   IN-like audio, and experiment 6 saw OUT's speech median at 591 on one call
@@ -359,11 +362,33 @@ preference and these are not.
   log this project has produced, so until this fix the backoff and the
   give-up latch were, in production, unreachable code: everything they were
   written for took the success path. So a death inside `SESSION_PROBATION_S`
-  of opening is counted
-  and paced like a failed open, and only a session that outlives that window
+  of opening is counted and paced like a failed open, and only a session that
+  outlives that window
   clears the accounting (`_note_session_proven`). A mid-call death is
   untouched: it still reconnects at once, on the last resumption handle,
   because a blip must cost one phrase and not two seconds.
+- **A session delivering a fraction of its output stream is half-dead, not
+  quiet — and only the delivery rate says so.** Because the stream is
+  continuous, a healthy session sits at 0.97–1.05x realtime over 10 s windows
+  (133 of them, one 22-minute call). On 2026-10-13 two sessions in one morning
+  did not: one delivered 9.5 s of audio over 33.7 s with **0.4% exact digital
+  silence** against the 11.9–31.3% the healthy probes carry — the keep-alive
+  stream had stopped and only speech arrived, in bursts with multi-second
+  holes. Transcription text kept arriving, so the socket was alive; the
+  client's keepalive declared it dead 20 s later, after the user had given up
+  and quit. **Nothing else can see this**: the direction stays `RUNNING` with
+  health `OK` until a `Closed` arrives, and `_check_dead_air` cannot fire
+  because the bursts that do arrive keep clearing `_speech_at`. So
+  `_check_output_rate` judges `STARVED_WINDOW_S` of wall clock against
+  `STARVED_RATIO` and publishes `output_ratio`/`starved`. Three things about
+  it are deliberate: it runs **on the pump**, because a stream that stops dead
+  delivers no chunk to judge; it is skipped during `_in_probation()`, because a
+  fresh session emits nothing for ~3 s and an alarm that fires on every open
+  is one the user learns to ignore; and it **only reports** — the threshold
+  comes from four probes, and this project's own history is three fixes that
+  passed every offline test and failed on a live call. **Never average over a
+  whole call**: `20261013-100146` reads 0.909x overall and swings 0.20x→2.08x
+  per window, because averaging over a stall hides the stall.
 - **A direction that cannot keep a session says why on screen, not only in the
   log.** Under the TUI logging goes to a file nobody is watching, so the
   server's own message — which names the cause and sometimes carries the URL
@@ -462,6 +487,15 @@ let either program's `doctor --repair` tear down the other's live duck.
   (`setup()`'s `lang_targets`). `_on_direction_fatal`'s hint had it the other
   way round, so a rejected `--my-lang` sent the user to inspect the flag that
   was fine.
+- **A 1011 we SENT is not a 1011 we received.** `sent 1011 (internal error)
+  keepalive ping timeout` is `websockets`' own doing: its ping got no pong, so
+  it closed the connection, and `TimeoutError: timed out while closing
+  connection` follows when the server never answers the close frame either.
+  That is a dead socket, not a server rejection — and it is the **only**
+  automatic detection of one, arriving up to `ping_interval + ping_timeout`
+  (20 + 20 s by default, unconfigured here) after the stream stops. On
+  2026-10-13 it landed after the user had already quit, which is why the
+  delivery-rate signal above exists.
 - **`1011` is not always an internal error.** The close frame carries the
   server's own text, and a Gemini **monthly spending cap** arrives as
   `1011 ... Your project has exceeded its monthly spending cap`, with a URL.

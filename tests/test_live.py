@@ -299,3 +299,170 @@ async def test_the_receive_loop_does_not_spin_when_the_stream_ends():
     session.close()
 
     assert entries < 1000, f"receive() was re-entered {entries:,} times in 1s"
+
+
+@pytest.mark.asyncio
+async def test_a_connection_death_fails_both_loops_at_once():
+    """A dying connection fails the sender AND the receiver together.
+
+    `asyncio.wait(FIRST_COMPLETED)` then puts both in `done`, and the
+    `for task in done` loop raised on the first - so the second task's
+    exception was never read, and asyncio logged "Task exception was never
+    retrieved" with its own traceback at GC. _main's docstring claims this
+    is handled; it only covers the task it CANCELS.
+
+    Measured on the 2026-10-13 call: a keepalive ping timeout broke both
+    loops and the log carried that asyncio ERROR stacked on top of the real
+    one, in the file that is this project's primary diagnostic.
+    """
+    import contextlib
+
+    from sidetap_live.live import GeminiLiveSession
+    from sidetap_live.types import BLOCK_BYTES
+
+    class _DyingSocket:
+        """Breaks both loops in the same event-loop pass, as a socket does."""
+
+        def __init__(self):
+            self._gate = None
+            self.inside = 0
+
+        async def _die(self):
+            if self._gate is None:
+                self._gate = asyncio.Event()
+            self.inside += 1
+            if self.inside >= 2:        # both loops are now in the socket
+                self._gate.set()
+            await self._gate.wait()
+            raise ConnectionError("sent 1011 (internal error) keepalive ping timeout")
+
+        async def send_realtime_input(self, **_):
+            await self._die()
+
+        async def receive(self):
+            await self._die()
+            yield  # pragma: no cover - makes this an async generator
+
+    socket = _DyingSocket()
+
+    @contextlib.asynccontextmanager
+    async def connect(**_):
+        yield socket
+
+    loop = asyncio.get_running_loop()
+    session = GeminiLiveSession(connect=connect, config=None, model="m")
+    session.send(b"\x00" * BLOCK_BYTES)          # so the sender reaches the socket
+    events = await loop.run_in_executor(None, lambda: list(session.events()))
+
+    assert events and "keepalive" in events[-1].reason, (
+        f"the reason never reached the application: {events}"
+    )
+    assert socket.inside == 2, (
+        "precondition: this scenario must fail BOTH loops, which is what puts "
+        f"both of them in asyncio.wait's done set (got {socket.inside})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_every_failed_task_is_read_not_just_the_one_that_is_raised():
+    """asyncio.wait does not read exceptions; whoever gets `done` must.
+
+    `_log_traceback` is asyncio's own "nobody has read this" flag - it is
+    what makes Task.__del__ log "Task exception was never retrieved" with a
+    traceback. Asserting on it is deterministic, where provoking the GC
+    report is not.
+    """
+    from sidetap_live.live import first_failure
+
+    async def boom(message):
+        raise ConnectionError(message)
+
+    tasks = {asyncio.create_task(boom("one")), asyncio.create_task(boom("two"))}
+    done, _ = await asyncio.wait(tasks)
+    assert all(t._log_traceback for t in done), "precondition: both are unread"
+
+    failure = first_failure(done)
+
+    assert isinstance(failure, ConnectionError)
+    assert not any(t._log_traceback for t in done), (
+        "a failure was left unread, so asyncio will log it at GC"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_task_is_not_mistaken_for_a_failure():
+    """task.exception() RAISES CancelledError for a cancelled task.
+
+    _main cancels the loop that did not finish, so reading `done`
+    indiscriminately would turn an ordinary rotation into an error.
+    """
+    from sidetap_live.live import first_failure
+
+    async def forever():
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(forever())
+    await asyncio.sleep(0)
+    task.cancel()
+    done, _ = await asyncio.wait({task})
+
+    assert first_failure(done) is None
+
+
+@pytest.mark.asyncio
+async def test_closing_a_session_on_purpose_is_not_logged_as_a_failure(caplog):
+    """A deliberate close is not a crash.
+
+    close() breaks whatever the loops were awaiting, so _thread_main logged
+    `live session ended abnormally` with a 40-line traceback for a session
+    we retired ourselves. On the 2026-10-13 call that followed
+    `in session closed (shutdown)` by 1.8 s and made a clean quit read as a
+    failure. This package already holds the same rule for the event path:
+    one we retired on purpose must not read as the live one dying.
+    """
+    import contextlib
+    import logging
+    import threading
+
+    from sidetap_live.live import GeminiLiveSession
+
+    holder = {}
+    parked = threading.Event()
+
+    class _SocketThatBreaksWhenToldToStop:
+        async def receive(self):
+            # Parked INSIDE receive(), which is the state close() finds it in
+            # on a real call: _recv_loop's own `while not _closing` check has
+            # already passed, so it cannot simply return.
+            parked.set()
+            while not holder["session"]._closing.is_set():
+                await asyncio.sleep(0.01)
+            raise ConnectionError("sent 1011 (internal error) keepalive ping timeout")
+            yield  # pragma: no cover - makes this an async generator
+
+        async def send_realtime_input(self, **_):
+            await asyncio.Event().wait()
+
+    @contextlib.asynccontextmanager
+    async def connect(**_):
+        yield _SocketThatBreaksWhenToldToStop()
+
+    loop = asyncio.get_running_loop()
+    with caplog.at_level(logging.DEBUG, logger="sidetap_live.live"):
+        session = GeminiLiveSession(connect=connect, config=None, model="m")
+        holder["session"] = session
+        assert await loop.run_in_executor(None, parked.wait, 5.0), (
+            "the receive loop never reached the socket"
+        )
+        await loop.run_in_executor(None, session.close)
+        await loop.run_in_executor(None, lambda: list(session.events()))
+
+    said = [(r.levelname, r.name, r.getMessage()[:60]) for r in caplog.records]
+    assert any("closed" in m or "abnormally" in m for _, _, m in said), (
+        f"the teardown produced no record at all, so this proves nothing: {said}"
+    )
+    shouted = [
+        r for r in caplog.records
+        if r.levelno >= logging.ERROR and "abnormally" in r.getMessage()
+    ]
+    assert not shouted, f"a close we asked for was logged as a failure: {said}"
