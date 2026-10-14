@@ -277,6 +277,13 @@ Three limits, all measured, none of them the bug above:
   Experiment 2 found the model's idle stretches to be long runs of digital
   silence, which the drain does resolve, but nothing measures how finely it
   interleaves padding *with* speech.
+  **Answered by experiment 6 on the threshold, not on the interleaving.** The
+  drain no longer uses the `SPEECH_PEAK` test named here: it keys on
+  `DRAIN_PEAK = 64`, with `MIN_DRAIN_RUN_MS = 200` unchanged, because a drain
+  at 2000 cut most genuine OUT speech on a real call. The long runs this bullet
+  credits to experiment 2 were measured there — 20.1% of IN and 47.9% of OUT
+  sitting in runs of at least 200 ms. How finely padding interleaves with
+  speech is still unmeasured. See `06-padding-separability.md`.
 
 ### What this changes
 

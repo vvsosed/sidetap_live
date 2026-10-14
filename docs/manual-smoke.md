@@ -1,6 +1,6 @@
 # Manual smoke checklist
 
-The automated suite is 359 tests that run with no audio hardware, no network
+The automated suite is 441 tests that run with no audio hardware, no network
 and no credentials. That property is why it is worth having — and it is also
 exactly why it cannot answer anything below.
 
@@ -21,17 +21,25 @@ against, and a vague note is how a regression survives.
 **0. `doctor` passes.**
 
 ```bash
-uv run sidetap-live doctor
+uv run sidetap-live doctor --their-lang ru-RU --my-lang en-US
 ```
+
+Name both languages. Without them the live-session probe opens `en` only,
+which proves the key and not the codes you are about to call with.
 
 Every check `OK`, or at worst `WARN` on `speech activity`. A `WARN` there means
 `webrtcvad` is missing: session rotation can no longer wait for a gap in the
 output and idle-suspend never fires. The program still works; it costs more and
 rotates worse.
 
-**`FAIL live session` is the one that matters most** — it means the key, the
-model or the network is wrong, and it fails here in a second rather than two
-minutes into a conversation with the PipeWire graph already rewired.
+**`live session` is the weakest check here, not the strongest** — do not read
+an `OK` as "the key works". It opens a session per language and closes it, but
+`sessions.open()` returns before the socket has connected, so a server-side
+refusal — revoked key, exhausted spending cap, a language the model will not
+take — arrives afterwards as a `Closed` that nothing in `doctor` reads, and
+the check still passes. A `FAIL` here is a local error: no SDK, or a client
+that would not construct. The refusal shows up in the call instead, which is
+what check 12 stages deliberately.
 
 ---
 
@@ -80,11 +88,12 @@ session.
 You should be able to hear them again — breathing, room tone, a cough.
 
 *Why this is not obvious:* the model emits a **continuous** 24 kHz output
-stream whether or not it is translating — measured at ~151 s of audio returned
-for 154 s of pure silence in. The duck is keyed on audio *energy*, not on bytes
-arriving, precisely so this works. If the duck stays shut here, the energy
-threshold (`SPEECH_PEAK = 2000`) is wrong and you are inaudible to nobody's
-knowledge but your own.
+stream whether or not it is translating — a session fed nothing but digital
+silence returned ~587 s of audio over 591 s, 99.36% of its lifetime
+(experiment 3). The duck is keyed on audio *energy*, not on bytes arriving,
+precisely so this works. If the duck stays shut here, the energy threshold
+(`SPEECH_PEAK = 2000`) is wrong and you are inaudible to nobody's knowledge
+but your own.
 
 ### 5. A rotation is inaudible
 
@@ -126,25 +135,42 @@ what they just said.
 *Why it should work with no code doing anything:* IN is configured
 `echo_target_language=False`, so input already in the target language produces
 no output; no audio flows; the duck opens; you hear them raw. Measured
-directly — 96 s of same-language input produced 99.6% digital silence. If you
-hear silence instead of their voice, the duck is not reopening.
+directly — a same-language run went over 99.5% digital silence by 20 ms frame
+(experiment 2). If you hear silence instead of their voice, the duck is not
+reopening.
 
 ### 8. Dead air on OUT is noticed
 
 While you are speaking, kill the network (unplug, or disable WiFi).
 
-Within about six seconds (`DEAD_AIR_S`) the OUT pane should show **DEAD AIR**
-and an earcon should sound.
+Within about six seconds (`DEAD_AIR_S`) the OUT pane should show **DEAD AIR**.
+
+**Under the TUI that is all it does — the earcon is on the `--no-tui` path
+only.** `Session.alarm_dead_air()` is called from `_run_headless` and nowhere
+else, so on the dashboard this alarm is silent and you only get it if you are
+looking. Worth staging once with `--no-tui` as well, where the beep plays into
+your headphones and `DEAD AIR`, the session's own reason, `OUTPUT STALLING`
+and `NO AUDIO` all reach the log instead of a pane.
 
 *Why OUT specifically:* IN degrades gracefully now — no audio out means the
 duck opens and you hear the unmediated call. OUT has no such fallback. Your
 real microphone is never linked to the messenger, so a dead OUT direction means
 the remote party hears **nothing at all**, and has no way to know. The earcon
-exists because during a call you are looking at a person, not a dashboard.
+exists because during a call you are looking at a person, not a dashboard —
+which is the argument for its reaching the TUI too, and it does not yet.
 
-Then restore the network. The direction should recover on its own within a few
-seconds — `REOPEN_BACKOFF_S` is 2.0, so it retries at a paced interval rather
-than hammering the API.
+Then restore the network, and do it promptly. A short outage recovers on its
+own — `REOPEN_BACKOFF_S` is 2.0, so it retries at a paced interval rather than
+hammering the API — but five consecutive failed opens is `FATAL_OPEN_FAILURES`,
+about ten seconds of them at that spacing, and then the direction declares
+itself dead, **stops its own pump, and stays down until you restart the run.**
+Nothing restores it when the network comes back. That is check 12's path,
+reached from here by waiting too long.
+
+Note also what the client is doing while you wait: `websockets` is on its
+default 20 s ping interval and 20 s timeout, unconfigured here, so it can take
+up to 40 s to notice a dead socket at all. `DEAD AIR` is what you see in the
+meantime, and the `rate` figure in check 11 exists because of that gap.
 
 ### 9. The remote party hears something intelligible
 
@@ -172,7 +198,10 @@ forbids interruption has dictated the cadence, whether or not anyone noticed.
 
 Expectation from the lab: `backlog` near zero, `offset` near 0.25 s, both flat
 rather than climbing — experiment 4 measured lag holding at 0.24 s → 0.25 s
-across 96 s of dense speech, with output running 0.894x input.
+across 96 s of dense speech, with *speech-bearing* output running 0.894x
+input. That last figure says the translation is not verbose; it is not the one
+`backlog` responds to. The queue is fed raw bytes, and that ratio was 1.012 on
+the same clip and 1.089x (IN) / 1.123x (OUT) on a real call.
 
 **If `backlog` climbs while you overlap, that is the headline finding**, and it
 is not a display bug. It means the single-box approach inherits the problem
@@ -200,12 +229,17 @@ compare the panes against what you noted at the five-minute mark:
 - `backlog` should be **the same as it was**, oscillating around 1–3 s, not
   higher. A figure that is larger than it was ten minutes ago is a ratchet, and
   a ratchet is the bug.
-- `dropped` should still read `0.0s`. Non-zero means the lag cap is cutting
+- `dropped` should still read `0.0s/0`. The seconds are the lag cap cutting
   translated speech — sentences the other party will never hear, with nothing
-  on screen to say which.
-- `pad` should be in the hundreds of seconds and climbing. That is the drain
-  disposing of the model's keep-alive stream, and it is healthy; it reached
-  ~1,690 s over a 31.7 min call.
+  on screen to say which — and the count after the slash is capture blocks
+  lost on the way in. Both belong at zero.
+- `pad` should be climbing steadily, into the tens or hundreds of seconds by
+  this point. That is the drain disposing of the model's keep-alive stream,
+  and it is healthy. Do not hold it against a figure, though: the ~1,690 s
+  once quoted here came from an offline replay driven at 1.89x inflow, which
+  experiment 6 then corrected to 1.089x on IN and 1.123x on OUT — so a real
+  call has roughly a tenth of its session length to shed, not twice it. The
+  direction of travel is the signal; the size is uncalibrated.
 - `rate` should read **1.00x**, and stay there. It is output audio per second
   of wall clock, and a healthy session is remarkably steady — 0.97–1.05x
   across 133 consecutive windows of a 22-minute call. Anything under 0.5x
@@ -214,7 +248,9 @@ compare the panes against what you noted at the five-minute mark:
   2026-10-13 did that; both looked healthy on every other indicator, and one
   of them read 0.909x on the whole-call average that hid it. If you see it,
   quit and start again — nothing recovers from it automatically yet, by
-  choice, because the threshold has only four calls behind it.
+  choice, because the threshold has only four probes behind it. An em dash
+  rather than a figure is not the alarm: it means there is nothing to measure
+  yet, a suspended session or one still inside its first window.
 
 Then the part only you can judge: **does the translation still sound
 continuous?** The drain removes non-speech from the head of the queue, so the
@@ -317,7 +353,7 @@ project has ever produced.
 
 ## After the call
 
-**12. The transcript is readable and complete.**
+**13. The transcript is readable and complete.**
 
 `Ctrl-C`, then open `transcripts/<session>.md`. Both directions, chronological,
 fragments joined into paragraphs. Check the tail is there: the `.jsonl` is
@@ -331,7 +367,7 @@ and missing from the other, or shifted against it, is a real finding. Read the
 original against your memory of the call: that is the only check that says
 whether the transcription itself was right, separately from the translation.
 
-**13. The graph is restored.**
+**14. The graph is restored.**
 
 ```bash
 wpctl status

@@ -156,6 +156,18 @@ Yes, clearly, on both signals:
   `docs/experiments/audio/exp05_output_ru.raw` (gitignored, not committed)
   for anyone who wants to listen.
 
+  **Answered by experiment 6**, on both figures borrowed from experiment 2
+  here. The peak>1000 speech test and the ~0.0–0.5% "nothing to say" baseline
+  came from a session fed audio already in the target language, and did not
+  transfer to a live call: there the inter-utterance output is *exact digital
+  silence*, and OUT's speech level moved between calls (median peak 591 on one,
+  3475 on the next). "Near-continuous" is likewise what a *healthy* session
+  does, not a guarantee — see experiment 6's 2026-10-13 addendum. Neither
+  changes what this experiment measured: output speech ran for the full clip on
+  the energy test and on the model's own `output_transcription` alike, and a
+  73.9% speech share is far above anything the idle condition produced on any
+  calibration. See `06-padding-separability.md`.
+
 No silent stretch, no dropout to zero output, no sign the model ever judged
 the input already-in-target and suppressed output.
 
