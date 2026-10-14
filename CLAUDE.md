@@ -172,6 +172,7 @@ code path.
 | `interpreter.py` | `DirectionInterpreter` — lifecycle, rotation, send/receive | new |
 | `preroll.py` | `PreRoll` — bounded ring of recent capture | new |
 | `cost.py` | audio-token rates as configuration | new |
+| `probe.py` | `AudioProbe` — per-frame output energy to `.audio-probe.jsonl`, behind `--probe-audio`; diagnostic only | new |
 | `playout.py` | chunk queue, `DuckControl`, `has_speech` | rewritten |
 | `metrics.py` | backlog, offset, overlap, rotations, cost | ported, reshaped |
 | `transcript.py` | event-stream `.jsonl` + three `.md` renderings (interleaved, original, translated) | rewritten |
@@ -292,15 +293,18 @@ preference and these are not.
   `DEAD_AIR_S` of speech with silence out and sound the earcon.
 - **The duck triggers on audio ENERGY, not byte presence.** The model emits a
   continuous 24 kHz stream whether or not it is translating — measured at
-  ~151 s of audio returned for 154 s of pure digital silence in, and at
+  ~587 s of audio returned for 591 s of pure digital silence in (99.36% of
+  the connection's lifetime, `docs/experiments/03-session-limits.md`), and at
   0.97–1.05x realtime across 133 consecutive 10 s windows of a 22-minute
   call. **"Continuous" is what a healthy session does, not a guarantee** —
   see the starvation invariant below. Keyed on bytes arriving, the duck closes
   on the first chunk and **never reopens**, muting the remote party for the
-  entire call. Measured distributions: 0.04% of 20 ms
-  frames above threshold when idle, 75.5% when translating, hence
-  `SPEECH_PEAK = 2000`. **Watch item, not a known bug:** that was measured on
-  IN-like audio, and experiment 6 saw OUT's speech median at 591 on one call
+  entire call. Measured distributions, at a peak threshold of 1000: 0.04% of
+  20 ms frames above it when idle, 75.5% when translating, two-plus orders of
+  magnitude apart. `SPEECH_PEAK = 2000` then sits above the worst idle peak
+  experiment 2 ever saw, 1078. **Watch item, not a known bug:** that was
+  measured on IN-like audio, and experiment 6 saw OUT's speech median at 591
+  on one call
   (below this threshold, which would barely close the duck) and 3475 on the
   next. The first was a small-sample artefact of its labelling window. What is
   genuinely unknown is whether OUT's level is stable across calls — see
@@ -478,10 +482,11 @@ let either program's `doctor --repair` tear down the other's live duck.
   would make `"could not open a session"` mean something — but
   `_open_pending` runs on the **receive thread** during a rotation, so
   blocking there stalls dispatch of the outgoing session's audio for the
-  connect duration (~200-650 ms measured on a working network, unbounded on
-  a bad one) in the one code path make-before-break exists to protect. Not
-  done, deliberately; the probation window covers both channels and this
-  would still need it for a refusal that lands after the handshake.
+  connect duration (477-549 ms over ten cold starts on a working network,
+  median 500; unbounded on a bad one) in the one code path make-before-break
+  exists to protect. Not done, deliberately; the probation window covers both
+  channels and this would still need it for a refusal that lands after the
+  handshake.
 - **The languages are crossed, and error messages keep getting it wrong.**
   IN translates INTO `--my-lang` and OUT into `--their-lang`
   (`setup()`'s `lang_targets`). `_on_direction_fatal`'s hint had it the other

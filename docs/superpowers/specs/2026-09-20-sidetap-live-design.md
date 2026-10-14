@@ -254,7 +254,7 @@ differ in source node, destination sink, target language and echo policy.
       |                                                |
       |                                          24k s16 chunks
       v                                                v
- sidetap_duck  <--[closed while audio flows]--  playout --> headphones
+ sidetap_live_duck  <--[closed while audio flows]--    playout --> headphones
 
 === DIRECTION "out" (you -> them) ==============================================
 
@@ -723,3 +723,55 @@ These figures are a spend estimate to catch a runaway session, not an invoice.
 - `docs/experiments/` holds the six measurements above, and any design decision
   they contradicted has been revisited in this document rather than silently
   left standing.
+
+---
+
+## Addendum, 2026-10-14: what this document no longer describes
+
+The design shipped and the program has moved on through many pull requests.
+Everything above stays as written — the decisions, and the measurements that
+reversed some of them, are the record. This is only the list of places where a
+sentence in the present tense no longer describes the running program, so a
+reader does not have to check the source to find out. `CLAUDE.md` is the
+current description.
+
+- **The asyncio island is in `live.py`, not in `interpreter.py`.**
+  *Concurrency* says each `DirectionInterpreter` owns a thread running its own
+  event loop and the Live session. It does not: each `GeminiLiveSession` owns
+  that thread and loop and presents the synchronous `InterpreterSession`
+  Protocol outward. Per direction there is a capture thread, an interpreter
+  *pump* thread, a *receive* thread per live session, and a playout thread.
+- **There is no `DeadAirWatch`.** *Failure handling* names it. The alarm is
+  `DirectionInterpreter`'s own `_speech_at` and `_check_dead_air`, with no
+  separate watcher class; the behaviour is as described.
+- **The module table omits `preroll.py`** (`PreRoll`, the bounded ring that
+  the rest of the document relies on) and predates `probe.py`.
+- **A missing detector does not mean timer-based rotation.** *No gate on the
+  audio stream* and *Interface* both say so, and `ROTATE_PAUSE_S` with it.
+  Timer-based rotation was never built: the make-before-break reversal left
+  rotation driven by `GoAway` and by energy in the *output*, which needs no
+  detector at all. Without one, sessions open on the first block and never
+  idle-suspend, which is what `doctor` warns about.
+- **`f` drops the whole pending queue.** *TUI* says it drops at the nearest
+  output silence boundary; `Playout.flush()` clears everything not yet handed
+  to `pw-cat`. Dropping at a boundary is the lag cap's behaviour, not the
+  hotkey's.
+- **The cost table was never restated**, though the *AMENDED* block says it
+  would be once the duty cycle was measured. A session open through ordinary
+  conversation bills about **$2.21 an hour per direction**.
+- **The pacing conclusion did not survive a real call.** Experiment 4's 0.894
+  speech-time ratio was taken over 96 s with little to translate;
+  `docs/experiments/06-padding-separability.md` measures 1.089x on IN and
+  1.123x on OUT on a real call. The lag cap is not a valve that never fires,
+  and playout now drains the model's near-silent keep-alive padding against a
+  `--target-latency` of its own, with `DRAIN_PEAK` deliberately far below
+  `SPEECH_PEAK`.
+- **Two *Done looks like* items contradict *Non-goals*.** "recorded ... under
+  each system" and "written by both systems in the same schema" are
+  head-to-head requirements, and the comparison was dropped 2026-09-23.
+- **The experiment numbers here are this document's own list, not the
+  filenames in `docs/experiments/`,** and the two disagree. *Failure
+  handling*'s "measured by experiment 3" is `02-voice-stability.md`, and
+  experiment 6 (cold start) is recorded in `01-connect.md`. Nothing here
+  refers to `06-padding-separability.md`, which came later and corrects
+  experiments 2 and 4.

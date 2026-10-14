@@ -60,6 +60,14 @@ real implementation must.
    rotation for a relentless speaker, and considerably better odds in real
    two-way conversation where turn-taking gaps are far longer. Forced rotations
    are therefore a real minority case: worth building well, not the norm.
+
+   **Note, 2026-09-20: `DRAINING` and `ROTATE_PAUSE_S` no longer exist.** The
+   make-before-break reversal — see `02-voice-stability.md`'s addendum —
+   removed both: rotation never waits for a pause in the *input*, so there is
+   no clean/forced distinction of the kind this item reasons about and nothing
+   to count separately. The state machine is SUSPENDED / OPENING / RUNNING /
+   OVERLAPPING. What the 50 s window bounds is OVERLAPPING rather than
+   `DRAINING`; the window itself, and item 3 below, are unaffected.
 3. **Closing is mandatory, not optional.** `DRAINING` must terminate in a
    close. A state machine that simply opened a replacement and let the old
    connection lapse would take a 1008 on the old socket every single rotation.
@@ -73,9 +81,19 @@ The receiver logged `unexpected_data_count=2350, unexpected_data_bytes=28200000`
 over Phase 1 — **28.2 MB of 24 kHz audio returned in response to 591 s of pure
 digital silence.** That is ~587 s of audio for ~591 s of silence: the model
 emits a continuous output stream whether or not it has anything to translate.
+(Qualified by experiment 6's 2026-10-13 addendum: continuous is what a
+*healthy* session does, not a guarantee.)
 
 Experiment 2 quantified the content: when idle, 0.04% of 20 ms frames exceed a
 peak of 1000, against 75.5% when actively translating.
+
+**Answered by experiment 6**, which measured a live call: that content figure
+came from a session fed prerecorded audio already in the target language, and
+the level did not transfer. On a real call the inter-utterance output is *exact
+digital silence*, which is why the drain keys on `DRAIN_PEAK = 64` rather than
+on experiment 2's idle floor. The finding recorded here — that output arrives
+whether or not there is anything to translate — is unaffected. See
+`06-padding-separability.md`.
 
 This is recorded here because it was found first here, but its consequence
 belongs to the playout design and is written up in `02-voice-stability.md` and

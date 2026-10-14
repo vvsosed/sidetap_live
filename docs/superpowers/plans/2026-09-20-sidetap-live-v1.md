@@ -2,6 +2,21 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status note, 2026-10-14.** This plan is finished — see *Execution status*
+> below — and its step checkboxes were never ticked as it ran, so an unticked
+> box here is not outstanding work. Do not execute it. Read it as the record of
+> how the program was built and of what the experiments overturned on the way;
+> the code each task prescribes is what was written then, not what is in the
+> tree now. `CLAUDE.md` is the current description. Three things below read as
+> current and are not. The **Goal** frames the project as a comparison against
+> sidetap: that was dropped on 2026-09-23, along with Task 29, so nothing in
+> this repository writes to or reads from sidetap (see the spec's *Non-goals*).
+> The **Architecture** says sessions rotate "at conversational pauses":
+> experiment 2 reversed that to make-before-break, as Task 20 records. And
+> checkpoint answer **4** — that backlog does not grow and `LAG_CAP_S` is a
+> valve that never fires — did not survive a real call; see
+> `docs/experiments/06-padding-separability.md`.
+
 **Goal:** Build a single-box speech-to-speech interpreter on `gemini-3.5-live-translate-preview`, reusing sidetap's PipeWire layer, so the two systems can be compared on whether turn-free translation dissolves the half-duplex cadence.
 
 **Architecture:** One WebSocket session per direction. Capture (ported from sidetap, unchanged) streams 16 kHz s16 mono at 100 ms into a Live session; 24 kHz s16 mono comes back and goes straight to `pw-cat`. A per-direction state machine handles session rotation at conversational pauses, idle suspension, and the ~10-minute connection cap. The duck is driven by output flow, not input.
