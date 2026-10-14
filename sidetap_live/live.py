@@ -156,6 +156,23 @@ def build_config(*, target_lang: str, echo: bool, handle: str | None):
     )
 
 
+def first_failure(tasks) -> BaseException | None:
+    """Read EVERY task's exception, and return the first real one.
+
+    Reading them all is the point. `asyncio.wait` returns completed tasks
+    rather than raising, and a dying connection fails the sender and the
+    receiver in the SAME pass, so both land in its `done` set. Returning on
+    the first left the other unread, and asyncio logged "Task exception was
+    never retrieved" with its own traceback when the task was collected - on
+    top of the real error, in the log this project diagnoses from.
+
+    A cancelled task is skipped rather than read: `.exception()` re-raises
+    CancelledError, and _main cancels the loop that did not finish.
+    """
+    failures = [task.exception() for task in tasks if not task.cancelled()]
+    return next((exc for exc in failures if exc is not None), None)
+
+
 class GeminiLiveSession:
     """Real InterpreterSession. Owns one thread running one event loop."""
 
@@ -171,6 +188,9 @@ class GeminiLiveSession:
         self._outbound: queue.Queue = queue.Queue(maxsize=OUTBOUND_BLOCKS)
         self._inbound: queue.Queue = queue.Queue()
         self._closing = threading.Event()
+        # Set only by close(). _closing is not a substitute: _main sets that
+        # itself when a loop ends for a real reason.
+        self._retired = threading.Event()
         self._thread = threading.Thread(
             target=self._thread_main, daemon=True, name="live-session"
         )
@@ -197,6 +217,7 @@ class GeminiLiveSession:
         Setting _closing is enough, since the send loop polls it. A put on
         the bounded outbound queue could block forever on a wedged socket.
         """
+        self._retired.set()
         self._closing.set()
         self._thread.join(timeout=CLOSE_TIMEOUT_S)
 
@@ -204,7 +225,15 @@ class GeminiLiveSession:
         try:
             asyncio.run(self._main())
         except Exception as exc:
-            log.exception("live session ended abnormally")
+            if self._retired.is_set():
+                # We asked for this. Breaking whatever the loops were
+                # awaiting IS how close() works, so reporting it as a failure
+                # made every clean quit read as a crash in the log - and this
+                # package already holds the same rule for the event path: one
+                # we retired on purpose must not read as the live one dying.
+                log.info("live session closed (%s)", exc)
+            else:
+                log.exception("live session ended abnormally")
             self._inbound.put(Closed(reason=str(exc)))
         else:
             self._inbound.put(Closed(reason="ended"))
@@ -218,7 +247,9 @@ class GeminiLiveSession:
         The finished task's exception is re-raised: `asyncio.wait` returns
         it rather than raising, and an unread API rejection (a 1007, a
         revoked key) would otherwise be reported as a normal close. The
-        cancelled task is gathered so its exception is retrieved too.
+        cancelled task is gathered so its exception is retrieved too, and
+        `first_failure` reads every task that finished rather than stopping
+        at the one it raises.
         """
         async with self._connect(model=self._model, config=self._config) as session:
             sender = asyncio.create_task(self._send_loop(session))
@@ -239,9 +270,9 @@ class GeminiLiveSession:
                 )
             except TimeoutError:
                 log.warning("live session loops did not stop within %ss", CLOSE_TIMEOUT_S)
-            for task in done:
-                if task.exception() is not None:
-                    raise task.exception()
+            failure = first_failure(done)
+            if failure is not None:
+                raise failure
 
     def _next_block(self) -> bytes | None:
         """One block, or None if the queue stayed empty for QUEUE_POLL_S."""

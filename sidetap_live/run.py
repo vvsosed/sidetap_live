@@ -615,6 +615,7 @@ def _run_headless(session: Session) -> None:
     # than twice a second for the rest of the call.
     deaf: dict[Direction, bool] = {d: False for d in Direction}
     refused: dict[Direction, bool] = {d: False for d in Direction}
+    thin: dict[Direction, bool] = {d: False for d in Direction}
     while not session.stop.is_set():
         session.stop.wait(0.5)
         snapshot = session.metrics.snapshot()
@@ -638,6 +639,20 @@ def _run_headless(session: Session) -> None:
                     state.session_error,
                 )
             refused[direction] = bool(state.session_error)
+
+        # The headless counterpart of the TUI's OUTPUT STALLING. The one
+        # condition with no other symptom: the session is up, health is OK,
+        # and a fraction of a continuous stream is arriving.
+        for direction, state in snapshot.directions.items():
+            if state.starved and not thin[direction]:
+                log.error(
+                    "the %s direction's output is arriving at %.2fx realtime; "
+                    "the model's stream is continuous, so that session is "
+                    "probably half-dead rather than quiet",
+                    direction.value,
+                    state.output_ratio or 0.0,
+                )
+            thin[direction] = state.starved
 
         # The headless counterpart of the TUI's NO AUDIO ARRIVING.
         for direction, state in snapshot.directions.items():

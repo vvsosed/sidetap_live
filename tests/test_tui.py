@@ -425,3 +425,29 @@ async def test_the_error_line_costs_no_height_while_everything_is_healthy():
 
         assert error.display is True, "the reason is hidden when there IS one"
         assert "spending cap" in str(error.content)
+
+
+@pytest.mark.asyncio
+async def test_a_starved_output_stream_is_named_in_the_pane():
+    """NO AUDIO, DEAD AIR and this need different fixes, so each is named.
+
+    This one means the session is up and delivering a fraction of the
+    model's continuous stream - measured at 0.282x on 2026-10-13 - which is
+    neither "nothing is arriving" nor "speech in, nothing out". The ratio is
+    shown beside it because the number is the diagnosis.
+    """
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    metrics.set_output_ratio(Direction.IN, 0.282)
+    metrics.set_starved(Direction.IN, True)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        line = str(app.query_one("#stats-in", Static).content)
+
+        assert "0.28x" in line, f"the measured ratio is not shown: {line}"
+        assert "STALLING" in line, f"nothing names the condition: {line}"
+        assert app.query_one("#pane-in").has_class("alarm")
+        # The healthy direction stays quiet, and shows no ratio it never had.
+        assert "STALLING" not in str(app.query_one("#stats-out", Static).content)

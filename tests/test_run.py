@@ -774,3 +774,20 @@ def test_bypass_tells_both_interpreters_that_nobody_is_listening(
         assert all(session.interpreters[d]._unwanted_since is None for d in Direction)
     finally:
         session.shutdown()
+
+
+def test_headless_reports_a_starved_output_stream(caplog):
+    """--no-tui has no pane, and this is the condition that has no other
+    symptom: the session is up, health is OK, and a third of the stream is
+    arriving. Reported at error level like the other two alarms."""
+    from sidetap_live.run import _run_headless
+
+    session = _StubHeadlessSession()
+    session.metrics.set_output_ratio(Direction.IN, 0.282)
+    session.metrics.set_starved(Direction.IN, True)
+
+    with caplog.at_level(logging.ERROR, logger="sidetap_live.run"):
+        _run_headless(session)
+
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "0.28" in said, f"the ratio never reached the log: {said!r}"

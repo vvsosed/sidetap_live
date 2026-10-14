@@ -1264,3 +1264,159 @@ def test_a_release_that_lands_on_a_refusal_still_owes_the_wake():
     assert interpreter.state is SessionState.RUNNING, (
         "the release was forgotten, so the user waits until they speak"
     )
+
+
+# ---------- a session delivering a fraction of its output stream ----------
+#
+# The 2026-10-13 call. The model's output stream is CONTINUOUS - it emits
+# padding whether or not it is translating - so delivery sits near 1.0x
+# realtime on a healthy session. That one delivered 9.5 s of audio over 33.7 s
+# (0.282x) with 0.4% exact digital silence where three healthy probes carried
+# 11.9-31.3%: the keep-alive stream had stopped. Text kept arriving for 33 s,
+# then the client's own keepalive declared the socket dead. Nothing in the app
+# noticed: the direction stayed RUNNING with health OK, and DEAD_AIR could not
+# fire because the bursts that did arrive kept clearing _speech_at.
+
+
+def deliver(interpreter, clock, *, audio_s, wall_s, steps=10):
+    """Hand the interpreter `audio_s` of output across `wall_s` of wall clock."""
+    from sidetap_live.types import TTS_BYTES_PER_S
+
+    per_step = int(audio_s * TTS_BYTES_PER_S / steps) // 2 * 2
+    for _ in range(steps):
+        clock.advance(wall_s / steps)
+        if per_step:
+            interpreter.note_event(AudioOut(pcm=b"\x00\x40" * (per_step // 2)))
+        interpreter.feed(block(SPEECH))
+
+
+def run_past_probation(interpreter, clock):
+    from sidetap_live.types import SESSION_PROBATION_S
+
+    interpreter.feed(block(SPEECH))
+    clock.advance(SESSION_PROBATION_S + 0.1)
+    interpreter.feed(block(SPEECH))
+
+
+def test_an_output_stream_arriving_far_under_realtime_is_reported():
+    from sidetap_live.types import STARVED_WINDOW_S
+
+    interpreter, _, metrics, clock, _ = build_watched()
+    run_past_probation(interpreter, clock)
+
+    deliver(interpreter, clock, audio_s=0.282 * STARVED_WINDOW_S,
+            wall_s=STARVED_WINDOW_S + 0.1)
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.output_ratio is not None, "nothing was measured"
+    assert state.output_ratio < 0.4, f"measured {state.output_ratio}"
+    assert state.starved is True, "a third of the stream read as healthy"
+
+
+def test_an_output_stream_at_realtime_is_not_reported():
+    """Healthy calls measured 1.001x, 1.021x and 0.909x. None may alarm."""
+    from sidetap_live.types import STARVED_WINDOW_S
+
+    interpreter, _, metrics, clock, _ = build_watched()
+    run_past_probation(interpreter, clock)
+
+    deliver(interpreter, clock, audio_s=0.909 * STARVED_WINDOW_S,
+            wall_s=STARVED_WINDOW_S + 0.1)
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.starved is False, f"a healthy stream alarmed at {state.output_ratio}"
+    assert 0.8 < state.output_ratio < 1.1, f"measured {state.output_ratio}"
+
+
+def test_a_stream_that_stops_entirely_is_reported_though_no_audio_arrives():
+    """The worst case, and the one an arrival-driven check cannot see.
+
+    If the verdict were computed when a chunk arrives, a stream that stopped
+    dead would never be judged at all. It is computed on the pump instead,
+    which keeps running on capture blocks.
+    """
+    from sidetap_live.types import STARVED_WINDOW_S
+
+    interpreter, _, metrics, clock, _ = build_watched()
+    run_past_probation(interpreter, clock)
+
+    deliver(interpreter, clock, audio_s=0.0, wall_s=STARVED_WINDOW_S + 0.1)
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.output_ratio == 0.0
+    assert state.starved is True, "a silent session was never judged"
+
+
+def test_a_session_still_warming_up_is_not_called_starved():
+    """A fresh session emits nothing for its first ~3 s.
+
+    Judging it would alarm on every open, every rotation and every wake from
+    idle - and an alarm that fires routinely is one the user learns to
+    ignore, which is the whole reason `dropped` and `pad` are separate.
+    """
+    interpreter, _, metrics, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+
+    deliver(interpreter, clock, audio_s=0.0, wall_s=9.0)
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.starved is False, "a warming session was reported as starved"
+    assert state.output_ratio is None, "a verdict was published with no evidence"
+
+
+def test_a_suspended_direction_publishes_no_ratio():
+    """There is no stream to judge once the session is closed, and a stale
+    figure left on screen would read as a live measurement."""
+    from sidetap_live.types import STARVED_WINDOW_S
+
+    interpreter, _, metrics, clock, _ = build_watched()
+    run_past_probation(interpreter, clock)
+    deliver(interpreter, clock, audio_s=0.0, wall_s=STARVED_WINDOW_S + 0.1)
+    assert metrics.snapshot().directions[Direction.IN].starved is True
+
+    clock.advance(IDLE_SUSPEND_S + 1)
+    interpreter.feed(block(SILENCE))
+    assert interpreter.state is SessionState.SUSPENDED, "precondition: it idled out"
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert state.output_ratio is None, "a stale ratio outlived the session"
+    assert state.starved is False
+
+
+def test_a_starved_stream_is_logged_once_not_every_window(caplog):
+    """Under the TUI the log is the durable copy, and a standing condition
+    reported twice a second is noise rather than a diagnosis."""
+    import logging
+
+    from sidetap_live.types import STARVED_WINDOW_S
+
+    interpreter, _, _, clock, _ = build_watched()
+    run_past_probation(interpreter, clock)
+
+    with caplog.at_level(logging.WARNING, logger="sidetap_live.interpreter"):
+        for _ in range(3):
+            deliver(interpreter, clock, audio_s=0.0, wall_s=STARVED_WINDOW_S + 0.1)
+
+    said = [r for r in caplog.records if "realtime" in r.getMessage()]
+    assert len(said) == 1, f"logged {len(said)} times: {[r.getMessage() for r in said]}"
+    assert "0.00x" in said[0].getMessage(), said[0].getMessage()
+
+
+def test_the_first_window_does_not_count_audio_from_the_warm_up():
+    """_output_bytes accumulates from the first chunk, but the window only
+    opens once probation ends.
+
+    Counting both gave the first verdict ~20 s of audio over a 10 s span -
+    2.05x, measured on two of the four real probes. Harmless for the alarm,
+    which only looks at the low side, and a lie on the dashboard.
+    """
+    from sidetap_live.types import STARVED_WINDOW_S
+
+    interpreter, _, metrics, clock, _ = build_watched()
+    interpreter.feed(block(SPEECH))
+    # Realtime output through the whole warm-up, then through the window.
+    deliver(interpreter, clock, audio_s=10.0, wall_s=10.1)
+    deliver(interpreter, clock, audio_s=STARVED_WINDOW_S, wall_s=STARVED_WINDOW_S + 0.1)
+
+    ratio = metrics.snapshot().directions[Direction.IN].output_ratio
+    assert ratio is not None and ratio < 1.2, f"warm-up audio inflated it to {ratio}"

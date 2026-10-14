@@ -206,6 +206,15 @@ compare the panes against what you noted at the five-minute mark:
 - `pad` should be in the hundreds of seconds and climbing. That is the drain
   disposing of the model's keep-alive stream, and it is healthy; it reached
   ~1,690 s over a 31.7 min call.
+- `rate` should read **1.00x**, and stay there. It is output audio per second
+  of wall clock, and a healthy session is remarkably steady — 0.97–1.05x
+  across 133 consecutive windows of a 22-minute call. Anything under 0.5x
+  lights `OUTPUT STALLING`, which means the session is up and delivering a
+  fraction of a stream that is meant to be continuous. Two sessions on
+  2026-10-13 did that; both looked healthy on every other indicator, and one
+  of them read 0.909x on the whole-call average that hid it. If you see it,
+  quit and start again — nothing recovers from it automatically yet, by
+  choice, because the threshold has only four calls behind it.
 
 Then the part only you can judge: **does the translation still sound
 continuous?** The drain removes non-speech from the head of the queue, so the

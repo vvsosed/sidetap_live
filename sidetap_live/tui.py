@@ -37,6 +37,15 @@ def format_lag(seconds: float) -> str:
     return f"{seconds:.1f}s"
 
 
+def format_ratio(ratio: float | None) -> str:
+    """Output audio per second of wall clock. An em dash when unmeasured.
+
+    Not 0, which is a real and alarming value here: it means the model's
+    continuous stream has stopped entirely.
+    """
+    return "—" if ratio is None else f"{ratio:.2f}x"
+
+
 def format_rotations(total: int, forced: int) -> str:
     """The clean/forced split, not just a count: forced rotations are the
     ones that may have cut a word."""
@@ -135,6 +144,11 @@ class SidetapLiveApp(App):
                 alarm = "  NO AUDIO ARRIVING"
             elif state.dead_air:
                 alarm = "  DEAD AIR"
+            elif state.starved:
+                # A third name, because the fix differs: the session is up
+                # and delivering a fraction of a stream that is meant to be
+                # continuous, so it wants replacing, not restarting.
+                alarm = "  OUTPUT STALLING"
             else:
                 alarm = ""
             self.query_one(f"#stats-{suffix}", Static).update(
@@ -142,6 +156,7 @@ class SidetapLiveApp(App):
                 f"backlog {format_lag(state.backlog_s)}   "
                 f"offset {format_lag(state.offset_s)}   "
                 f"rot {format_rotations(state.rotations, state.forced_rotations)}   "
+                f"rate {format_ratio(state.output_ratio)}   "
                 f"dropped {format_lag(state.dropped_s)}/{state.capture_dropped}   "
                 # Shown beside `dropped`, never added to it: padding carries
                 # no speech and runs to hundreds of seconds in a long call,
@@ -158,7 +173,10 @@ class SidetapLiveApp(App):
             error.update(state.session_error)
             pane = self.query_one(f"#pane-{suffix}")
             pane.set_class(
-                state.dead_air or state.no_audio or bool(state.session_error),
+                state.dead_air
+                or state.no_audio
+                or state.starved
+                or bool(state.session_error),
                 "alarm",
             )
 
