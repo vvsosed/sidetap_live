@@ -248,13 +248,11 @@ PW_LOOPBACK = "pw-loopback"
 WPCTL = "wpctl"
 
 
-# 16 KiB of stdin pipe plus a 20 ms node latency, both measured.
-#
-# Playout writes silence between utterances, so whatever the pipe holds sits
-# ahead of every utterance. Measured steady-state buffering at 24 kHz: the
-# 64 KiB default adds ~1250 ms, 16 KiB a steady ~300 ms, and 8 KiB runs dry
-# and crackles. --latency alone does not help, because the OS pipe is the
-# buffer; both are needed.
+# 16 KiB of stdin pipe plus a 20 ms node latency, both measured. Playout writes
+# silence between utterances, so whatever the pipe holds sits ahead of every
+# utterance. Measured steady-state buffering at 24 kHz: the 64 KiB default adds
+# ~1250 ms, 16 KiB a steady ~300 ms, and 8 KiB runs dry and crackles. --latency
+# alone does not help, because the OS pipe is the buffer.
 PIPE_BYTES = 16384
 PW_CAT_LATENCY = "20ms"
 F_SETPIPE_SZ = 1031
@@ -313,9 +311,9 @@ class WpctlVolumeControl:
     def set_volume(self, object_id: int, fraction: float) -> bool:
         """Returns False rather than raising.
 
-        `object_id` is object.id, not object.serial. This runs in the playout
-        loop, where a raise would kill playout over a node that momentarily
-        went away.
+        This runs in the playout loop, where a raise would kill playout over a
+        node that momentarily went away. `object_id` is object.id, not
+        object.serial.
         """
         try:
             result = subprocess.run(

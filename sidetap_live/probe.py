@@ -1,20 +1,20 @@
 """Record what the model's output audio actually looks like, on a real call.
 
-This exists because a lab measurement gave the wrong answer. Experiment 2
-measured the model's idle output peaking at 1078, from a session fed
-prerecorded audio already in the target language, and `SPEECH_PEAK = 2000` was
-set above it. On a live Teams call the keep-alive stream carries energy over
-2000 roughly every 100 ms, so every quiet run is one or two frames and a drain
-that needs a 200 ms run to act removes nothing - measured on 2026-10-06, where
+This exists because a lab measurement gave the wrong answer: experiment 2 put
+the model's idle output at a peak of 1078, from a session fed prerecorded
+audio already in the target language, and `SPEECH_PEAK = 2000` was set above
+it. On a live Teams call the keep-alive stream appeared to carry energy over
+2000 roughly every 100 ms, so every quiet run was one or two frames and a
+drain that needs a 200 ms run removed nothing - measured on 2026-10-06, where
 the OUT queue was 95% padding by volume and still pinned at the 30 s lag cap.
 
-So the question is no longer "how much padding is there" but "is padding
-separable from speech at all, and by what". That needs the raw per-frame
-energies from a real call, plus the model's own signal for when it is
-speaking, which is why this writes the sequence rather than a histogram of it.
+So the question was no longer "how much padding is there" but "is padding
+separable from speech at all, and by what" - which needs a real call's raw
+per-frame energies plus the model's own speaking signal, so it writes the
+sequence, not a histogram. See docs/experiments/06-padding-separability.md.
 
-Energies and timings only: a real call is private, and this file gets read
-and quoted during diagnosis.
+Energies and timings only: a real call is private, and this file gets read and
+quoted during diagnosis.
 """
 
 from __future__ import annotations
@@ -37,8 +37,9 @@ _FRAME_BYTES = TTS_BYTES_PER_S * _FRAME_MS // 1000
 log = logging.getLogger(__name__)
 
 # Entries buffered before touching the disk. The caller is the receive thread,
-# ~20 chunks a second per direction, and a synchronous write per chunk is the
-# kind of thing this is meant to observe, not cause.
+# ~4 chunks a second per direction (250 ms each, experiment 6), and a
+# synchronous write per chunk is the kind of thing this is meant to observe,
+# not cause. close() flushes, so only a kill -9 loses the tail - ~50 s of it.
 FLUSH_EVERY = 200
 
 

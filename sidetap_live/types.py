@@ -25,22 +25,22 @@ MIC = "mic"
 # quality loss; TARGET_LATENCY_S exists to keep it out of reach.
 LAG_CAP_S = 30.0
 
-# Queue depth above which playout discards NON-SPEECH from the head. Queue
-# depth is not a statistic, it is the delay you hear: the model holds its
-# audio channel open continuously, so inflow is keep-alive padding plus
-# speech and runs over realtime - measured at 1.89x on IN over a 31.7 min
-# call. Without draining the padding the depth ratchets to LAG_CAP_S within
-# the first minute and stays pinned there, and the cap then discards real
-# audio (89% of that call's IN stream) to hold the line. Low enough to stay
-# near the 0.2-0.3 s event lag measured in experiment 4, high enough that
-# short pauses are left alone entirely - a pause the drain does touch keeps
-# KEEP_PAUSE_MS, and one shorter than MIN_DRAIN_RUN_MS is never eligible,
-# because at that length it cannot be told from a dip inside a word.
+# Queue depth above which playout discards NON-SPEECH from the head. Depth is
+# not a statistic, it is the delay you hear: the model holds its audio channel
+# open continuously, so inflow is padding plus speech and runs over realtime -
+# 1.089x on IN, 1.123x on OUT, bursts at 2x, measured in
+# docs/experiments/06-padding-separability.md (the 1.89x once claimed here was
+# inferred from lag-cap discards the suppression bug caused). Undrained, depth
+# ratchets to LAG_CAP_S inside the first minute and stays pinned, the cap
+# discarding real audio to hold the line - 89% of the IN stream on the
+# 31.7 min call in docs/experiments/04-pacing.md. Low enough to stay near its
+# 0.2-0.3 s event lag, high enough to leave short pauses alone: one the drain
+# does touch keeps KEEP_PAUSE_MS, and one shorter than MIN_DRAIN_RUN_MS is
+# never eligible, being indistinguishable from a dip inside a word.
 #
-# This bounds the padding, not the model's generation lead: during one long
-# uninterrupted speaking stretch the queue holds real speech and latency
-# tracks that lead instead. Draining cannot help there - see
-# docs/experiments/04-pacing.md.
+# This bounds the padding, not the model's generation lead: through one long
+# uninterrupted stretch the queue holds real speech and latency tracks that
+# lead instead. Draining cannot help - see docs/experiments/04-pacing.md.
 TARGET_LATENCY_S = 1.0
 
 # Seconds of continuous speech into a direction with nothing coming out.
@@ -71,25 +71,24 @@ FATAL_OPEN_FAILURES = 5
 
 # How long a session must survive before its open counts as having worked. The
 # socket coming up proves nothing: on 2026-10-12 a spending cap made the server
-# accept every connection and close it inside a second, and because _open()
-# reports success the moment the socket is up, that reset _open_failed_at,
-# _open_failures and _reported_fatal on every attempt. So neither
-# REOPEN_BACKOFF_S nor FATAL_OPEN_FAILURES could engage: measured at one
-# reconnect every 0.51 s, for minutes, with no give-up and the server's own
-# explanation buried in the log file. A healthy session lives ~540 s, to
-# GoAway, so anything this short is pathological rather than a blip.
+# accept every connection and close it inside a second, and _open()'s success
+# path reset the give-up accounting every time - so neither REOPEN_BACKOFF_S nor
+# FATAL_OPEN_FAILURES could engage, measured at one reconnect every 0.51 s for
+# minutes. A healthy session lives ~540 s, to GoAway.
 SESSION_PROBATION_S = 10.0
 
 # Window over which output delivery is judged, and the fraction of realtime
 # below which it is reported. The model's output stream is CONTINUOUS - it
-# emits padding whether or not it is translating - so delivery sits near 1.0x
-# on a healthy session, and a thin stream means the session is half-dead
-# rather than quiet. Measured against the probe's own wall clock: 1.001x over
-# 22.3 min, plus 1.021x and 0.909x, against 0.282x on the degraded session of
-# 2026-10-13 - which also carried 0.4% exact digital silence where the three
-# healthy probes carried 11.9-31.3%, i.e. the keep-alive stream had stopped.
-# 0.5 is clear of both sides. The window tumbles rather than slides, so a
-# degradation surfaces within 2x it; that is cheap and this only reports.
+# emits padding whether or not it is translating - so a healthy session is a
+# rock: 1.001x over 22.3 min, inside 0.97-1.05x in all 133 of its windows,
+# plus 1.021x on a short probe. A thin stream means half-dead rather than
+# quiet: the degraded session of 2026-10-13 ran 0.282x with 0.4% exact digital
+# silence where the healthy probes carry 11.9-31.3%, i.e. the keep-alive
+# stream had stopped. 0.5 is clear of both sides. Judged per window, never
+# over a whole call: that morning's other bad session reads 0.909x overall and
+# swings 0.20x-2.08x, because averaging over a stall hides the stall. The
+# window tumbles rather than slides, so a degradation surfaces within 2x it;
+# that is cheap and this only reports.
 STARVED_WINDOW_S = 10.0
 STARVED_RATIO = 0.5
 
@@ -98,16 +97,14 @@ STARVED_RATIO = 0.5
 IDLE_SUSPEND_S = 45.0
 
 # Seconds a direction's output must go unwanted - bypass or mute - before its
-# session is closed. Holding one open costs $0.0006 a second at $3.50/M in and
-# $21.00/M out, 25 tokens a second: $2.21 an hour, per direction, for audio
-# discarded on arrival. A 30 min mute on the 2026-10-09 call generated 2,129 s
-# of OUT audio nobody heard, about $1.12. IDLE_SUSPEND_S cannot catch it,
-# because it keys on input silence and you are still talking.
-#
-# The grace period is what stops a short bypass churning the session: a fresh
-# one emits nothing for ~3 s, so closing around a 3 s bypass buys dead air on
-# return in exchange for a fifth of a cent. Four bypasses on that call, two of
-# them under 10 s.
+# session is closed. Holding one open costs $0.0006 a second ($3.50/M in,
+# $21.00/M out, 25 tokens a second): $2.21 an hour per direction for audio
+# discarded on arrival. The 30 min mute on the 2026-10-09 call bought 2,129 s
+# of it, about $1.12; IDLE_SUSPEND_S cannot catch that, keying on input
+# silence while you are still talking. The grace period is what stops a short
+# bypass churning the session: a fresh one emits nothing for ~3 s, so closing
+# around a 3 s bypass trades dead air on return for a fifth of a cent. Four
+# bypasses on that call, two of them under 10 s.
 SUPPRESSED_SUSPEND_S = 30.0
 
 # Playout must be idle this long before the duck reopens. Without the hold it
@@ -151,11 +148,11 @@ class SessionState(StrEnum):
     """Where one direction's Live session is in its lifecycle.
 
     SUSPENDED and RUNNING are steady states; OPENING and OVERLAPPING are
-    transitions that must terminate. OVERLAPPING is bounded by OVERLAP_MAX_S
-    and, behind that, by GoAway's time_left; OPENING by the connect call.
+    transitions that must terminate - OVERLAPPING bounded by OVERLAP_MAX_S and
+    behind that by GoAway's time_left, OPENING by the connect call.
 
-    OVERLAPPING means two sessions are live and being fed the same audio,
-    with the replacement's output discarded until it takes over.
+    OVERLAPPING means two sessions are live and fed the same audio, the
+    replacement's output discarded until it takes over.
     """
 
     SUSPENDED = "suspended"

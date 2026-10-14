@@ -167,10 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# Only a fallback, for when --out cannot be written to. A session's log
-# normally lands beside its own transcript.
-# Where the log goes when --out is unwritable. One name, because two meant
-# every test patching LOG_PATH was patching something nothing read.
+# Where the log goes when --out is unwritable; normally a session's log lands
+# beside its own transcript. One name, because two meant every test patching
+# LOG_PATH was patching something nothing read.
 LOG_PATH = Path.home() / ".local/state/sidetap_live/sidetap_live.log"
 
 
@@ -186,15 +185,13 @@ def session_name() -> str:
 def _log_startup_failure(exc: BaseException) -> None:
     """Put the reason in the log file as well, with its traceback.
 
-    _configure_logging creates that file, so anything raising before the
-    first line is logged left a zero-byte log and the explanation on a
-    terminal the next run clears - four of the thirteen runs on 2026-10-12,
-    each one a dead end afterwards.
+    _configure_logging creates that file, so anything raising before the first
+    line is logged left a zero-byte log and the explanation on a terminal the
+    next run clears - four of the thirteen runs on 2026-10-12.
 
-    Handed to the file handlers directly rather than logged: --no-tui has a
-    stderr handler too, and the caller is already printing one clean line
-    there. This way the durable copy exists in both modes and the user still
-    reads the failure once.
+    Handed to the file handlers directly rather than logged: --no-tui also has
+    a stderr handler and the caller already prints one clean line there, so
+    the durable copy exists in both modes without the failure being read twice.
     """
     record = log.makeRecord(
         log.name,
@@ -214,8 +211,7 @@ def _configure_logging(args, level: int) -> tuple[Path | None, str | None]:
     """stderr, unless Textual is about to take the terminal away.
 
     Textual paints over the whole screen, so under the TUI stderr would
-    destroy every log line, including the one explaining why a direction
-    died.
+    destroy every log line, including the one explaining why a direction died.
 
     A `run` also writes a log file next to its transcript, named after the
     same session. Returns that path and the session name.
@@ -275,9 +271,8 @@ def lag_cap(value: str) -> float:
 def target_latency(value: str) -> float:
     """Queue depth to drain padding down to. Must be positive.
 
-    At or below 0 the drain would run on an empty queue forever; there is no
-    upper bound here because the useful ceiling is --lag-cap, which main()
-    checks against this.
+    At or below 0 the drain would run on an empty queue forever; the useful
+    ceiling is --lag-cap, which main() checks against this.
     """
     seconds = float(value)
     if seconds <= 0:
@@ -404,9 +399,8 @@ def main(
 
     # Cross-flag, so it cannot live in either type= validator. Below the
     # target the drain never fires - _trim_locked keeps the queue under it -
-    # and every byte of discarded padding is counted as dropped_s instead,
-    # which the TUI and README both present as translated audio the user
-    # permanently lost.
+    # and discarded padding is counted as dropped_s instead, which the TUI
+    # and README both present as translated audio permanently lost.
     cap = getattr(args, "lag_cap", None)
     target = getattr(args, "target_latency", None)
     if cap is not None or target is not None:
@@ -447,7 +441,8 @@ def main(
             sessions=sessions,
         )
     except KeyboardInterrupt:
-        # Ctrl-C before the handler is installed, e.g. during auth.
+        # Ctrl-C before run_session installs the handler, e.g. during a
+        # doctor check.
         return 130
     except json.JSONDecodeError as exc:
         # Not a RuntimeError, so the clause below would miss it.

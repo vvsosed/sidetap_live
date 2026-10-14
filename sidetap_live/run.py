@@ -33,13 +33,12 @@ SHUTDOWN_JOIN_S = 3.0
 
 
 class _EitherEvent:
-    """Set when either flag is. A pump takes one, and there are two reasons.
+    """Set when either flag is. A pump takes one, and stopping has two sources.
 
     The whole session can stop (Ctrl-C, or both directions dead) or one
-    direction alone can (`_on_direction_fatal`). Handing the pump only
-    `stop` is what made "stops that direction's pump" untrue: the fatal
-    report latched once and the reconnects went on for the rest of the call.
-    Handing it only `direction_stop` would outlive Ctrl-C.
+    direction alone can (`_on_direction_fatal`). Handed only `stop`, the fatal
+    report latched once and the reconnects went on for the rest of the call;
+    handed only `direction_stop`, Ctrl-C would not stop the pump.
     """
 
     def __init__(self, *events: threading.Event):
@@ -105,9 +104,8 @@ class Session:
         self.router = None
         self.transcript = None
         self.capture = None
-        # Here and not only in setup(): every failure before setup() reached
-        # its line died in shutdown() with an AttributeError, which is what
-        # the user was shown INSTEAD of the real reason.
+        # Same reason, and here rather than only in setup(): otherwise a
+        # failure before that line shows shutdown()'s AttributeError instead.
         self._probe = None
 
     def setup(self) -> None:
@@ -286,14 +284,12 @@ class Session:
         self.metrics.set_health(direction, session=Health.FAILED)
         # Set here, so the `all(...)` check below sees every dead direction.
         self.direction_stop[direction].set()
-        # The reason, then one hint - not a diagnosis. A rejected language
-        # code was the only way here when this was written; an exhausted quota
-        # or spending cap reaches it too, and for that the server's own text
-        # names the cause and carries the URL that clears it.
-        #
-        # setup() CROSSES the languages - IN translates into --my-lang - and
-        # the hint had it the other way round, sending the user to inspect
-        # the flag that was fine.
+        # The reason, then one hint - not a diagnosis: a rejected language
+        # code was the only way here when this was written, and a quota or
+        # spending cap reaches it too, where the server's own text names the
+        # cause and carries the URL that clears it. setup() CROSSES the
+        # languages - IN translates into --my-lang - and the hint had it the
+        # other way round, sending the user to inspect the flag that was fine.
         log.error(
             "%s direction is dead: %s. The call continues one-way; Ctrl-C, "
             "then act on that message - check --%s-lang if it does not name "
@@ -309,12 +305,10 @@ class Session:
     def _poll_capture_health(self, stop: threading.Event) -> None:
         """Two capture failures, both invisible from anywhere else.
 
-        Drops: DroppingQueue only logs, so a lost stretch would read as
-        nobody talking.
-
-        No audio at all: an unlinked capture node delivers zero bytes rather
-        than silence, and every pane stays green. Only the arrival counter
-        failing to advance shows it.
+        Drops: DroppingQueue only logs, so a lost stretch reads as nobody
+        talking. No audio at all: an unlinked capture node delivers zero
+        bytes rather than silence, every pane stays green, and only the
+        arrival counter failing to advance shows it.
         """
         seen = {d: (0, self._clock.monotonic()) for d in Direction}
         while not stop.is_set():
@@ -403,10 +397,8 @@ class Session:
         """OUT is suppressed if EITHER control says so; IN only by bypass.
 
         Takes `bypassed` as an argument because _set_bypass_locked updates
-        self._bypassed after calling this.
-
-        Acts only on a change, because set_suppressed() flushes and would cut
-        the utterance in progress short.
+        self._bypassed after calling this. Acts only on a change:
+        set_suppressed() flushes, cutting the utterance in progress short.
         """
         for direction, want in (
             (Direction.IN, bypassed),
@@ -417,10 +409,9 @@ class Session:
                 continue
             playout.set_suppressed(want)
             # Suppression alone throws the audio away after paying for it:
-            # the session stays open and the model keeps translating. A ~30 min
-            # mute on 2026-10-09 bought 2,129 s of OUT audio nobody heard.
-            # The interpreter decides when to act on this - see
-            # set_output_wanted and SUPPRESSED_SUSPEND_S.
+            # the session stays open and the model keeps translating. A
+            # ~30 min mute on 2026-10-09 bought 2,129 s of OUT audio nobody
+            # heard. See set_output_wanted and SUPPRESSED_SUSPEND_S.
             interpreter = self.interpreters.get(direction)
             if interpreter is not None:
                 interpreter.set_output_wanted(not want)
@@ -627,10 +618,9 @@ def _run_headless(session: Session) -> None:
         elif not out.dead_air:
             alarmed = False
 
-        # The headless counterpart of the TUI's red line in the pane. The
-        # reason is the only actionable thing a 1011 carries, and it was
-        # reaching the log solely as an INFO `session closed (died: ...)`
-        # line interleaved with everything else.
+        # The headless counterpart of the TUI's red line in the pane: the
+        # reason is the only actionable thing a 1011 carries, and it reached
+        # the log solely as an INFO `session closed (died: ...)` line.
         for direction, state in snapshot.directions.items():
             if state.session_error and not refused[direction]:
                 log.error(

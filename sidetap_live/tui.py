@@ -40,8 +40,8 @@ def format_lag(seconds: float) -> str:
 def format_ratio(ratio: float | None) -> str:
     """Output audio per second of wall clock. An em dash when unmeasured.
 
-    Not 0, which is a real and alarming value here: it means the model's
-    continuous stream has stopped entirely.
+    Never 0: 0 is a real and alarming value here - the model's continuous
+    stream has stopped entirely.
     """
     return "—" if ratio is None else f"{ratio:.2f}x"
 
@@ -166,8 +166,7 @@ class SidetapLiveApp(App):
             )
             # Verbatim, on its own line. DEAD AIR says the direction is
             # silent; only this says why, and under the TUI the log goes to a
-            # file nobody is watching. Shown only when there is something to
-            # show, so the row costs nothing on a healthy call.
+            # file nobody is watching.
             error = self.query_one(f"#error-{suffix}", Static)
             error.display = bool(state.session_error)
             error.update(state.session_error)
@@ -190,11 +189,10 @@ class SidetapLiveApp(App):
             f"{failed}{bypassed}overlap {overlap}  est. ${snapshot.cost_usd:.2f}"
         )
 
-        # Both lamps come from the snapshot, and muted_out is the same field
-        # action_mute toggles. Painted from playouts[OUT].suppressed - which is
-        # `bypassed or muted_out` - bypass lit the mute key too, so `m` under
-        # bypass moved nothing on screen and you could not tell which way you
-        # had just toggled it.
+        # Both lamps come from the snapshot, and muted_out is the field
+        # action_mute toggles. Painted from playouts[OUT].suppressed - which
+        # is `bypassed or muted_out` - bypass lit the mute key too, so `m`
+        # under bypass moved nothing on screen.
         self._paint_toggles(
             {"bypass": snapshot.bypassed, "mute": snapshot.muted_out}
         )
@@ -216,18 +214,17 @@ class SidetapLiveApp(App):
 
         Both set_bypass and set_mute_out take Session._lifecycle_lock, and
         set_bypass holds it across pw-dump (timeout 10 s) and up to two
-        pw-link calls (5 s each). Inline, the second key blocks the event
-        loop for as long as the first runs - no repaint, no hotkey, not even
-        `q`. The TUI is what polls session.stop, so a frozen loop also means
-        shutdown() and router.restore() never run and the call stays routed
-        through the duck.
+        pw-link calls (5 s each). Inline, the second key blocks the event loop
+        for as long as the first runs - no repaint, no hotkey, not even `q` -
+        and a frozen loop never polls session.stop, so shutdown() and
+        router.restore() never run.
 
         The try/except is what keeps the app alive: bypass is what you reach
         for when PipeWire is ALREADY misbehaving, which is when pw-dump is
         likeliest to raise, and Textual's run_worker defaults to
         exit_on_error=True - a failed rescue would end the call it was meant
-        to rescue. exit_on_error=False is the backstop for whatever the
-        except does not catch; it is not what the test pins.
+        to rescue. exit_on_error=False is the backstop for what the except
+        misses; it is not what the test pins.
         """
         def guarded() -> None:
             try:

@@ -1,7 +1,7 @@
-"""Live pipeline state, written by worker threads and read by the UI.
+"""Live pipeline state: worker threads write, the UI reads.
 
-The dependency runs one way: pipeline threads write here and the TUI polls
-snapshot(), so --no-tui and the headless tests share one code path.
+The dependency runs one way - the TUI polls snapshot() and the pipeline never
+calls into it - so --no-tui and the headless tests share one code path.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ class Health(Enum):
 
 @dataclass
 class DirectionState:
-    # Live text from the two transcription streams. They drift relative to
-    # each other by design; the TUI shows both rather than pairing them.
+    # The two transcription streams, shown side by side, never paired: they
+    # drift relative to each other by design.
     source: str = ""
     target: str = ""
 
@@ -40,8 +40,8 @@ class DirectionState:
     # Seconds of translated audio the lag cap threw away.
     dropped_s: float = 0.0
     # Seconds of the model's keep-alive padding discarded to hold the latency
-    # target. Separate from dropped_s because it is not a loss: it carries no
-    # speech, and it is large by design (hundreds of seconds in a long call).
+    # target. Not a loss, unlike dropped_s: it carries no speech, and it is
+    # large by design (hundreds of seconds in a long call).
     squelched_s: float = 0.0
     capture_dropped: int = 0
     dead_air: bool = False
@@ -58,10 +58,9 @@ class DirectionState:
     replayed_s: float = 0.0
 
     session: Health = Health.OK
-    # The server's own last words, verbatim and empty when healthy. A 1011
-    # names its cause and sometimes carries the URL that clears it, and under
-    # the TUI the log goes to a file nobody is watching, so the pane is the
-    # only place this can be read while the call is still up.
+    # The server's own last words, verbatim; "" when healthy. A 1011 names its
+    # cause and sometimes the URL that clears it, and under the TUI the log is
+    # a file nobody watches - the pane is where it gets read mid-call.
     session_error: str = ""
 
 
@@ -92,8 +91,8 @@ class Metrics:
                     target: str | None = None) -> None:
         """Add a transcription fragment, keeping a rolling tail.
 
-        Append, not set: each event is only a few words. Fragments carry
-        their own leading space, so they join with no separator.
+        Append, not set: each event is a few words, and fragments carry their
+        own leading space, so they join with no separator.
         """
         with self._lock:
             state = self._states[direction]
@@ -118,9 +117,8 @@ class Metrics:
     def set_squelched_s(self, direction: Direction, seconds: float) -> None:
         """Keep-alive padding discarded to hold latency, cumulative.
 
-        Not a quality loss, unlike `dropped_s`: inflow runs over realtime
-        because the model never closes its audio channel, and this is the
-        surplus being disposed of before it becomes delay.
+        Not a quality loss, unlike `dropped_s`: it is the keep-alive surplus
+        (see TARGET_LATENCY_S), disposed of before it becomes delay.
         """
         with self._lock:
             self._states[direction].squelched_s = seconds
@@ -151,9 +149,9 @@ class Metrics:
     def set_session_error(self, direction: Direction, text: str) -> None:
         """Why this direction's session will not stay up. "" once one does.
 
-        Set from the failure paths and cleared only when a session outlives
-        SESSION_PROBATION_S, so it is not blanked by an open that is about to
-        be dropped again half a second later.
+        Set from the failure paths, cleared only once a session outlives
+        SESSION_PROBATION_S: an open dropped half a second later must not
+        blank it.
         """
         with self._lock:
             self._states[direction].session_error = text
@@ -179,9 +177,8 @@ class Metrics:
     def set_no_audio(self, direction: Direction, value: bool) -> None:
         """No audio at all is reaching this direction's capture queue.
 
-        Separate from dead_air (speech in, nothing out). An unlinked capture
-        node delivers zero bytes, not silence, so every stage downstream
-        looks healthy.
+        Separate from dead_air, which is speech in and nothing out. See
+        NO_AUDIO_S for why nothing downstream notices.
         """
         with self._lock:
             self._states[direction].no_audio = value

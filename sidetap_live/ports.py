@@ -25,7 +25,7 @@ class LinkResult(Enum):
 
 @dataclass(frozen=True)
 class LoopbackSpec:
-    """Arguments for one pw-loopback process, as pw-loopback property maps.
+    """Arguments for one pw-loopback process, as its property maps.
 
     A value type so routing.py can be tested without PipeWire.
     """
@@ -132,9 +132,8 @@ class Clock(Protocol):
     def wait(self, event: threading.Event, timeout: float) -> bool:
         """Block until `event` is set or `timeout` elapses.
 
-        Returns whether `event` was set, like threading.Event.wait. Unlike
-        `sleep` it wakes as soon as `event` is set, so a shutdown can
-        interrupt a poll loop promptly.
+        Returns whether it was set, like threading.Event.wait; unlike
+        `sleep`, a shutdown interrupts a poll loop at once.
         """
         ...
 
