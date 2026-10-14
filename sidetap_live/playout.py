@@ -1,8 +1,8 @@
 """Speak translated audio, duck the original, bound the backlog.
 
 One long-lived pw-cat per direction, fed raw PCM. Between chunks this writes
-silence rather than stopping, which keeps pw-cat's buffer primed and tells
-playout exactly when it is emitting speech.
+silence rather than stopping, which keeps pw-cat's buffer primed and the
+loop paced at realtime.
 
 The duck is driven by speech in the output, not by the remote party speaking,
 so a dead pipeline cannot leave the duck closed: no speech out, no duck.
@@ -40,13 +40,13 @@ STARVE_LIMIT_TICKS = 10
 DUCK_HOLD_TICKS = max(1, int(DUCK_HOLD_S * 1000 / CHUNK_MS))
 
 # Peak below which a frame is padding FOR THE DRAIN. Deliberately not
-# SPEECH_PEAK: that one answers "is the model translating", for the duck, and
-# experiment 6 measured OUT's translated speech at a median peak of 591
-# against IN's 5480 - so a drain keyed on 2000 ate most genuine OUT speech,
-# which the remote party then never hears at all. What the model actually
-# emits between utterances is exact digital silence: 21.2% of the IN stream
-# and 48.0% of OUT. 64 leaves room for dither and a DC offset while staying
-# an order of magnitude below the quietest speech measured.
+# SPEECH_PEAK, which answers "is the model translating", for the duck:
+# experiment 6 measured OUT's speech median at 591 on one call and 3475 on
+# the next, against IN's 5480, so a drain keyed on 2000 ate most genuine OUT
+# speech - which the remote party then never hears at all. Between
+# utterances the model emits exact digital silence: 21.2% of the IN stream,
+# 48.0% of OUT. 64 leaves room for dither and a DC offset and sits an order
+# of magnitude below either measured speech level.
 DRAIN_PEAK = 64
 
 # Shortest quiet run the drain may touch. Clear speech routinely contains a
@@ -64,11 +64,11 @@ KEEP_PAUSE_MS = 100
 KEEP_PAUSE_FRAMES = KEEP_PAUSE_MS // CHUNK_MS
 
 # Seconds of drained padding between log lines. The drain fires on most
-# submits once the queue is over target, ~20/s/direction, and the line is
-# written while _drain_pass_locked still holds the lock tick() needs every
-# 20 ms - a per-cut log under -v is a synchronous file write on the audio
-# path, and 75,000 lines over a call. Rate-limited, the figure is still
-# greppable and the cumulative total is exact.
+# submits once the queue is over target - ~4/s/direction, 250 ms chunks
+# (experiment 6) - and logs while _drain_pass_locked holds the lock tick()
+# needs every 20 ms, so a per-cut log under -v is a synchronous write on the
+# audio path: ~14,000 passes over a 30 min call, more lines once a pass cuts
+# several runs. Rate-limited, the cumulative total is still exact.
 DRAIN_LOG_EVERY_S = 5.0
 
 # Frames from the head the drain will examine. The scan runs under the lock
@@ -106,7 +106,7 @@ def find_silence_boundary(
 def leading_silence_bytes(
     pcm, frame_bytes: int = CHUNK_BYTES, threshold: int = SPEECH_PEAK
 ) -> int:
-    """Length of the run of quiet frames at the head, in whole frames.
+    """Bytes of quiet frames at the head, rounded to whole frames.
 
     For the lag cap when the buffer starts in a pause: there
     `find_silence_boundary` answers 0, and cutting nothing makes no progress.
@@ -129,8 +129,8 @@ def has_speech(pcm: bytes, frame_bytes: int = CHUNK_BYTES,
     frame inside a word, so that would read speech as silence and switch
     sessions mid-word on rotation.
 
-    A short buffer is judged whole rather than ignored, because the caller
-    needs an answer about the bytes it has.
+    A short buffer is judged whole rather than ignored: the caller needs an
+    answer about the bytes it has.
     """
     if not pcm:
         return False
@@ -156,8 +156,8 @@ class DuckControl:
     ):
         """`object_id` may be a callable, and for a live session it must be.
 
-        The duck registers with the graph after Router.engage() returns, so
-        its id is unknown when this is built. Resolving on each transition
+        The duck registers with the graph after Router.engage() returns, so its
+        id is unknown when this is built, and resolving it on each transition
         picks it up once it appears.
 
         `level` is what "closed" means: 0.0 replaces the original entirely,
@@ -238,12 +238,11 @@ class Playout:
         with self._lock:
             if self.suppressed:
                 # tick() consumes nothing while suppressed, so queueing here
-                # filled the buffer to LAG_CAP_S with audio nobody will ever
-                # want: the conversation during bypass is unmediated, and its
-                # translation is stale before it could play. Leaving bypass
-                # then handed back ~28 s of it. It also made _trim_locked
-                # rescan a 30 s buffer on every submit, on the playout thread,
-                # for the whole bypass.
+                # filled the buffer to LAG_CAP_S with audio nobody can want -
+                # the conversation during bypass is unmediated - and leaving
+                # bypass handed back ~28 s of it. It also made _trim_locked
+                # rescan a 30 s buffer on every submit, on the playout
+                # thread, for the whole bypass.
                 self.suppressed_s += len(pcm) / TTS_BYTES_PER_S
                 return
             self._pending.extend(pcm)
@@ -271,13 +270,12 @@ class Playout:
     def set_suppressed(self, value: bool) -> None:
         """Throw the queue away on BOTH edges of suppression.
 
-        Entering, because the conversation during bypass is unmediated and
-        its translation is stale by the time it could play. Leaving, because
-        anything that did slip in belongs to exactly that window - submit()
-        discards while suppressed, so this is the backstop for the chunk that
-        races the flag, not the mechanism.
+        Entering, because the translation of an unmediated conversation is
+        stale before it could play. Leaving, because anything that slipped in
+        belongs to that window - submit() discards while suppressed, so this
+        is the backstop for the chunk that races the flag, not the mechanism.
 
-        The flag is set before the flush so a concurrent submit either sees
+        The flag is set before the flush, so a concurrent submit either sees
         suppression and discards, or is flushed here.
         """
         self.suppressed = value
@@ -287,13 +285,18 @@ class Playout:
         """Discard keep-alive padding so the queue stops hoarding latency.
 
         The model holds its audio channel open whether or not it has anything
-        to translate, so inflow is padding plus speech and runs over realtime
-        - measured at 1.89x on IN across a 31.7 min call, of which only ~37%
-        of the bytes were speech. Playout drains at exactly realtime, so the
-        surplus becomes queue depth, and queue depth is not a statistic: it is
-        the delay you hear. Left alone it ratchets to LAG_CAP_S within the
-        first minute and stays pinned there, and the cap then discards real
-        audio to hold the line - 1,688 s of it, 89% of that call's IN stream.
+        to translate, so inflow is padding plus speech and runs over realtime:
+        experiment 6 measured 1.089x on IN and 1.123x on OUT against the
+        probe's own wall clock, with bursts at 2x, so roughly 10% to shed.
+        Playout drains at exactly realtime, so the surplus becomes queue
+        depth, and queue depth is not a statistic: it is the delay you hear.
+        Left alone it ratchets to LAG_CAP_S within the first minute and stays
+        pinned there, and the cap then discards real audio to hold the line -
+        1,688 s of it on the 2026-10-05 call, 89% of its IN stream, though
+        experiment 6 traced most of that backlog to the suppression bug, not
+        to inflow. (The 1.89x inflow and ~37% speech share once quoted here
+        were inferred as `(call + cap_discarded) / call`, blaming inflow for
+        the suppression bug's discards.)
 
         Three constraints, each of which a simpler version got wrong:
 
@@ -303,13 +306,10 @@ class Playout:
           so the chunk size is the model's choice: at 100 ms chunks that
           version fell 30 s behind and let the cap cut 89 s of speech, while
           the same stream fed one 20 ms frame at a time held 1.0 s.
-        - **Only runs of at least MIN_DRAIN_RUN_FRAMES.** A dip inside a word
-          is one or two frames. Keying on single quiet frames clips
-          consonants, and confining the drain to the head does not avoid it,
-          because tick() advances the head onto the dip.
-        - **Leave KEEP_PAUSE_FRAMES behind.** Erasing a pause splices two
-          sentences, and holds the duck shut across a gap that no longer
-          exists.
+        - **Only runs of at least MIN_DRAIN_RUN_FRAMES**, see that constant:
+          single quiet frames are dips inside words.
+        - **Leave KEEP_PAUSE_FRAMES behind**, see that constant: erasing a
+          pause splices two sentences and holds the duck shut.
 
         What this cannot do is bound latency below the model's generation
         lead: during one long uninterrupted stretch the queue holds real

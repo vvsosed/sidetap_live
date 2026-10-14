@@ -92,10 +92,9 @@ class DirectionInterpreter:
         self._config = config
         self._sessions = sessions
         self._playout = playout
-        # Diagnostic only, None unless --probe-audio. See probe.py: energy
-        # alone could not tell the model's keep-alive padding from speech on
-        # a real call, so this records the raw frames beside the model's own
-        # signal for when it is speaking.
+        # Diagnostic only, None unless --probe-audio. Energy alone could not
+        # separate keep-alive padding from speech on a real call, so probe.py
+        # records the raw frames beside the model's own speaking signal.
         self._probe = probe
         self._last_target_text_at: float | None = None
         # When this direction's output stopped being wanted - bypass or mute.
@@ -115,7 +114,7 @@ class DirectionInterpreter:
         self._state = SessionState.SUSPENDED
         self._session = None
         # When the session on air opened, or None once it has outlived
-        # SESSION_PROBATION_S. See _died_in_probation.
+        # SESSION_PROBATION_S. See _in_probation.
         self._opened_at: float | None = None
         # Output delivery over the current window. Written by the receive
         # thread under the lock, judged on the pump. See _check_output_rate.
@@ -152,18 +151,17 @@ class DirectionInterpreter:
     def set_output_wanted(self, wanted: bool) -> None:
         """Tell this direction whether anyone is listening to it.
 
-        Called when bypass or mute changes. Playout suppression alone only
-        throws the audio away after paying for it: the session stays open, the
-        model keeps translating, and on the 2026-10-09 call a ~30 minute mute
+        Called when bypass or mute changes. Playout suppression alone throws
+        the audio away after paying for it - the session stays open and the
+        model keeps translating - so a ~30 minute mute on the 2026-10-09 call
         bought 2,129 s of OUT audio discarded on arrival, about $1.12.
-        IDLE_SUSPEND_S cannot catch that, because it keys on input silence and
-        the user is still talking.
+        IDLE_SUSPEND_S cannot catch that: it keys on input silence and the
+        user is still talking.
 
-        Not immediate in either direction. Suspending waits
-        SUPPRESSED_SUSPEND_S so a short bypass does not churn a session that
-        emits nothing for its first ~3 s. Resuming opens at once rather than
-        waiting for speech onset, so the warm-up hides inside the time the
-        user takes to start talking.
+        Not immediate either way: suspending waits SUPPRESSED_SUSPEND_S so a
+        short bypass does not churn a session that emits nothing for its
+        first ~3 s, and resuming opens at once rather than on speech onset -
+        see _should_wake.
 
         Safe from another thread: it only sets flags, and the pump acts on
         them when the next block arrives. Nothing here touches the pre-roll,
@@ -172,9 +170,9 @@ class DirectionInterpreter:
         if wanted:
             self._unwanted_since = None
             # Only a flag. PreRoll has no lock and drain() iterates the deque
-            # that the pump's add() appends to, so clearing it from here -
-            # the hotkey's worker thread - can raise "deque mutated during
-            # iteration". _discard_suppressed_window does it on the pump.
+            # the pump's add() appends to, so clearing it from the hotkey's
+            # worker thread can raise "deque mutated during iteration".
+            # _discard_suppressed_window does it on the pump.
             self._release_pending = True
             return
         if self._unwanted_since is None:
@@ -186,10 +184,9 @@ class DirectionInterpreter:
         The pre-roll, because _open(replay=True) would otherwise send the
         model up to PREROLL_S of what was said WHILE MUTED, and the remote
         party would hear a translation of it - mute means do not transmit
-        this. _speech_at, because nothing clears it while suspended (clearing
-        happens when output arrives, and none does), so the first feed after
-        release would read as DEAD_AIR_S of speech with silence out and sound
-        the earcon.
+        this. _speech_at, because only arriving output clears it and none
+        arrives while suspended, so the first feed after release would read
+        as DEAD_AIR_S of speech with silence out and sound the earcon.
 
         Runs on the pump, before the current block is added, so the first
         block after release still reaches the new session.
@@ -352,11 +349,11 @@ class DirectionInterpreter:
             self._set_state(SessionState.SUSPENDED)
             self._note_open_failure(exc)
             return 0.0
-        # The backoff is cleared because an attempt just got through, but NOT
-        # _open_failures or _reported_fatal: the socket coming up is not
-        # evidence that anything works, and resetting the give-up accounting
-        # here is what let a server dropping every session be retried twice a
-        # second forever. _note_session_proven owns that reset.
+        # The backoff clears - an attempt got through - but NOT _open_failures
+        # or _reported_fatal: the socket coming up proves nothing, and
+        # resetting the give-up accounting here let a server dropping every
+        # session be retried twice a second forever. _note_session_proven
+        # owns that reset.
         self._open_failed_at = None
         self._opened_at = self._clock.monotonic()
         self._wake_on_release = False
@@ -444,10 +441,11 @@ class DirectionInterpreter:
 
         It emits padding whether or not it is translating, so a session
         delivering a fraction of realtime is half-dead rather than quiet -
-        measured at 0.282x on 2026-10-13 against 0.909-1.001x on healthy
-        calls. Nothing else sees this: the direction stays RUNNING with
-        health OK until a Closed arrives, and _check_dead_air cannot fire
-        because the bursts that do arrive keep clearing _speech_at.
+        measured at 0.282x on 2026-10-13 against 0.97-1.05x across 133
+        consecutive windows of a healthy call. Nothing else sees this: the
+        direction stays RUNNING with health OK until a Closed arrives, and
+        _check_dead_air cannot fire because the bursts that do arrive keep
+        clearing _speech_at.
 
         On the pump, not on arrival: a stream that stops dead delivers no
         chunk to judge.
@@ -532,7 +530,7 @@ class DirectionInterpreter:
         self._open_pending()
 
     def _rotation_due(self) -> bool:
-        """A GoAway landed and there is still no replacement listening."""
+        """A GoAway landed, no replacement is listening, the backoff is up."""
         with self._lock:
             pending_deadline = self._goaway_at
         return pending_deadline is not None and not self._backing_off()
@@ -762,12 +760,11 @@ class DirectionInterpreter:
         handover counts as forced, since it did not wait for an output gap.
 
         A session that never made it out of probation is a failed open with
-        a late verdict, so it is counted and paced like one. Falling back to
-        SUSPENDED rather than reconnecting on the spot is the same choice
-        _open's failure path makes, and for the same reason: SUSPENDED is
-        both true and recoverable, _should_wake retries it once
-        REOPEN_BACKOFF_S is up, and FATAL_OPEN_FAILURES can eventually say so
-        instead of reconnecting for the rest of the call.
+        a late verdict, so it is counted and paced like one, and falls back
+        to SUSPENDED as _open's failure path does: SUSPENDED is both true and
+        recoverable, _should_wake retries it once REOPEN_BACKOFF_S is up, and
+        FATAL_OPEN_FAILURES can eventually say so instead of reconnecting for
+        the rest of the call.
         """
         self._metrics.set_health(self.direction, session=Health.FAILED)
         if self._pending is not None:

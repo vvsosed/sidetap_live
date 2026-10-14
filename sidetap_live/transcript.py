@@ -1,11 +1,11 @@
 """Durable transcript: append-only JSONL of events, Markdown at close.
 
 Not source/target pairs: the two transcriptions drift independently, so a
-pairing would be invented. The Markdown interleaves them by time instead.
+pairing would be invented. The Markdown interleaves them by time.
 
-Three Markdown files are rendered at close: the interleaved one,
-`.original.md` (what was said) and `.translated.md` (what each side heard).
-All are grouped into paragraphs once and then filtered, so their blocks share
+Three Markdown files at close: the interleaved one, `.original.md` (what was
+said) and `.translated.md` (what each side heard). All are grouped into
+paragraphs once and then filtered (see _render), so their blocks share
 boundaries and timestamps and can be read side by side.
 """
 
@@ -98,12 +98,12 @@ def _cut_target(fragments: list[TranscriptEvent], after: float) -> int:
 def _paragraphs(events: list[TranscriptEvent]) -> list[tuple[float, Direction, str, str]]:
     """Group fragments into paragraphs, cutting BOTH streams at the same point.
 
-    The source decides where a paragraph ends, since it records what was
-    said; the target is cut at its first sentence end after that. Cutting
-    the streams independently would print blocks covering different spans.
+    The source decides where a paragraph ends, since it records what was said,
+    and the target is cut at its first sentence end after that. Cutting the
+    streams independently would print blocks covering different spans.
 
-    These are aligned TIME WINDOWS, not sentence pairs: the model emits no
-    turn boundary and the streams drift.
+    Aligned TIME WINDOWS, not sentence pairs: the model emits no turn boundary
+    and the streams drift.
     """
     out: list[tuple[float, Direction, str, str]] = []
     for direction in sorted({e.direction for e in events}, key=lambda d: d.value):
@@ -169,8 +169,7 @@ def _render(
 def render_markdown(session: str, events: list[TranscriptEvent]) -> str:
     """Chronological, both directions and both streams interleaved.
 
-    Fragments are joined into paragraphs because the model emits no turn
-    boundary. The JSONL keeps every fragment as it arrived.
+    Fragments are joined into paragraphs; the JSONL keeps them as they arrived.
     """
     return _render(session, events, title="Interpretation transcript")
 
@@ -199,8 +198,7 @@ def render_translated(session: str, events: list[TranscriptEvent]) -> str:
 class EventTranscript:
     def __init__(self, outdir: Path, session: str | None = None):
         outdir.mkdir(parents=True, exist_ok=True)
-        # Sub-second resolution, so runs started in the same second do not
-        # share a file.
+        # Sub-second resolution: two runs in one second must not share a file.
         self.session = session or datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         self.jsonl_path = outdir / f"{self.session}.jsonl"
         self.md_path = outdir / f"{self.session}.md"

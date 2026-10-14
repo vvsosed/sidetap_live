@@ -89,8 +89,7 @@ class SpeechActivity:
 
         For a moment that is activity without being a sample of it: releasing
         mute says the user is about to talk, and without this the idle clock
-        still reads silent and closes the session that the release just
-        opened.
+        closes the session the release just opened.
         """
         self._last_speech = self._clock.monotonic()
 
@@ -120,7 +119,7 @@ class OverlapWatch:
 
     @property
     def available(self) -> bool:
-        """False if any track has no detector.
+        """False with no tracks, or if any track has no detector.
 
         A track with no detector never reports speech, so the figure is
         unmeasurable, not zero.

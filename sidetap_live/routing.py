@@ -27,9 +27,10 @@ log = logging.getLogger(__name__)
 # Matches AppTap's cadence: both watch for late-created streams.
 POLL_INTERVAL_S = 2.0
 
-# NOT shared with sidetap, unlike the virtmic constants below. The duck lives
-# only as long as this process; a shared name would let either program's
-# `doctor --repair` tear down the other's live duck.
+# NOT shared with sidetap, unlike the virtmic constants below: the duck lives
+# only as long as this process, and a shared name would let either program's
+# `doctor --repair` tear down the other's live duck. The virtmic names are
+# shared because a messenger's saved input selection is tied to the node name.
 DUCK_NODE = "sidetap_live_duck"
 VIRTMIC_SINK = "sidetap_tts_sink"
 VIRTMIC_SOURCE = "sidetap_virtmic"
@@ -79,8 +80,7 @@ context.modules = [
 VIRTMIC_CONFIG_PATH = Path.home() / ".config/pipewire/pipewire.conf.d/90-sidetap-mic.conf"
 
 # NOT shared with sidetap: the journal describes links this process made, and
-# each program repairs only its own. The virtual mic is shared because a
-# messenger's saved device selection is tied to the node name.
+# each program repairs only its own.
 JOURNAL_PATH = Path.home() / ".local/state/sidetap_live/routing-journal.json"
 
 
@@ -147,7 +147,6 @@ class Journal:
             finally:
                 os.close(dir_fd)
         except BaseException:
-            # Do not leave a stray .tmp behind.
             tmp.unlink(missing_ok=True)
             raise
 
@@ -250,11 +249,10 @@ class Router:
 
     @property
     def has_routed(self) -> bool:
-        """Has any application stream actually been rewired through the duck?
+        """Has any application stream been rewired through the duck?
 
-        This arms the IN direction's no-audio watch. Before then the app is
-        simply not playing yet, and alarming on that would train the user to
-        ignore the warning.
+        Arms the IN direction's no-audio watch. Before then the app is simply
+        not playing yet, and alarming trains the user to ignore the warning.
         """
         return bool(self._routed)
 
@@ -357,9 +355,8 @@ class Router:
         # Durable BEFORE the graph is touched.
         journal = Journal.load(self._journal_path)
         # Only what is not already recorded: a failing stream is retried on
-        # every poll, and appending blindly would grow the journal without
-        # bound, each duplicate rewritten under the lock and replayed on
-        # restore.
+        # every poll, so appending blindly would grow the journal without bound
+        # and replay every duplicate on restore.
         known_broken = set(journal.broken)
         known_made = set(journal.made)
         new_broken = tuple(ref for ref in broken if ref not in known_broken)

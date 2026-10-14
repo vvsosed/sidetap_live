@@ -163,8 +163,8 @@ def first_failure(tasks) -> BaseException | None:
     rather than raising, and a dying connection fails the sender and the
     receiver in the SAME pass, so both land in its `done` set. Returning on
     the first left the other unread, and asyncio logged "Task exception was
-    never retrieved" with its own traceback when the task was collected - on
-    top of the real error, in the log this project diagnoses from.
+    never retrieved" with its own traceback on top of the real error, in the
+    log this project diagnoses from.
 
     A cancelled task is skipped rather than read: `.exception()` re-raises
     CancelledError, and _main cancels the loop that did not finish.
@@ -180,7 +180,7 @@ class GeminiLiveSession:
         """`connect(model=..., config=...)` returns an async context manager.
 
         Injected rather than imported so a test can drive this class without
-        the SDK. run.py passes `genai.Client(...).aio.live.connect`.
+        the SDK. build_factory passes `client.aio.live.connect`.
         """
         self._connect = connect
         self._config = config
@@ -226,11 +226,11 @@ class GeminiLiveSession:
             asyncio.run(self._main())
         except Exception as exc:
             if self._retired.is_set():
-                # We asked for this. Breaking whatever the loops were
-                # awaiting IS how close() works, so reporting it as a failure
-                # made every clean quit read as a crash in the log - and this
-                # package already holds the same rule for the event path: one
-                # we retired on purpose must not read as the live one dying.
+                # We asked for this: breaking what the loops were awaiting IS
+                # how close() works, so reporting it as a failure made every
+                # clean quit read as a crash in the log. Same rule as the
+                # event path's: one retired on purpose must not read as the
+                # live one dying.
                 log.info("live session closed (%s)", exc)
             else:
                 log.exception("live session ended abnormally")
@@ -245,11 +245,9 @@ class GeminiLiveSession:
         """Run the send and receive loops until one of them finishes.
 
         The finished task's exception is re-raised: `asyncio.wait` returns
-        it rather than raising, and an unread API rejection (a 1007, a
-        revoked key) would otherwise be reported as a normal close. The
-        cancelled task is gathered so its exception is retrieved too, and
-        `first_failure` reads every task that finished rather than stopping
-        at the one it raises.
+        it rather than raising, so an unread API rejection (a 1007, a revoked
+        key) would otherwise be reported as a normal close. The cancelled
+        task is gathered so its exception is retrieved too.
         """
         async with self._connect(model=self._model, config=self._config) as session:
             sender = asyncio.create_task(self._send_loop(session))
