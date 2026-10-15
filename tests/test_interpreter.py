@@ -22,11 +22,11 @@ SPEECH = b"\x00\x40" * (BLOCK_BYTES // 2)
 SILENCE = b"\x00\x00" * (BLOCK_BYTES // 2)
 
 
-def build(*, echo=False, idle_suspend=True, speaking=True):
+def build(*, echo=False, idle_suspend=True, speaking=True, duck=None, probe=None):
     clock = FakeClock()
     sessions = FakeSessionFactory()
     metrics = Metrics()
-    playout = Playout(Direction.IN, FakeAudioSink())
+    playout = Playout(Direction.IN, FakeAudioSink(), duck=duck)
     detector = (lambda pcm: pcm == SPEECH) if speaking else None
     interpreter = DirectionInterpreter(
         InterpreterConfig(
@@ -42,6 +42,7 @@ def build(*, echo=False, idle_suspend=True, speaking=True):
         clock=clock,
         rates=Rates(),
         preroll=PreRoll(seconds=1.0),
+        probe=probe,
     )
     return interpreter, sessions, metrics, clock
 
@@ -913,7 +914,10 @@ def test_the_audio_probe_sees_every_chunk_with_the_target_text_timing(tmp_path):
     interpreter.note_event(AudioOut(pcm=QUIET))
     interpreter._probe.close()
 
+    # The chunk records only: the probe also writes a playout-side record
+    # once a second, which carries no peaks and is not what this measures.
     entries = [json.loads(line) for line in path.read_text().splitlines()]
+    entries = [e for e in entries if e.get("k") != "playout"]
     assert len(entries) == 2, entries
     assert entries[0]["tt"] == pytest.approx(0.0), "target text had just arrived"
     assert entries[1]["tt"] == pytest.approx(2.5), "2.5 s of silence since it"
@@ -1420,3 +1424,78 @@ def test_the_first_window_does_not_count_audio_from_the_warm_up():
 
     ratio = metrics.snapshot().directions[Direction.IN].output_ratio
     assert ratio is not None and ratio < 1.2, f"warm-up audio inflated it to {ratio}"
+
+
+# --- A playout sink that stops draining --------------------------------------
+
+import json
+import logging
+
+from sidetap_live.playout import DuckControl
+from sidetap_live.probe import AudioProbe
+from tests.conftest import FakeVolumeControl
+
+
+def test_a_sink_that_stops_draining_is_reported_once_and_cleared(caplog):
+    """On 2026-10-15 translation went quiet mid-call with the model delivering
+    speech at 1.00x - and the log showed nothing, because a stalled sink only
+    surfaces as the 30 s lag-cap warning, which the bypass flush erased. The
+    pump checks the playout thread's write from its own thread, on every
+    block, SUSPENDED included: a stall while suspended still blocks the
+    thread, so nothing would play on wake."""
+    from sidetap_live.types import SINK_STALL_S
+
+    interpreter, _, metrics, _ = build()
+    assert interpreter.state is SessionState.SUSPENDED
+    interpreter._playout.write_blocked_s = lambda: SINK_STALL_S
+
+    with caplog.at_level(logging.INFO, logger="sidetap_live.interpreter"):
+        interpreter.feed(block(SILENCE))
+        interpreter.feed(block(SILENCE))
+        assert metrics.snapshot().directions[Direction.IN].sink_stalled is True
+        interpreter._playout.write_blocked_s = lambda: 0.0
+        interpreter.feed(block(SILENCE))
+
+    assert metrics.snapshot().directions[Direction.IN].sink_stalled is False
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert "sink" in warnings[0] and "queued" in warnings[0]
+    resumed = [r.getMessage() for r in caplog.records
+               if r.levelno == logging.INFO and "again" in r.getMessage()]
+    assert len(resumed) == 1, resumed
+
+
+def test_duck_counts_reach_metrics():
+    volume = FakeVolumeControl(ok=False)
+    duck = DuckControl(volume, object_id=7)
+    interpreter, _, metrics, _ = build(duck=duck)
+    duck.close()
+
+    interpreter.feed(block(SILENCE))
+
+    state = metrics.snapshot().directions[Direction.IN]
+    assert (state.duck_transitions, state.duck_failures, state.duck_failing) == (0, 1, True)
+
+
+def test_the_probe_records_the_playout_side_once_a_second(tmp_path):
+    """One `--probe-audio` call must capture both ends of the chain: what the
+    model delivered per chunk, and what playout did with it per second."""
+    path = tmp_path / "probe.jsonl"
+    duck = DuckControl(FakeVolumeControl(), object_id=7)
+    interpreter, _, _, clock = build(duck=duck, probe=None)
+    probe = AudioProbe(path, flush_every=1, clock=clock.monotonic)
+    interpreter._probe = probe
+
+    for _ in range(3):
+        interpreter.feed(block(SILENCE))
+        clock.now += 0.1
+    clock.now += 1.0
+    interpreter.feed(block(SILENCE))
+    probe.close()
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    playout = [r for r in records if r.get("k") == "playout"]
+    assert len(playout) == 2, records
+    assert set(playout[0]) >= {"w", "d", "backlog", "written", "duck", "blocked",
+                               "duck_tr", "duck_fail"}
+    assert playout[0]["d"] == "in"

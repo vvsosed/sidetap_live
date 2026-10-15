@@ -120,3 +120,31 @@ def test_wall_clock_shows_audio_arriving_faster_than_realtime(tmp_path):
 
     second = read(path)[1]
     assert second["t"] == 1.0 and second["w"] == 0.4, second
+
+
+def test_the_playout_record_is_distinguishable_from_a_chunk_record(tmp_path):
+    """The probe records what the model delivered. This adds what playout did
+    with it, once a second, so one file shows both ends of the chain."""
+    path = tmp_path / "probe.jsonl"
+    probe = AudioProbe(path, flush_every=1)
+    probe.note_playout(
+        Direction.IN,
+        backlog_s=1.25,
+        written=40,
+        duck_closed=True,
+        blocked_s=0.0,
+        duck_transitions=3,
+        duck_failures=0,
+    )
+    probe.close()
+
+    (record,) = read(path)
+    assert record["k"] == "playout"
+    assert record["d"] == "in"
+    assert "peaks" not in record and "bytes" not in record
+    assert record["backlog"] == 1.25
+    assert record["written"] == 40
+    assert record["duck"] is True
+    assert record["blocked"] == 0.0
+    assert (record["duck_tr"], record["duck_fail"]) == (3, 0)
+    assert "w" in record

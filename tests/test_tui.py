@@ -451,3 +451,38 @@ async def test_a_starved_output_stream_is_named_in_the_pane():
         assert app.query_one("#pane-in").has_class("alarm")
         # The healthy direction stays quiet, and shows no ratio it never had.
         assert "STALLING" not in str(app.query_one("#stats-out", Static).content)
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_sink_is_named_on_the_pane():
+    """The session is up and the model is delivering - the probe showed
+    1.00x with speech on 2026-10-15 - and nothing reaches the headphones.
+    None of NO AUDIO, DEAD AIR or OUTPUT STALLING describes that, and each
+    would send the user to the wrong fix."""
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    metrics.set_sink_stalled(Direction.IN, True)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        line = str(app.query_one("#stats-in", Static).content)
+        assert "SINK STALLED" in line, line
+        assert app.query_one("#pane-in").has_class("alarm")
+        assert "STALLED" not in str(app.query_one("#stats-out", Static).content)
+
+
+@pytest.mark.asyncio
+async def test_a_duck_that_is_not_responding_is_named_on_the_pane():
+    """A duck that cannot close plays the original at full volume under
+    every translation, and used to do it in silence."""
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    metrics.set_duck(Direction.IN, transitions=12, failures=3, failing=True)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        line = str(app.query_one("#stats-in", Static).content)
+        assert "DUCK FAILING" in line, line
+        assert app.query_one("#pane-in").has_class("alarm")

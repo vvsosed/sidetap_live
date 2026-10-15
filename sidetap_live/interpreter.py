@@ -32,6 +32,7 @@ from .types import (
     OVERLAP_MAX_S,
     REOPEN_BACKOFF_S,
     SESSION_PROBATION_S,
+    SINK_STALL_S,
     STARVED_RATIO,
     STARVED_WINDOW_S,
     SUPPRESSED_SUSPEND_S,
@@ -121,6 +122,11 @@ class DirectionInterpreter:
         self._output_bytes = 0
         self._output_since: float | None = None
         self._starved = False
+        # The playout thread's current sink write, judged on the pump. See
+        # _check_sink.
+        self._sink_stalled = False
+        self._sink_blocked_s = 0.0
+        self._last_playout_note: float | None = None
         # Monotonic time of the last failed open, or None. Gates retries.
         self._open_failed_at: float | None = None
         self._open_failures = 0
@@ -240,6 +246,9 @@ class DirectionInterpreter:
         if self._release_pending:
             self._release_pending = False
             self._discard_suppressed_window()
+        # Every block, SUSPENDED included: a stalled sink blocks the playout
+        # thread whatever the session is doing, so nothing would play on wake.
+        self._check_sink()
         speaking = self._activity.observe(chunk.pcm)
         self._preroll.add(chunk.pcm)
         if speaking:
@@ -435,6 +444,66 @@ class DirectionInterpreter:
         self._starved = False
         self._metrics.set_output_ratio(self.direction, None)
         self._metrics.set_starved(self.direction, False)
+
+    def _check_sink(self) -> None:
+        """Is the playout thread stuck inside a sink write?
+
+        pw-cat paces playout by blocking one chunk at a time, ~20 ms. On
+        2026-10-15 translation went quiet mid-call with the model delivering
+        speech at 1.00x realtime - and the log showed nothing, because a sink
+        that stops draining only surfaces as the lag-cap warning 30 s later,
+        and engaging bypass flushes the queue first. The thread that could
+        notice is the one stuck, so the pump reads the write's start time.
+
+        Also where the duck's counters and the probe's playout-side record
+        are published: everything downstream of submit(), once per block.
+        """
+        blocked = self._playout.write_blocked_s()
+        stalled = blocked >= SINK_STALL_S
+        if stalled:
+            self._sink_blocked_s = blocked
+        if stalled and not self._sink_stalled:
+            log.warning(
+                "%s playout sink has not accepted audio for %.1fs with %.1fs "
+                "queued - pw-cat is alive but nothing is draining it, so the "
+                "model's audio is reaching nobody",
+                self.direction.value,
+                blocked,
+                self._playout.backlog_s(),
+            )
+        elif self._sink_stalled and not stalled:
+            log.info(
+                "%s playout sink is accepting audio again, after %.1fs",
+                self.direction.value,
+                self._sink_blocked_s,
+            )
+        self._sink_stalled = stalled
+        self._metrics.set_sink_stalled(self.direction, stalled)
+
+        duck = self._playout.duck
+        if duck is not None:
+            self._metrics.set_duck(
+                self.direction,
+                transitions=duck.transitions,
+                failures=duck.failures,
+                failing=duck.failing,
+            )
+
+        if self._probe is None:
+            return
+        now = self._clock.monotonic()
+        if self._last_playout_note is not None and now - self._last_playout_note < 1.0:
+            return
+        self._last_playout_note = now
+        self._probe.note_playout(
+            self.direction,
+            backlog_s=self._playout.backlog_s(),
+            written=self._playout.written,
+            duck_closed=duck is not None and not duck.is_open,
+            blocked_s=blocked,
+            duck_transitions=duck.transitions if duck is not None else 0,
+            duck_failures=duck.failures if duck is not None else 0,
+        )
 
     def _check_output_rate(self) -> None:
         """Is the model's continuous stream still arriving at realtime?

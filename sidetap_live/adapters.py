@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import IO, BinaryIO
 
 from .graph import PwGraph, parse_graph
@@ -39,6 +39,10 @@ LINK_TIMEOUT_S = 5
 # Short because it runs on the playout thread, which also feeds pw-cat: a
 # stall freezes audio output. Better to give up on the duck than glitch.
 VOLUME_TIMEOUT_S = 0.3
+# Seconds between warnings about a wpctl call that failed or did not finish.
+# The duck retries on the next speech tick, 20 ms later, so an unlimited
+# warning is fifty lines a second for as long as the fault lasts.
+VOLUME_WARN_EVERY_S = 5.0
 
 
 class MissingToolError(RuntimeError):
@@ -308,6 +312,17 @@ class PwLoopbackFactory:
 
 
 class WpctlVolumeControl:
+    def __init__(self, clock: Callable[[], float] | None = None):
+        self._clock = clock or time.monotonic
+        self._warned_at: float | None = None
+
+    def _warn(self, message: str, *args) -> None:
+        now = self._clock()
+        if self._warned_at is not None and now - self._warned_at < VOLUME_WARN_EVERY_S:
+            return
+        self._warned_at = now
+        log.warning(message, *args)
+
     def set_volume(self, object_id: int, fraction: float) -> bool:
         """Returns False rather than raising.
 
@@ -322,10 +337,21 @@ class WpctlVolumeControl:
                 text=True,
                 timeout=VOLUME_TIMEOUT_S,
             )
-        except (MissingToolError, subprocess.SubprocessError, OSError):
+        except (MissingToolError, subprocess.SubprocessError, OSError) as exc:
+            # This path returned False in silence, and the duck retries it
+            # every tick - so a wpctl that hung showed nowhere at all.
+            self._warn(
+                "wpctl set-volume %s %.2f could not run or did not finish "
+                "within %.1fs (%s) - the duck cannot move, so the original "
+                "stays at whatever volume it had",
+                object_id,
+                fraction,
+                VOLUME_TIMEOUT_S,
+                type(exc).__name__,
+            )
             return False
         if result.returncode != 0:
-            log.warning(
+            self._warn(
                 "wpctl set-volume %s %.2f failed (%s) - the duck will not "
                 "engage, so the original will be audible under the "
                 "translation",

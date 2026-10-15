@@ -92,6 +92,15 @@ SESSION_PROBATION_S = 10.0
 STARVED_WINDOW_S = 10.0
 STARVED_RATIO = 0.5
 
+# Seconds the playout thread may sit inside one sink write before it is
+# reported stalled. pw-cat paces playout by blocking that write for one chunk
+# at a time, ~20 ms once its 16 KiB pipe is full; a full second means nothing
+# is draining the pipe. Until this the only evidence was the lag cap firing
+# at LAG_CAP_S, thirty seconds later - and engaging bypass flushes the queue,
+# so on 2026-10-15 a direction went silent with the model delivering speech
+# at 1.00x and the log recorded nothing at all.
+SINK_STALL_S = 1.0
+
 # Silence after which a session is closed entirely. Reopening costs a cold
 # start, paid only after most of a minute of nothing.
 IDLE_SUSPEND_S = 45.0

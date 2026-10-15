@@ -51,6 +51,17 @@ class DirectionState:
     # near 1.0 when healthy; `starved` is it falling under STARVED_RATIO.
     output_ratio: float | None = None
     starved: bool = False
+    # The playout thread is stuck inside sink.write(): pw-cat is alive but
+    # nothing is draining it, so the model's audio reaches nobody. Otherwise
+    # invisible until the lag cap fires at LAG_CAP_S, and bypass's flush
+    # erases even that.
+    sink_stalled: bool = False
+    # The duck's set_volume calls: state changes, failures, and whether the
+    # latest attempt failed. A duck that cannot close plays the original at
+    # full volume under every translation.
+    duck_transitions: int = 0
+    duck_failures: int = 0
+    duck_failing: bool = False
 
     session_state: SessionState = SessionState.SUSPENDED
     rotations: int = 0
@@ -145,6 +156,20 @@ class Metrics:
         session, distinct from a quiet one."""
         with self._lock:
             self._states[direction].starved = value
+
+    def set_sink_stalled(self, direction: Direction, value: bool) -> None:
+        """The playout thread is stuck writing to a sink nothing drains."""
+        with self._lock:
+            self._states[direction].sink_stalled = value
+
+    def set_duck(
+        self, direction: Direction, *, transitions: int, failures: int, failing: bool
+    ) -> None:
+        with self._lock:
+            state = self._states[direction]
+            state.duck_transitions = transitions
+            state.duck_failures = failures
+            state.duck_failing = failing
 
     def set_session_error(self, direction: Direction, text: str) -> None:
         """Why this direction's session will not stay up. "" once one does.

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from array import array
 from collections.abc import Callable
 
@@ -167,11 +168,30 @@ class DuckControl:
         self._object_id = object_id
         self._level = level
         self._closed = False
+        # State changes, failed set_volume calls, and whether the latest
+        # attempt failed. A failure used to vanish - False, retried on the
+        # next tick - which is how a duck that could not close played the
+        # original at full volume under every translation with nothing
+        # recorded. A duck with no id yet is not a failure: close() is owed,
+        # and the next transition retries it.
+        self.transitions = 0
+        self.failures = 0
+        self.failing = False
 
     def _resolve(self) -> int | None:
         if callable(self._object_id):
             return self._object_id()
         return self._object_id
+
+    def _set(self, object_id: int, fraction: float) -> bool:
+        ok = self._volume.set_volume(object_id, fraction)
+        if ok:
+            self.transitions += 1
+            self.failing = False
+        else:
+            self.failures += 1
+            self.failing = True
+        return ok
 
     def close(self) -> None:
         # Flip only on success, so a failed wpctl call (or a duck not yet
@@ -179,14 +199,14 @@ class DuckControl:
         if self._closed:
             return
         object_id = self._resolve()
-        if object_id is not None and self._volume.set_volume(object_id, self._level):
+        if object_id is not None and self._set(object_id, self._level):
             self._closed = True
 
     def open(self) -> None:
         if not self._closed:
             return
         object_id = self._resolve()
-        if object_id is not None and self._volume.set_volume(object_id, 1.0):
+        if object_id is not None and self._set(object_id, 1.0):
             self._closed = False
 
     @property
@@ -205,8 +225,17 @@ class Playout:
         duck: DuckControl | None = None,
         lag_cap_s: float = LAG_CAP_S,
         target_latency_s: float = TARGET_LATENCY_S,
+        clock: Callable[[], float] | None = None,
     ):
         self.direction = direction
+        self._clock = clock or time.monotonic
+        # Chunks handed to the sink, silence included: whether the thread is
+        # ticking at all, for the probe.
+        self.written = 0
+        # When the current sink write began, None between writes. Read from
+        # the pump, because the playout thread cannot report a write it is
+        # stuck inside. See write_blocked_s.
+        self._write_started: float | None = None
         self.dropped_s = 0.0
         # Padding discarded to hold the latency target. Deliberately NOT
         # folded into dropped_s: that one means the cap cut translated audio,
@@ -441,7 +470,7 @@ class Playout:
         if self.suppressed:
             if self._duck is not None:
                 self._duck.open()
-            self._sink.write(SILENCE_CHUNK)
+            self._write(SILENCE_CHUNK)
             return False
 
         with self._lock:
@@ -463,8 +492,30 @@ class Playout:
             if self._duck is not None and self._idle_ticks >= DUCK_HOLD_TICKS:
                 self._duck.open()
 
-        self._sink.write(chunk)
+        self._write(chunk)
         return speech
+
+    def _write(self, chunk: bytes) -> None:
+        self._write_started = self._clock()
+        try:
+            self._sink.write(chunk)
+        finally:
+            self._write_started = None
+            self.written += 1
+
+    def write_blocked_s(self) -> float:
+        """Seconds the playout thread has spent inside the current write.
+
+        0.0 between writes. pw-cat paces the loop by blocking this call for
+        one chunk at a time, ~20 ms once its pipe is full, so a whole second
+        means nothing is draining the pipe: the model's audio is arriving,
+        being consumed, and reaching nobody. Judged on the pump against
+        SINK_STALL_S, because the thread that could notice is the one stuck.
+        """
+        started = self._write_started
+        if started is None:
+            return 0.0
+        return max(0.0, self._clock() - started)
 
     def run(self, stop: threading.Event) -> None:
         """Pace comes from the sink.

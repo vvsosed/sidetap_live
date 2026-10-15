@@ -144,11 +144,20 @@ class SidetapLiveApp(App):
                 alarm = "  NO AUDIO ARRIVING"
             elif state.dead_air:
                 alarm = "  DEAD AIR"
+            elif state.sink_stalled:
+                # The model is delivering and the playout thread is stuck in
+                # write(): none of the other three describes it, and each
+                # would send the user to the wrong fix.
+                alarm = "  SINK STALLED"
             elif state.starved:
                 # A third name, because the fix differs: the session is up
                 # and delivering a fraction of a stream that is meant to be
                 # continuous, so it wants replacing, not restarting.
                 alarm = "  OUTPUT STALLING"
+            elif state.duck_failing:
+                # The translation plays; the original is not being muted
+                # under it.
+                alarm = "  DUCK FAILING"
             else:
                 alarm = ""
             self.query_one(f"#stats-{suffix}", Static).update(
@@ -175,6 +184,8 @@ class SidetapLiveApp(App):
                 state.dead_air
                 or state.no_audio
                 or state.starved
+                or state.sink_stalled
+                or state.duck_failing
                 or bool(state.session_error),
                 "alarm",
             )

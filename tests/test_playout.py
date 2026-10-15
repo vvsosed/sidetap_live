@@ -668,3 +668,79 @@ def test_the_drain_removes_the_models_digital_silence():
     assert playout.squelched_s > 0.0
     assert playout.dropped_s == 0.0
     assert playout.backlog_s() <= TARGET_LATENCY_S
+
+
+# --- A sink that stops draining ----------------------------------------------
+
+import threading
+
+from tests.conftest import FakeClock
+
+
+class BlockingSink:
+    """write() parks until released - pw-cat with its stream unscheduled: the
+    pipe is full and nobody is reading the other end."""
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, pcm: bytes) -> None:
+        self.entered.set()
+        self.release.wait(timeout=5)
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_write_that_does_not_return_is_visible_from_another_thread():
+    """A stalled pw-cat shows in the log only when the backlog reaches
+    LAG_CAP_S, thirty seconds later - and bypass's flush erases even that.
+    The pump has to see it within seconds, from its own thread, while the
+    playout thread is still stuck inside write()."""
+    clock = FakeClock()
+    sink = BlockingSink()
+    playout = Playout(Direction.IN, sink, clock=clock.monotonic)
+    playout.submit(LOUD)
+    assert playout.write_blocked_s() == 0.0
+
+    worker = threading.Thread(target=playout.tick, daemon=True)
+    worker.start()
+    assert sink.entered.wait(timeout=5), "tick never reached the sink"
+    clock.now += 2.0
+    assert playout.write_blocked_s() == 2.0
+
+    sink.release.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert playout.write_blocked_s() == 0.0
+
+
+def test_every_write_is_counted_including_silence():
+    """`written` says whether the playout thread is ticking at all, so the
+    silence written on an empty queue counts as much as a chunk does."""
+    playout = Playout(Direction.IN, FakeAudioSink())
+    playout.tick()
+    playout.submit(LOUD)
+    playout.tick()
+    assert playout.written == 2
+
+
+def test_the_duck_counts_transitions_and_failures():
+    """A failed set_volume used to vanish: False, retried on the next tick,
+    nothing recorded. The counts are what the probe and the pane publish."""
+    volume = FakeVolumeControl(ok=False)
+    duck = DuckControl(volume, object_id=7)
+
+    duck.close()
+    assert (duck.transitions, duck.failures, duck.failing) == (0, 1, True)
+
+    volume.ok = True
+    duck.close()
+    assert (duck.transitions, duck.failures, duck.failing) == (1, 1, False)
+
+    duck.open()
+    assert duck.transitions == 2
+    # Already open: neither a transition nor a failure.
+    duck.open()
+    assert (duck.transitions, duck.failures) == (2, 1)

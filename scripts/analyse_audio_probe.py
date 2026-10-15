@@ -55,8 +55,14 @@ def load(path):
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
-            if line:
-                entries.append(json.loads(line))
+            if not line:
+                continue
+            entry = json.loads(line)
+            # The playout-side records (k == "playout") carry no peaks; this
+            # script measures what the model delivered.
+            if entry.get("k") == "playout":
+                continue
+            entries.append(entry)
     return entries
 
 

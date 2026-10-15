@@ -1,6 +1,6 @@
 # Manual smoke checklist
 
-The automated suite is 441 tests that run with no audio hardware, no network
+The automated suite is 454 tests that run with no audio hardware, no network
 and no credentials. That property is why it is worth having — and it is also
 exactly why it cannot answer anything below.
 
@@ -251,6 +251,14 @@ compare the panes against what you noted at the five-minute mark:
   choice, because the threshold has only four probes behind it. An em dash
   rather than a figure is not the alarm: it means there is nothing to measure
   yet, a suspended session or one still inside its first window.
+- If the translation goes quiet while `rate` still reads 1.00x, look for
+  `SINK STALLED`: the model is delivering and the playout thread is stuck in
+  one write to `pw-cat`. That is the 2026-10-15 symptom, and before this
+  signal existed the log showed nothing for it. `DUCK FAILING` is the other
+  new name: the original is audible at full volume under the translation.
+  Both are reported only; neither is repaired yet. Run with `--probe-audio`
+  and the probe records the playout side once a second — backlog, chunks
+  written, duck state, seconds blocked — beside the model's chunks.
 
 Then the part only you can judge: **does the translation still sound
 continuous?** The drain removes non-speech from the head of the queue, so the
@@ -392,6 +400,11 @@ Everything below landed from a code review and is verified only against the
 fakes in `tests/conftest.py`. The suite cannot reach any of it, which is what
 this checklist is for — treat these as unconfirmed until it has been run:
 
+- **A stalled playout sink is named within a second.** `SINK STALLED` and
+  `DUCK FAILING` exist because of the 2026-10-15 call and have never fired on
+  a real one. Check 11's `rate` bullet says what to watch; the next time the
+  translation goes quiet with `rate` at 1.00x, note what the pane says and
+  what you hear — silence, or the original — before toggling anything.
 - **Routing defers while the duck has a node but no ports yet.** Check 2 is
   the one that would catch a regression: the call should be audible through
   the duck, not silent.

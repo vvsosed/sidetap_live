@@ -116,6 +116,47 @@ class AudioProbe:
         if len(self._buffer) >= self._flush_every:
             self._write()
 
+    def note_playout(
+        self,
+        direction: Direction,
+        *,
+        backlog_s: float,
+        written: int,
+        duck_closed: bool,
+        blocked_s: float,
+        duck_transitions: int,
+        duck_failures: int,
+    ) -> None:
+        """What playout did with the chunks, sampled once a second.
+
+        note() records what the model delivered; this records whether it was
+        played, so one file shows both ends of the chain. `blocked` is how
+        long the playout thread has been inside its current sink write - a
+        second means pw-cat has stopped draining. Keyed `k` so the analyser
+        can skip it: it carries no peaks.
+        """
+        now = self._clock()
+        if self._started is None:
+            self._started = now
+        self._buffer.append(
+            json.dumps(
+                {
+                    "k": "playout",
+                    "w": round(now - self._started, 3),
+                    "d": direction.value,
+                    "backlog": round(backlog_s, 3),
+                    "written": written,
+                    "duck": duck_closed,
+                    "blocked": round(blocked_s, 3),
+                    "duck_tr": duck_transitions,
+                    "duck_fail": duck_failures,
+                },
+                separators=(",", ":"),
+            )
+        )
+        if len(self._buffer) >= self._flush_every:
+            self._write()
+
     def close(self) -> None:
         self._write()
 
