@@ -214,6 +214,7 @@ class Session:
                 duck=duck,
                 lag_cap_s=lag_cap,
                 target_latency_s=target_latency,
+                clock=self._clock.monotonic,
             )
             self.playouts[direction] = playout
 
@@ -607,6 +608,8 @@ def _run_headless(session: Session) -> None:
     deaf: dict[Direction, bool] = {d: False for d in Direction}
     refused: dict[Direction, bool] = {d: False for d in Direction}
     thin: dict[Direction, bool] = {d: False for d in Direction}
+    stuck: dict[Direction, bool] = {d: False for d in Direction}
+    unducked: dict[Direction, bool] = {d: False for d in Direction}
     while not session.stop.is_set():
         session.stop.wait(0.5)
         snapshot = session.metrics.snapshot()
@@ -643,6 +646,31 @@ def _run_headless(session: Session) -> None:
                     state.output_ratio or 0.0,
                 )
             thin[direction] = state.starved
+
+        # The headless counterpart of the TUI's SINK STALLED: the model is
+        # delivering and the playout thread is stuck in write(), so that
+        # direction is silent and the log otherwise says nothing for 30 s.
+        for direction, state in snapshot.directions.items():
+            if state.sink_stalled and not stuck[direction]:
+                log.error(
+                    "SINK STALLED: the %s playout thread is stuck writing to "
+                    "pw-cat - it is alive but nothing is draining it, so that "
+                    "direction is silent; check `pw-link -l` for the pw-cat "
+                    "stream",
+                    direction.value,
+                )
+            stuck[direction] = state.sink_stalled
+
+        # The headless counterpart of the TUI's DUCK FAILING.
+        for direction, state in snapshot.directions.items():
+            if state.duck_failing and not unducked[direction]:
+                log.error(
+                    "DUCK FAILING: wpctl cannot set the duck's volume on the "
+                    "%s direction, so the original plays at full volume under "
+                    "the translation",
+                    direction.value,
+                )
+            unducked[direction] = state.duck_failing
 
         # The headless counterpart of the TUI's NO AUDIO ARRIVING.
         for direction, state in snapshot.directions.items():

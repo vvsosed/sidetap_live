@@ -92,6 +92,12 @@ SESSION_PROBATION_S = 10.0
 STARVED_WINDOW_S = 10.0
 STARVED_RATIO = 0.5
 
+# Seconds the playout thread may sit inside one sink write before it is
+# reported stalled. pw-cat blocks that write ~20 ms a chunk once its 16 KiB
+# pipe is full, so a full second means nothing is draining it. Never seen on
+# a real call: the longest on 2026-10-16 was 0.14 s.
+SINK_STALL_S = 1.0
+
 # Silence after which a session is closed entirely. Reopening costs a cold
 # start, paid only after most of a minute of nothing.
 IDLE_SUSPEND_S = 45.0

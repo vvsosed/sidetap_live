@@ -284,3 +284,31 @@ def test_a_sink_killed_by_a_signal_says_so_rather_than_nothing(caplog):
 
     assert sink.failed is True
     assert "killed by signal 15" in caplog.text
+
+
+def test_a_wpctl_that_never_finishes_is_logged_but_not_every_tick(monkeypatch, caplog):
+    """The timeout path returned False in silence. The duck then retries on
+    the next speech tick, 20 ms later, so the log must say so - once per
+    window, not fifty times a second."""
+    import logging
+
+    from sidetap_live.adapters import VOLUME_WARN_EVERY_S, WpctlVolumeControl
+    from tests.conftest import FakeClock
+
+    def hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr("sidetap_live.adapters.subprocess.run", hang)
+    monkeypatch.setattr("sidetap_live.adapters.require_tool", lambda name: name)
+    clock = FakeClock()
+    control = WpctlVolumeControl(clock=clock.monotonic)
+
+    with caplog.at_level(logging.WARNING, logger="sidetap_live.adapters"):
+        assert control.set_volume(42, 0.0) is False
+        assert control.set_volume(42, 0.0) is False
+        clock.now += VOLUME_WARN_EVERY_S
+        assert control.set_volume(42, 0.0) is False
+
+    warned = [r.getMessage() for r in caplog.records if "wpctl" in r.getMessage()]
+    assert len(warned) == 2, warned
+    assert "did not finish" in warned[0]

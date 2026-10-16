@@ -54,7 +54,10 @@ def format_rotations(total: int, forced: int) -> str:
     return f"{total}" if forced == 0 else f"{total} ({forced} forced)"
 
 
-def format_state(state: SessionState) -> str:
+def format_state(state: SessionState, held_by: str | None = None) -> str:
+    # A bare "suspended" beside a lit key was reported as a fault twice.
+    if state is SessionState.SUSPENDED and held_by:
+        return f"{state.value} ({held_by})"
     return state.value
 
 
@@ -144,15 +147,30 @@ class SidetapLiveApp(App):
                 alarm = "  NO AUDIO ARRIVING"
             elif state.dead_air:
                 alarm = "  DEAD AIR"
+            elif state.sink_stalled:
+                # The model is delivering and the playout thread is stuck in
+                # write(): none of the other three describes it, and each
+                # would send the user to the wrong fix.
+                alarm = "  SINK STALLED"
             elif state.starved:
                 # A third name, because the fix differs: the session is up
                 # and delivering a fraction of a stream that is meant to be
                 # continuous, so it wants replacing, not restarting.
                 alarm = "  OUTPUT STALLING"
+            elif state.duck_failing:
+                # The translation plays; the original is not being muted
+                # under it.
+                alarm = "  DUCK FAILING"
             else:
                 alarm = ""
+            held_by = None
+            if snapshot.bypassed:
+                held_by = "bypass"
+            elif direction is Direction.OUT and snapshot.muted_out:
+                held_by = "mute"
             self.query_one(f"#stats-{suffix}", Static).update(
-                f"session {health_marker(state.session)} {format_state(state.session_state)}   "
+                f"session {health_marker(state.session)} "
+                f"{format_state(state.session_state, held_by)}   "
                 f"backlog {format_lag(state.backlog_s)}   "
                 f"offset {format_lag(state.offset_s)}   "
                 f"rot {format_rotations(state.rotations, state.forced_rotations)}   "
@@ -175,6 +193,8 @@ class SidetapLiveApp(App):
                 state.dead_air
                 or state.no_audio
                 or state.starved
+                or state.sink_stalled
+                or state.duck_failing
                 or bool(state.session_error),
                 "alarm",
             )

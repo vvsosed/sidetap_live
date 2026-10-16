@@ -791,3 +791,34 @@ def test_headless_reports_a_starved_output_stream(caplog):
 
     said = "\n".join(r.getMessage() for r in caplog.records)
     assert "0.28" in said, f"the ratio never reached the log: {said!r}"
+
+
+def test_headless_reports_a_sink_that_stopped_draining(caplog):
+    """Same signal as the SINK STALLED pane alarm, for --no-tui: the model is
+    delivering and the playout thread is stuck in write(), so the headphones
+    get nothing and the log otherwise says nothing for 30 s."""
+    from sidetap_live.run import _run_headless
+
+    session = _StubHeadlessSession()
+    session.metrics.set_sink_stalled(Direction.IN, True)
+
+    with caplog.at_level(logging.ERROR, logger="sidetap_live.run"):
+        _run_headless(session)
+
+    assert any("SINK STALLED" in r.message for r in caplog.records), (
+        "headless never reported that playout had stopped draining"
+    )
+
+
+def test_headless_reports_a_duck_that_cannot_move(caplog):
+    """A duck that cannot close plays the original at full volume under
+    every translation, and until now did it in silence."""
+    from sidetap_live.run import _run_headless
+
+    session = _StubHeadlessSession()
+    session.metrics.set_duck(Direction.IN, transitions=4, failures=2, failing=True)
+
+    with caplog.at_level(logging.ERROR, logger="sidetap_live.run"):
+        _run_headless(session)
+
+    assert any("DUCK FAILING" in r.message for r in caplog.records)
