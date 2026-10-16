@@ -1437,12 +1437,11 @@ from tests.conftest import FakeVolumeControl
 
 
 def test_a_sink_that_stops_draining_is_reported_once_and_cleared(caplog):
-    """On 2026-10-15 translation went quiet mid-call with the model delivering
-    speech at 1.00x - and the log showed nothing, because a stalled sink only
-    surfaces as the 30 s lag-cap warning, which the bypass flush erased. The
-    pump checks the playout thread's write from its own thread, on every
-    block, SUSPENDED included: a stall while suspended still blocks the
-    thread, so nothing would play on wake."""
+    """A stalled sink would otherwise surface only as the 30 s lag-cap
+    warning, which the bypass flush erases. The pump checks the playout
+    thread's write from its own thread, on every block, SUSPENDED included:
+    a stall while suspended still blocks the thread, so nothing would play
+    on wake."""
     from sidetap_live.types import SINK_STALL_S
 
     interpreter, _, metrics, _ = build()

@@ -26,7 +26,7 @@ interpreter, which is answerable without a baseline.
 
 `sidetap_live/` is the application; see **Architecture** below.
 
-`tests/` holds **454 tests that run with no audio hardware, no network and no
+`tests/` holds **457 tests that run with no audio hardware, no network and no
 credentials** — every subprocess, socket and clock sits behind a `Protocol` in
 `ports.py`, with a real implementation in `adapters.py` and a fake in
 `tests/conftest.py`. Verify that property still holds with:
@@ -83,7 +83,7 @@ pw-cli --version                   # needs >= 0.3.60
 pw-dump | head                     # graph as JSON
 wpctl status                       # sinks/sources, incl. this program's nodes
 
-uv run pytest -q                                    # 454 tests, no audio/network/creds
+uv run pytest -q                                    # 457 tests, no audio/network/creds
 uvx ruff check .                                    # lint; CI runs this too
 uv run sidetap-live devices                         # run this MID-CALL, not before
 uv run sidetap-live doctor                          # environment checks
@@ -224,7 +224,7 @@ preference and these are not.
   with nothing on screen explaining why.
 - **Third-party imports are lazy**, inside the function bodies that need them —
   `google.genai` in `live.py`, `cli.py` and `run.py`; `webrtcvad` in
-  `activity.py`. This is what lets 454 tests import the package with no
+  `activity.py`. This is what lets 457 tests import the package with no
   credentials configured at all.
 - **Every state transition happens on the pump thread; the receive thread only
   records.** `Closed` sets a flag, a handle is stored — and the pump acts on
@@ -393,26 +393,20 @@ preference and these are not.
   passed every offline test and failed on a live call. **Never average over a
   whole call**: `20261013-100146` reads 0.909x overall and swings 0.20x→2.08x
   per window, because averaging over a stall hides the stall.
-- **A playout sink that stops draining is invisible for 30 s, and bypass
-  erases the evidence.** `pw-cat` paces playout by blocking `sink.write()`
-  one chunk at a time, ~20 ms; if PipeWire stops driving its stream the
-  thread blocks for good, the queue grows a second per second, and the first
-  sign is the lag cap at `LAG_CAP_S` — unless bypass is engaged first,
-  because `set_suppressed` flushes the queue. On 2026-10-15 translation went
-  quiet mid-call with the probe showing the model delivering speech at
-  **1.00x realtime right through the keypress**, and the log recorded
-  nothing. So `_check_sink` runs on the pump every block, SUSPENDED
-  included, reads how long the playout thread has been inside its current
-  write, and reports past `SINK_STALL_S` as `sink_stalled` — `SINK STALLED`
-  on the pane, an error under `--no-tui`. Judged from the pump because the
-  thread that could notice is the one stuck. **It only reports**: the cause
-  is not established, and respawning `pw-cat` on a guess is the kind of fix
-  this project's history warns about. The same pass publishes the duck's
-  counters, because a failed `wpctl` returned `False` in silence and was
-  retried every 20 ms tick — `DUCK FAILING` means the original is playing at
-  full volume under the translation — and, with `--probe-audio`, writes a
-  playout-side record once a second so one probe shows both ends of the
-  chain.
+- **A playout sink that stops draining would be invisible for 30 s, and
+  bypass would erase the evidence.** `pw-cat` paces playout by blocking
+  `sink.write()` ~20 ms a chunk; a stream PipeWire stopped driving would
+  block the thread for good, and the first sign would be the lag cap —
+  unless bypass flushed the queue first. So `_check_sink` reads, on the pump
+  every block, how long the playout thread has been inside its current write
+  and reports past `SINK_STALL_S` as `SINK STALLED`; the same pass publishes
+  the duck's counters as `DUCK FAILING`, since a failed `wpctl` used to fail
+  in silence, and with `--probe-audio` writes a playout-side record once a
+  second. **Neither has fired on a real call.** They were built for the
+  2026-10-15 report of translation stopping after bypass, which the
+  2026-10-16 probe showed was `SUPPRESSED_SUSPEND_S` doing its job: twelve
+  bypasses, every suspend 30.0 s after `bypass engaged`, longest write block
+  0.14 s, no duck failure. The pane now says `suspended (bypass)`.
 - **A direction that cannot keep a session says why on screen, not only in the
   log.** Under the TUI logging goes to a file nobody is watching, so the
   server's own message — which names the cause and sometimes carries the URL

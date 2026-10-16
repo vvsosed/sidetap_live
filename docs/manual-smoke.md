@@ -1,6 +1,6 @@
 # Manual smoke checklist
 
-The automated suite is 454 tests that run with no audio hardware, no network
+The automated suite is 457 tests that run with no audio hardware, no network
 and no credentials. That property is why it is worth having — and it is also
 exactly why it cannot answer anything below.
 
@@ -253,12 +253,13 @@ compare the panes against what you noted at the five-minute mark:
   yet, a suspended session or one still inside its first window.
 - If the translation goes quiet while `rate` still reads 1.00x, look for
   `SINK STALLED`: the model is delivering and the playout thread is stuck in
-  one write to `pw-cat`. That is the 2026-10-15 symptom, and before this
-  signal existed the log showed nothing for it. `DUCK FAILING` is the other
-  new name: the original is audible at full volume under the translation.
-  Both are reported only; neither is repaired yet. Run with `--probe-audio`
-  and the probe records the playout side once a second — backlog, chunks
-  written, duck state, seconds blocked — beside the model's chunks.
+  one write to `pw-cat`. `DUCK FAILING` is the other name: the original is
+  audible at full volume under the translation. Neither has fired on a real
+  call; the 2026-10-15 report that prompted them was bypass's own 30 s
+  suspend, now labelled `suspended (bypass)` on the pane. Both are reported
+  only. Run with `--probe-audio` and the probe records the playout side once
+  a second — backlog, chunks written, duck state, seconds blocked — beside
+  the model's chunks.
 
 Then the part only you can judge: **does the translation still sound
 continuous?** The drain removes non-speech from the head of the queue, so the
@@ -296,8 +297,9 @@ to be true on release, and only an ear can check them:
   heard. The pre-roll spans the release boundary and is cleared for exactly
   this reason; if they heard it, that is a serious bug, not a tuning problem.
 
-Watch `session` in the pane go `suspended` while muted and back to `running`
-on release. `rot` must not climb — a mute is not a rotation.
+Watch `session` in the pane go `suspended (mute)` after 30 s muted, and
+`suspended (bypass)` under `b`, then back to `running` on release. `rot` must
+not climb — a mute is not a rotation.
 
 Afterwards, confirm it in the log rather than trusting memory:
 
@@ -401,10 +403,10 @@ fakes in `tests/conftest.py`. The suite cannot reach any of it, which is what
 this checklist is for — treat these as unconfirmed until it has been run:
 
 - **A stalled playout sink is named within a second.** `SINK STALLED` and
-  `DUCK FAILING` exist because of the 2026-10-15 call and have never fired on
-  a real one. Check 11's `rate` bullet says what to watch; the next time the
-  translation goes quiet with `rate` at 1.00x, note what the pane says and
-  what you hear — silence, or the original — before toggling anything.
+  `DUCK FAILING` have never fired on a real call; the 2026-10-16 call ran
+  38 minutes on them without a false alarm. The next time the translation
+  goes quiet with `rate` at 1.00x, note what the pane says and what you
+  hear — silence, or the original — before toggling anything.
 - **Routing defers while the duck has a node but no ports yet.** Check 2 is
   the one that would catch a regression: the call should be audible through
   the duck, not silent.

@@ -448,15 +448,11 @@ class DirectionInterpreter:
     def _check_sink(self) -> None:
         """Is the playout thread stuck inside a sink write?
 
-        pw-cat paces playout by blocking one chunk at a time, ~20 ms. On
-        2026-10-15 translation went quiet mid-call with the model delivering
-        speech at 1.00x realtime - and the log showed nothing, because a sink
-        that stops draining only surfaces as the lag-cap warning 30 s later,
-        and engaging bypass flushes the queue first. The thread that could
-        notice is the one stuck, so the pump reads the write's start time.
-
-        Also where the duck's counters and the probe's playout-side record
-        are published: everything downstream of submit(), once per block.
+        pw-cat paces playout by blocking one chunk at a time, ~20 ms. A sink
+        that stopped draining would otherwise surface only as the lag cap
+        30 s later, and a bypass flushes the queue first. The thread that
+        could notice is the one stuck, so the pump reads the write's start.
+        Also publishes the duck's counters and the probe's playout record.
         """
         blocked = self._playout.write_blocked_s()
         stalled = blocked >= SINK_STALL_S

@@ -224,11 +224,10 @@ session is a rock — 0.97–1.05x across 133 consecutive windows of a 22-minute
 call. Under 0.5x the pane lights `OUTPUT STALLING`: the session is up, the
 transcription is still arriving, and a fraction of the audio is. Nothing
 recovers from that automatically; quit and start again. `SINK STALLED` is the
-opposite case — the model is delivering, `rate` reads 1.00x, and the playout
-thread has been stuck inside one write to `pw-cat` for over a second, so the
-audio is reaching nobody; it is reported, not yet repaired. `DUCK FAILING`
-means `wpctl` cannot set the duck's volume, so the original is playing at
-full volume under the translation. And when a direction
+opposite case — the model is delivering and the playout thread has been stuck
+inside one write to `pw-cat` for over a second. `DUCK FAILING` means `wpctl`
+cannot set the duck's volume, so the original is playing at full volume under
+the translation. Neither has fired on a real call. And when a direction
 cannot keep a session at all, the server's own words — which name the cause
 and sometimes carry the URL that clears it — are printed in red in that
 direction's pane, because under the TUI the log is a file nobody is watching.
@@ -249,7 +248,9 @@ conversation it was meant to replace:
 1. The duck opens and stays open: you hear the remote party's own voice.
 2. Your real microphone is linked straight into the virtual mic: they hear
    your own voice, untranslated.
-3. Playout on both directions is suppressed.
+3. Playout on both directions is suppressed, and after 30 s the sessions
+   close: the pane reads `suspended (bypass)`, or `suspended (mute)` under
+   `m`, until you release it.
 
 `m` (mute) stops sending your translated voice without leaving the call.
 Pressed while bypassed it changes what you come back to, not what bypass is
@@ -353,7 +354,7 @@ Real, current limitations — not aspirational TODOs.
   ru↔en Teams calls, and three of this program's worst bugs passed every
   offline test and showed up only on one. What those calls did not cover is
   `docs/manual-smoke.md`, worked through as a checklist: fifteen items, every
-  one of them something the 454 automated tests structurally cannot reach, and
+  one of them something the 457 automated tests structurally cannot reach, and
   a list at its end of changes no run has exercised yet.
 
 ## More detail

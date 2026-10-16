@@ -10,6 +10,7 @@ from sidetap_live.tui import (
     SidetapLiveApp,
     format_lag,
     format_rotations,
+    format_state,
     health_marker,
 )
 from sidetap_live.types import Direction, SessionState
@@ -455,10 +456,9 @@ async def test_a_starved_output_stream_is_named_in_the_pane():
 
 @pytest.mark.asyncio
 async def test_a_stalled_sink_is_named_on_the_pane():
-    """The session is up and the model is delivering - the probe showed
-    1.00x with speech on 2026-10-15 - and nothing reaches the headphones.
-    None of NO AUDIO, DEAD AIR or OUTPUT STALLING describes that, and each
-    would send the user to the wrong fix."""
+    """The session is up and the model is delivering, and nothing reaches
+    the headphones. None of NO AUDIO, DEAD AIR or OUTPUT STALLING describes
+    that, and each would send the user to the wrong fix."""
     from textual.widgets import Static
 
     metrics = Metrics()
@@ -486,3 +486,47 @@ async def test_a_duck_that_is_not_responding_is_named_on_the_pane():
         line = str(app.query_one("#stats-in", Static).content)
         assert "DUCK FAILING" in line, line
         assert app.query_one("#pane-in").has_class("alarm")
+
+
+def test_the_hold_is_named_only_on_a_suspended_direction():
+    """During the 30 s grace the session is still running under bypass."""
+    assert format_state(SessionState.SUSPENDED, "bypass") == "suspended (bypass)"
+    assert format_state(SessionState.SUSPENDED, None) == "suspended"
+    assert format_state(SessionState.RUNNING, "bypass") == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_direction_suspended_by_bypass_says_so():
+    """Bypass closes both directions after SUPPRESSED_SUSPEND_S by design, and
+    a bare `suspended` beside a lit key was reported as a fault twice."""
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    metrics.set_session_state(Direction.IN, SessionState.SUSPENDED)
+    metrics.set_session_state(Direction.OUT, SessionState.RUNNING)
+    metrics.set_bypassed(True)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        line_in = str(app.query_one("#stats-in", Static).content)
+        line_out = str(app.query_one("#stats-out", Static).content)
+        assert "suspended (bypass)" in line_in, line_in
+        assert "running" in line_out and "(bypass)" not in line_out, line_out
+
+
+@pytest.mark.asyncio
+async def test_a_direction_suspended_by_mute_says_so_on_out_only():
+    """Mute suppresses OUT alone, so an idle-suspended IN is not its doing."""
+    from textual.widgets import Static
+
+    metrics = Metrics()
+    metrics.set_session_state(Direction.IN, SessionState.SUSPENDED)
+    metrics.set_session_state(Direction.OUT, SessionState.SUSPENDED)
+    metrics.set_muted_out(True)
+    app = SidetapLiveApp(metrics=metrics, session=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        line_in = str(app.query_one("#stats-in", Static).content)
+        line_out = str(app.query_one("#stats-out", Static).content)
+        assert "suspended (mute)" in line_out, line_out
+        assert "suspended" in line_in and "(mute)" not in line_in, line_in
